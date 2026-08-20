@@ -15,6 +15,8 @@ import { snapshotJsonValue } from '@deepseek-ai/dsh-session'
 import type { JsonValue, UserMessage } from '@deepseek-ai/dsh-session'
 import type { ToolProviderResult } from '@deepseek-ai/dsh-system-prompt'
 import type { CodeRuntime } from '@deepseek-ai/dsh-code-runtime'
+import { ToolBodyId } from '@deepseek-ai/dsh-tool-executor'
+import type { ToolExecutionOutcome, ToolExecutionRequest, ToolExecutionValue } from '@deepseek-ai/dsh-tool-executor'
 // Type-only: makes `ctx.get('approval')` resolve to the ApprovalService
 // augmentation. The seam stays optional at runtime — see `serviceAsk`.
 import type {} from '@deepseek-ai/dsh-user-approval'
@@ -808,6 +810,10 @@ export class ToolRuntime extends Service {
   private cancellationStates = new WeakMap<ToolRunContext, ToolCancellationState>()
   /** Definition-owned final content transform snapshotted before policy begins. */
   private contentFinalizers = new WeakMap<ToolRunContext, ToolDefinition['finalizeContent']>()
+  /** Execution-body ids minted at registration, keyed by definition. */
+  private readonly bodyIds = new WeakMap<ToolDefinition, ToolBodyId>()
+  /** Monotonic suffix so distinct same-named definitions (scoped shadows) get distinct ids. */
+  private bodySequence = 0
   private readonly layers = new ScopedLayers(
     scope => new ToolLayer(scope),
     () => { this.ctx.emit('tools/change') },
@@ -1054,11 +1060,30 @@ export class ToolRuntime extends Service {
     if (name === RUN_CODE_NAME) {
       throw new Error(`tool name "${RUN_CODE_NAME}" is reserved for the Code Mode presentation transport and cannot be registered or shadowed`)
     }
+    // Mint the execution-body id before the definition becomes visible, so the
+    // dispatch cut point can address this exact body through the tool-execution seam.
+    this.bodyIdOf(definition)
     return this.layers.effect(
       this.ctx,
       layer => layer.tools.insert(name, definition),
       { label: 'tools.register()' },
     )
+  }
+
+  /**
+   * The stable execution-body id minted when a definition registers. The same
+   * definition re-registered across scopes keeps one id; distinct same-named
+   * definitions (scoped shadows) mint distinct ids. Read only by the dispatch
+   * cut point to address a body through the tool-execution seam.
+   * @internal
+   */
+  private bodyIdOf(definition: ToolDefinition): ToolBodyId {
+    let id = this.bodyIds.get(definition)
+    if (id === undefined) {
+      id = ToolBodyId(`${definition.name}:${++this.bodySequence}`)
+      this.bodyIds.set(definition, id)
+    }
+    return id
   }
 
   /**
@@ -1546,7 +1571,7 @@ export class ToolRuntime extends Service {
       const tool = this.resolveExecution(exec.name, exec.agent, exec.parent !== undefined)
       if (!tool) throw new ToolNotFoundError(exec.name)
       state.bodyInvoked = true
-      const returned = await tool.execute(exec.arguments, exec)
+      const returned = await this.dispatchBody(tool, exec, signal)
       const result = this.createSuccessResult(exec, tool, returned)
       return isAborted(signal)
         ? toolAbortedResult(result)
@@ -1557,6 +1582,33 @@ export class ToolRuntime extends Service {
       fused.dispose()
       exec.signal = wrapperSignal
     }
+  }
+
+  /**
+   * Run the resolved body through the tool-execution seam when a `toolExecutor`
+   * provider is mounted, else directly. The registry always supplies the local
+   * body (the full execution context runs in this process); a cross-process
+   * provider ignores it and resolves `toolId` in its own world. A body rejection
+   * propagates unchanged so the registry's error path sees the original error;
+   * an executor-reported failure becomes a normal tool error.
+   * @internal
+   */
+  private async dispatchBody(tool: ToolDefinition, exec: ToolRunContext, signal: AbortSignal): Promise<unknown> {
+    const executor = this.ctx.get('toolExecutor')
+    if (executor === undefined) {
+      return tool.execute(exec.arguments, exec)
+    }
+    const request: ToolExecutionRequest = {
+      toolId: this.bodyIdOf(tool),
+      arguments: exec.arguments as ToolExecutionValue,
+      signal,
+      body: args => tool.execute(args, exec) as Promise<ToolExecutionValue>,
+    }
+    const outcome: ToolExecutionOutcome = await executor.execute(request)
+    if (outcome.failure !== undefined) {
+      throw new Error(`tool "${exec.name}" execution failed in the execution world (${outcome.failure.kind}): ${outcome.failure.message}`)
+    }
+    return outcome.value
   }
 
   /**

@@ -199,6 +199,8 @@
     { "path": "./packages/terminal/tool-terminal" },
     { "path": "./packages/code-runtime/code-runtime" },
     { "path": "./packages/code-runtime/code-runtime-worker-thread" },
+    { "path": "./packages/tool-executor/tool-executor" },
+    { "path": "./packages/tool-executor/tool-executor-in-process" },
     { "path": "./packages/llm/llm-deepseek" },
     { "path": "./packages/llm/llm-pi-ai" },
     { "path": "./packages/shell/bash-local" },

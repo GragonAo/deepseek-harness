@@ -15,6 +15,9 @@
       "path": "../../code-runtime/code-runtime"
     },
     {
+      "path": "../../tool-executor/tool-executor"
+    },
+    {
       "path": "../../../vendor/cosmokit"
     },
     {
