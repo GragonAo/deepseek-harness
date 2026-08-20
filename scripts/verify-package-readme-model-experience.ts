@@ -53,6 +53,7 @@ const SENTENCE_MODEL_EXPERIENCE: Readonly<Record<string, SentenceContract>> = {
   'packages/code-runtime/code-runtime-worker-thread': { kind: 'indirect', reason: 'The worker backend delegates model rendering to Code Mode in dsh-tools.' },
   'packages/tool-executor/tool-executor': { kind: 'none', reason: 'The abstract seam registers no model context; the tool registry owns any rendered effect once a provider is mounted.' },
   'packages/tool-executor/tool-executor-in-process': { kind: 'none', reason: 'The provider only forwards the tool registry\'s inline bodies in-process and adds no model-visible content.' },
+  'packages/tool-executor/tool-executor-process': { kind: 'none', reason: 'The provider only routes the tool registry\'s body executions into a worker process and adds no model-visible content.' },
   'packages/client/ui-agent-preset': { kind: 'indirect', reason: 'Browser-side settings row; the preset it selects owns every model-facing effect.' },
   'packages/core/agent-default-model': { kind: 'indirect', reason: 'The service supplies a ModelSelection; request assembly and adapters own the model-visible request.' },
   'packages/preset/agent-presets': { kind: 'indirect', reason: 'The mount installs a preset\'s own plugins, which own every model-facing registration it makes visible.' },

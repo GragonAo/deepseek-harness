@@ -1588,7 +1588,7 @@ export class ToolRuntime extends Service {
    * Run the resolved body through the tool-execution seam when a `toolExecutor`
    * provider is mounted, else directly. The registry always supplies the local
    * body (the full execution context runs in this process); a cross-process
-   * provider ignores it and resolves `toolId` in its own world. A body rejection
+   * provider ignores it and resolves the tool's `name` in its own world. A body rejection
    * propagates unchanged so the registry's error path sees the original error;
    * an executor-reported failure becomes a normal tool error.
    * @internal
@@ -1600,6 +1600,7 @@ export class ToolRuntime extends Service {
     }
     const request: ToolExecutionRequest = {
       toolId: this.bodyIdOf(tool),
+      name: tool.name,
       arguments: exec.arguments as ToolExecutionValue,
       signal,
       body: args => tool.execute(args, exec) as Promise<ToolExecutionValue>,

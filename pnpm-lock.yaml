@@ -7857,6 +7857,34 @@ importers:
         specifier: workspace:^
         version: link:../tool-executor
 
+  packages/tool-executor/tool-executor-process:
+    dependencies:
+      '@deepseek-ai/schemastery':
+        specifier: link:../../../vendor/schemastery
+        version: link:../../../vendor/schemastery
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: workspace:^
+        version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-invariants':
+        specifier: workspace:^
+        version: link:../../runtime-diagnostics/invariants
+      '@deepseek-ai/dsh-llm':
+        specifier: workspace:^
+        version: link:../../llm/llm
+      '@deepseek-ai/dsh-system-prompt':
+        specifier: workspace:^
+        version: link:../../core/system-prompt
+      '@deepseek-ai/dsh-tool-executor':
+        specifier: workspace:^
+        version: link:../tool-executor
+      '@deepseek-ai/dsh-tools':
+        specifier: workspace:^
+        version: link:../../core/tools
+      tsx:
+        specifier: ^4.19.2
+        version: 4.22.4
+
   packages/typert/generator:
     dependencies:
       '@jridgewell/gen-mapping':

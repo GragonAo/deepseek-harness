@@ -62,8 +62,14 @@ export interface ToolExecutionFailure {
  * a request carries no optional tuning knobs for a hidden `??` to fill in.
  */
 export interface ToolExecutionRequest {
-  /** Identifies the body to run in the execution world. */
+  /** Agent-plane diagnostic identity for this execution (per-body mint). */
   toolId: ToolBodyId
+  /**
+   * The tool's stable control-plane name. A cross-process world resolves this
+   * against its own body registry — the {@link body} function cannot cross a
+   * process boundary; `toolId` does not travel as a resolution key.
+   */
+  name: string
   /** The validated, losslessly snapshotted arguments. */
   arguments: ToolExecutionValue
   /** Cancel the execution; see {@link ToolBodyContext.signal}. */
@@ -71,7 +77,7 @@ export interface ToolExecutionRequest {
   /**
    * The body to run, supplied by the tool registry for execution in this
    * process. A cross-process world ignores it — a function cannot cross a
-   * process boundary — and resolves `toolId` against its own registry instead.
+   * process boundary — and resolves {@link name} against its own registry.
    */
   body?: ToolBody
 }

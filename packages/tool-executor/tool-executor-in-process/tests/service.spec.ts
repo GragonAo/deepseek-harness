@@ -20,6 +20,7 @@ describe('InProcessToolExecutor provider', () => {
     const { executor } = await setup()
     const result = await executor.execute({
       toolId: ToolBodyId('stub'),
+      name: 'stub',
       arguments: { probe: true },
       signal: new AbortController().signal,
       body: async args => args,
@@ -32,6 +33,7 @@ describe('InProcessToolExecutor provider', () => {
     const boom = new Error('boom')
     await expect(executor.execute({
       toolId: ToolBodyId('stub'),
+      name: 'stub',
       arguments: null,
       signal: new AbortController().signal,
       body: async () => { throw boom },
@@ -44,6 +46,7 @@ describe('InProcessToolExecutor provider', () => {
     controller.abort('cancelled')
     const result = await executor.execute({
       toolId: ToolBodyId('stub'),
+      name: 'stub',
       arguments: null,
       signal: controller.signal,
     })
@@ -54,6 +57,7 @@ describe('InProcessToolExecutor provider', () => {
     const { executor } = await setup()
     const result = await executor.execute({
       toolId: ToolBodyId('missing'),
+      name: 'missing',
       arguments: null,
       signal: new AbortController().signal,
     })

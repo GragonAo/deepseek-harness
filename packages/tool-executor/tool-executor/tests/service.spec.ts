@@ -39,12 +39,14 @@ describe('ToolExecutor service seam', () => {
 
     const result = await executor.execute({
       toolId: ToolBodyId('stub'),
+      name: 'stub',
       arguments: { probe: true },
       signal: new AbortController().signal,
     })
     expect(result).toEqual({ value: null })
     expect(executor.requests).toHaveLength(1)
     expect(executor.requests[0]?.toolId).toBe(ToolBodyId('stub'))
+    expect(executor.requests[0]?.name).toBe('stub')
     expect(executor.requests[0]?.arguments).toEqual({ probe: true })
   })
 
@@ -53,6 +55,7 @@ describe('ToolExecutor service seam', () => {
     executor.nextOutcome = { failure: { kind: 'exception', message: 'boom' } }
     const result = await executor.execute({
       toolId: ToolBodyId('stub'),
+      name: 'stub',
       arguments: null,
       signal: new AbortController().signal,
     })
@@ -65,6 +68,7 @@ describe('ToolExecutor service seam', () => {
     const n = 2
     const result = await executor.execute({
       toolId: ToolBodyId('stub'),
+      name: 'stub',
       arguments: { n },
       signal: new AbortController().signal,
       body: async args => ({ doubled: (args as { n: number }).n * 2 }),
@@ -78,6 +82,7 @@ describe('ToolExecutor service seam', () => {
     controller.abort('cancelled')
     const result = await executor.execute({
       toolId: ToolBodyId('stub'),
+      name: 'stub',
       arguments: null,
       signal: controller.signal,
     })
