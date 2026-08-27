@@ -153,7 +153,7 @@ Source: [`packages/host/directory-picker/src/index.ts:131`](../../packages/host/
 
 ### `ctx.workspaceRegistry` — `WorkspaceRegistry`
 
-Durable workspace registry. Startup waits for `sessionPersistence`, builds one canonical-cwd header index, and completes the one-time history bootstrap before the service becomes active. The persistence dependency is mandatory so an unavailable peer can never be mistaken for an empty history and commit the initialized marker.
+Durable workspace registry. Startup waits for `sessionPersistence`, builds one canonical-cwd header index, and completes the one-time history bootstrap before the service becomes active. The persistence dependency is mandatory so an unavailable peer can never be mistaken for an empty history and commit the initialized marker. Every partition's state is keyed by tenant id (`undefined` for the single-user partition); see the module JSDoc for the multi-tenant lazy/tenant-switch contract.
 
 ```ts cordis-catalog
 /**
@@ -170,16 +170,19 @@ Durable workspace registry. Startup waits for `sessionPersistence`, builds one c
 async create(path: string, title?: string): Promise<Workspace>
 
 /**
- * Look up a workspace by id.
+ * Look up a workspace by id for the ambient tenant. Uninitialized
+ * partitions serve `undefined` (no cross-tenant leak).
  * @param id - Workspace id.
- * @returns the workspace, or `undefined` when unknown.
+ * @returns the workspace, or `undefined` when unknown or uninitialized.
  */
 get(id: WorkspaceId): Workspace | undefined
 
 /**
- * Synchronous workspace projection in durable registry order. Every
- * entity's `sessionIds` getter is already filtered by the startup/live
- * canonical-cwd header index; this method performs no persistence reads.
+ * Synchronous workspace projection for the ambient tenant in durable
+ * registry order. An uninitialized partition (multi-tenant boot, or a
+ * tenant whose domain has not yet been opened) projects as empty rather
+ * than failing. Every entity's `sessionIds` getter is already filtered by the
+ * startup/live canonical-cwd header index; this method performs no persistence reads.
  * @returns a fresh ordered array of workspace entities.
  */
 list(): Workspace[]
@@ -192,7 +195,7 @@ list(): Workspace[]
  * @param id - Workspace registration to remove.
  * @returns `true` when a record was deleted, `false` when it was unknown.
  */
-delete(id: WorkspaceId): Promise<boolean>
+async delete(id: WorkspaceId): Promise<boolean>
 
 /**
  * Move one workspace within the durable display order, DOM-insertBefore-like.
@@ -201,7 +204,7 @@ delete(id: WorkspaceId): Promise<boolean>
  * @param beforeId - Workspace anchor; omitted appends.
  * @returns the complete committed workspace order.
  */
-insertBefore(id: WorkspaceId, beforeId?: WorkspaceId): Promise<readonly WorkspaceId[]>
+async insertBefore(id: WorkspaceId, beforeId?: WorkspaceId): Promise<readonly WorkspaceId[]>
 
 /**
  * Archive one session durably. The session must exist (live or in session
@@ -210,7 +213,7 @@ insertBefore(id: WorkspaceId, beforeId?: WorkspaceId): Promise<readonly Workspac
  * @param sessionId - The session to archive.
  * @returns resolution after durability.
  */
-archiveSession(sessionId: SessionId): Promise<void>
+async archiveSession(sessionId: SessionId): Promise<void>
 
 /**
  * Resolve by canonical directory path without creating or mutating a
@@ -224,5 +227,5 @@ async resolveByPath(path: string): Promise<Workspace | undefined>
 
 Types: [SessionId](core.md)
 
-Source: [`packages/workspace/workspace/src/index.ts:92`](../../packages/workspace/workspace/src/index.ts)
+Source: [`packages/workspace/workspace/src/index.ts:118`](../../packages/workspace/workspace/src/index.ts)
 <!-- END GENERATED cordis-surface -->

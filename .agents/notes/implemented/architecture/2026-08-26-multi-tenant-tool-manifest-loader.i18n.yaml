@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-26-multi-tenant-tool-manifest-loader.md
+2026-08-26-multi-tenant-tool-manifest-loader.md: 0f0d2a580bab6a12c97dfea26903023ea3c7e23d
+2026-08-26-multi-tenant-tool-manifest-loader.zh.md: 92a89b938e712f64df70931b51c9979736795707

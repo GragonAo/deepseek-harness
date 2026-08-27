@@ -1,0 +1,57 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib/types"
+  },
+  "include": [
+    "src"
+  ],
+  "references": [
+    {
+      "path": "../../../vendor/cosmokit"
+    },
+    {
+      "path": "../../../vendor/cordis"
+    },
+    {
+      "path": "../../host/webserver"
+    },
+    {
+      "path": "../../core/session"
+    },
+    {
+      "path": "../../session/session-persistence"
+    },
+    {
+      "path": "../../subprocess/subprocess"
+    },
+    {
+      "path": "../../fs/fs"
+    },
+    {
+      "path": "../tenant"
+    },
+    {
+      "path": "../tenant-auth-jwt"
+    },
+    {
+      "path": "../session-persistence-postgres"
+    },
+    {
+      "path": "../container-docker"
+    },
+    {
+      "path": "../subprocess-container"
+    },
+    {
+      "path": "../fs-container"
+    },
+    {
+      "path": "../api-http"
+    },
+    {
+      "path": "../../runtime-diagnostics/invariants"
+    }
+  ]
+}

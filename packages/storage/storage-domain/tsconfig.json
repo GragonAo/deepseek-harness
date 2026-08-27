@@ -21,6 +21,9 @@
       "path": "../storage"
     },
     {
+      "path": "../../tenant/tenant"
+    },
+    {
       "path": "../../runtime-diagnostics/invariants"
     }
   ]

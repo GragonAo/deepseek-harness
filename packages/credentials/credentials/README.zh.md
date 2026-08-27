@@ -31,7 +31,7 @@ await ctx.credentials.unset(ref)                         // no-op when absent; s
 
 ## 提供方
 
-[`dsh-credentials-local`](../credentials-local/README.md) 把继承的进程环境叠加在其受管 `$DSH_HOME/.credentials.yaml` 文档之上，并以启动器的项目和用户 `.env` 层作为后备。该 seam 的接口为 keyring、辅助命令和 KMS 后端提供方预留了扩展空间；远端设置提供方永远不必携带机密。
+[`dsh-credentials-local`](../credentials-local/README.md) 把继承的进程环境叠加在其受管 `.credentials.yaml` 文档之上——按租户隔离到各自的 `<tenant.dataRoot>/.credentials.yaml`，租户作用域之外则为 `$DSH_HOME/.credentials.yaml`——并以启动器的项目和用户 `.env` 层作为后备。该 seam 本身是无状态的：它既不缓存已解析的凭据，也不缓存文档，因此租户隔离完全由提供方在每次调用时完成。该 seam 的接口为 keyring、辅助命令和 KMS 后端提供方预留了扩展空间；远端设置提供方永远不必携带机密。
 
 ## 模型体验
 

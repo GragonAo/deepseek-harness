@@ -102,6 +102,22 @@ export interface Config {
 
 Source: [`packages/core/agent-default-model/src/index.ts:41`](../packages/core/agent-default-model/src/index.ts)
 
+<a id="deepseek-aidsh-agent-http"></a>
+
+## `@deepseek-ai/dsh-agent-http`
+
+Requires: `tenantAuth` · `tenants` · `apiProxy`
+
+```ts config-catalog
+/** Carrier configuration. */
+export interface Config {
+  /** Maximum buffered request body bytes before the route answers 413. */
+  maxRequestBodyBytes?: number
+}
+```
+
+Source: [`packages/tenant/agent-http/src/index.ts:60`](../packages/tenant/agent-http/src/index.ts)
+
 <a id="deepseek-aidsh-agent-instructions"></a>
 
 ## `@deepseek-ai/dsh-agent-instructions`
@@ -318,6 +334,22 @@ Depends on: [`ToolPresentationMode`](subsystems/tools.md)
 
 Source: [`packages/core/agent-tool-presentation/src/index.ts:38`](../packages/core/agent-tool-presentation/src/index.ts)
 
+<a id="deepseek-aidsh-api-http"></a>
+
+## `@deepseek-ai/dsh-api-http`
+
+Requires: `webServer` · `tenantAuth` · `tenants`
+
+```ts config-catalog
+/** Plugin configuration. */
+export interface Config {
+  /** Exact route pathname the operation serves. */
+  path?: string
+}
+```
+
+Source: [`packages/tenant/api-http/src/index.ts:38`](../packages/tenant/api-http/src/index.ts)
+
 <a id="deepseek-aidsh-attachment-local"></a>
 
 ## `@deepseek-ai/dsh-attachment-local`
@@ -430,6 +462,26 @@ export interface Config {
 
 Source: [`packages/client/hmr/src/index.ts:31`](../packages/client/hmr/src/index.ts)
 
+<a id="deepseek-aidsh-code-runtime-container"></a>
+
+## `@deepseek-ai/dsh-code-runtime-container`
+
+Requires: `containerRuntime`
+
+```ts config-catalog
+/** Plugin config: every execution cap, changeable from `cordis.yml` (no hardcoded tunables). */
+export interface Config {
+  /** Wall-clock ceiling in milliseconds; aborts the exec when crossed (fires `timeout`). */
+  maxWallMs?: number
+  /** Hard cap for the serialized logs-plus-completion-value payload, enforced in the container. */
+  maxOutputBytes?: number
+  /** Hostname the container uses to reach the host bridge (Docker: `host.docker.internal`; Podman: `host.containers.internal`). */
+  hostBridge?: string
+}
+```
+
+Source: [`packages/code-runtime/code-runtime-container/src/index.ts:24`](../packages/code-runtime/code-runtime-container/src/index.ts)
+
 <a id="deepseek-aidsh-code-runtime-worker-thread"></a>
 
 ## `@deepseek-ai/dsh-code-runtime-worker-thread`
@@ -533,6 +585,34 @@ export interface ToolResultPruneConfig {
 
 Source: [`packages/compaction/compaction-tool-result-pruner/src/types.ts:4`](../packages/compaction/compaction-tool-result-pruner/src/types.ts)
 
+<a id="deepseek-aidsh-container-docker"></a>
+
+## `@deepseek-ai/dsh-container-docker`
+
+```ts config-catalog
+/** Plugin configuration. */
+export interface Config {
+  /** Container CLI binary: `docker` or `podman`. */
+  runtime?: 'docker' | 'podman'
+  /** Docker network name used unless the tenant opts into `none`. */
+  network?: string
+  /** In-container tool-exec image run as each (tenant, user)'s execution world. */
+  toolExecImage?: string
+  /** Container port the tool-exec server binds (published to a random host port). */
+  toolExecPort?: number
+  /**
+   * Host root holding one sub-directory per subject (their cross-case global
+   * directory), bind-mounted read-write at `/global`. When omitted the `/global`
+   * mount is skipped (single-user deployments without a cross-case directory).
+   */
+  usersRoot?: string
+  /** Milliseconds of exec idleness before the container is reaped. Omit to keep. */
+  idleTimeoutMs?: number
+}
+```
+
+Source: [`packages/tenant/container-docker/src/index.ts:56`](../packages/tenant/container-docker/src/index.ts)
+
 <a id="deepseek-aidsh-cordis-host-runner"></a>
 
 ## `@deepseek-ai/dsh-cordis-host-runner`
@@ -556,9 +636,13 @@ Source: [`packages/extensions/cordis-host-runner/src/index.ts:88`](../packages/e
 ```ts config-catalog
 /** Plugin config: file location and hot-reload behavior. */
 export interface Config {
-  /** Credentials document path; defaults to `.credentials.yaml` under the harness home. */
+  /**
+   * Credentials document path; defaults to `<tenant.dataRoot>/.credentials.yaml`
+   * inside a tenant scope, otherwise `.credentials.yaml` under the harness home.
+   * An explicit path is one fixed global document with no tenant scoping.
+   */
   path?: string
-  /** Harness home used when `path` is omitted; defaults to `$DSH_HOME` or `~/.dsh`. */
+  /** Harness home used when `path` is omitted and no tenant is in scope; defaults to `$DSH_HOME` or `~/.dsh`. */
   dshHome?: string
   /** Watch the document and hot-publish external edits; defaults to true. */
   watch?: boolean
@@ -567,7 +651,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/credentials/credentials-local/src/index.ts:55`](../packages/credentials/credentials-local/src/index.ts)
+Source: [`packages/credentials/credentials-local/src/index.ts:68`](../packages/credentials/credentials-local/src/index.ts)
 
 <a id="deepseek-aidsh-e2b"></a>
 
@@ -648,6 +732,22 @@ export interface Config {
 ```
 
 Source: [`packages/context/file-reference-local/src/index.ts:35`](../packages/context/file-reference-local/src/index.ts)
+
+<a id="deepseek-aidsh-fs-container"></a>
+
+## `@deepseek-ai/dsh-fs-container`
+
+Requires: `containerRuntime`
+
+```ts config-catalog
+/** Plugin configuration. */
+export interface Config {
+  /** Container path relative requests resolve against (the tenant workspace mount). */
+  root?: string
+}
+```
+
+Source: [`packages/tenant/fs-container/src/index.ts:28`](../packages/tenant/fs-container/src/index.ts)
 
 <a id="deepseek-aidsh-fs-local"></a>
 
@@ -794,6 +894,13 @@ Requires: `agentDefaultModel` · `agents` · `attachments` · `directoryPicker` 
 ```ts config-catalog
 /** Gateway plugin configuration. */
 export interface Config {
+  /**
+   * Default project directory for sessions created without a workspace or
+   * `cwd`. Absent, the Host process cwd is used. A container-backed carrier
+   * (e.g. multi-tenant) pins this to the container's workspace path, since
+   * the Host cwd does not exist inside the execution container.
+   */
+  cwd?: string
   /**
    * Whether this deployment can hand paths to a native desktop opener —
    * the `hasDocument` capability the agent-preset roster reports. Absent,
@@ -1711,6 +1818,26 @@ export type JsonlCompression = 'zstd' | 'none'
 
 Source: [`packages/session/session-persistence-jsonl/src/index.ts:60`](../packages/session/session-persistence-jsonl/src/index.ts)
 
+<a id="deepseek-aidsh-session-persistence-postgres"></a>
+
+## `@deepseek-ai/dsh-session-persistence-postgres`
+
+Requires: `sessions`
+
+```ts config-catalog
+/** Plugin configuration. */
+export interface Config {
+  /** PostgreSQL connection URI for the shared instance hosting every tenant schema. */
+  connectionString: string
+  /** Maximum cold Session preparations retained for history-to-resume reuse. */
+  preparedSessionCacheSize?: number
+  /** Fixed live-event coalescing window; not a backend completion deadline. */
+  writeBatchMaxDelayMs?: number
+}
+```
+
+Source: [`packages/tenant/session-persistence-postgres/src/index.ts:38`](../packages/tenant/session-persistence-postgres/src/index.ts)
+
 <a id="deepseek-aidsh-session-persistence-sqlite"></a>
 
 ## `@deepseek-ai/dsh-session-persistence-sqlite`
@@ -1930,7 +2057,7 @@ Source: [`packages/session/session-title-first-prompt-llm/src/index.ts:15`](../p
 ```ts config-catalog
 /** Plugin config: file location and hot-reload behavior. */
 export interface Config {
-  /** Settings document path; defaults to `settings.yaml` under the harness home. */
+  /** Settings document path; when set this is a fixed global file, tenant-independent. */
   path?: string
   /** Harness home used when `path` is omitted; defaults to `$DSH_HOME` or `~/.dsh`. */
   dshHome?: string
@@ -1941,7 +2068,23 @@ export interface Config {
 }
 ```
 
-Source: [`packages/settings/settings-file/src/index.ts:21`](../packages/settings/settings-file/src/index.ts)
+Source: [`packages/settings/settings-file/src/index.ts:24`](../packages/settings/settings-file/src/index.ts)
+
+<a id="deepseek-aidsh-settings-tier"></a>
+
+## `@deepseek-ai/dsh-settings-tier`
+
+```ts config-catalog
+/** Multi-tenant configuration tier configuration. */
+export interface Config {
+  /** Root holding one `<sub>/config` directory per authenticated user. */
+  usersRoot?: string
+  /** Read-only system config directory shared by every tenant and user. */
+  systemConfigDir?: string
+}
+```
+
+Source: [`packages/tenant/settings-tier/src/index.ts:45`](../packages/tenant/settings-tier/src/index.ts)
 
 <a id="deepseek-aidsh-shell-env"></a>
 
@@ -1969,7 +2112,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/skill/skill/src/index.ts:279`](../packages/skill/skill/src/index.ts)
+Source: [`packages/skill/skill/src/index.ts:318`](../packages/skill/skill/src/index.ts)
 
 <a id="deepseek-aidsh-skill-filesystem"></a>
 
@@ -2008,6 +2151,22 @@ export interface Config {
 ```
 
 Source: [`packages/skill/skill-filesystem/src/index.ts:49`](../packages/skill/skill-filesystem/src/index.ts)
+
+<a id="deepseek-aidsh-skill-tier"></a>
+
+## `@deepseek-ai/dsh-skill-tier`
+
+```ts config-catalog
+/** Multi-tenant skill tier configuration. */
+export interface Config {
+  /** Root holding one `<sub>/skills` directory per authenticated user. */
+  usersRoot?: string
+  /** Read-only system skill directory shared by every tenant and user. */
+  systemSkillsDir?: string
+}
+```
+
+Source: [`packages/tenant/skill-tier/src/index.ts:35`](../packages/tenant/skill-tier/src/index.ts)
 
 <a id="deepseek-aidsh-spill-local"></a>
 
@@ -2068,7 +2227,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/storage/storage-domain/src/index.ts:52`](../packages/storage/storage-domain/src/index.ts)
+Source: [`packages/storage/storage-domain/src/index.ts:53`](../packages/storage/storage-domain/src/index.ts)
 
 <a id="deepseek-aidsh-storage-json"></a>
 
@@ -2090,6 +2249,25 @@ export interface Config {
 ```
 
 Source: [`packages/storage/storage-json/src/index.ts:27`](../packages/storage/storage-json/src/index.ts)
+
+<a id="deepseek-aidsh-storage-postgres"></a>
+
+## `@deepseek-ai/dsh-storage-postgres`
+
+Requires: `storage`
+
+```ts config-catalog
+/** Plugin configuration. */
+export interface Config {
+  /**
+   * PostgreSQL connection URI. The role must hold CREATE on the target
+   * database: each tenant's first write creates its own schema.
+   */
+  connectionString: string
+}
+```
+
+Source: [`packages/tenant/storage-postgres/src/index.ts:23`](../packages/tenant/storage-postgres/src/index.ts)
 
 <a id="deepseek-aidsh-storage-sqlite"></a>
 
@@ -2375,6 +2553,67 @@ export interface Config {
 ```
 
 Source: [`packages/core/system-prompt/src/index.ts:186`](../packages/core/system-prompt/src/index.ts)
+
+<a id="deepseek-aidsh-tenant"></a>
+
+## `@deepseek-ai/dsh-tenant`
+
+```ts config-catalog
+/** Plugin configuration. */
+export interface Config {
+  /** Tenant records registered at boot; `register` brand-casts each id. */
+  tenants?: TenantInput[]
+}
+
+/**
+ * One tenant record a cordis.yml supplies: the wire shape of {@link Tenant}
+ * with a plain-string `id` that config registration brands on the way in.
+ */
+export interface TenantInput {
+  /** Tenant id, brand-cast to {@link TenantId} when the record is registered. */
+  id: string
+  /** Display name recorded on the tenant. */
+  name: string
+  /** Tenant-private root for settings, credentials, and skills on the API host. */
+  dataRoot: string
+  /** Host directory bind-mounted into the tenant container at `/workspace`. */
+  workspaceRoot: string
+  /** Optional host directory of tenant tooling, bind-mounted read-only at `/tools`. */
+  toolsRoot?: string
+  /** A disabled tenant must serve no request. */
+  enabled?: boolean
+  /** Egress policy for the tenant's container. */
+  network?: 'none' | 'internal'
+  /** Authenticated subjects admitted to this tenant; absent or empty means open to any subject. */
+  members?: string[]
+}
+```
+
+Source: [`packages/tenant/tenant/src/index.ts:139`](../packages/tenant/tenant/src/index.ts)
+
+<a id="deepseek-aidsh-tenant-auth-jwt"></a>
+
+## `@deepseek-ai/dsh-tenant-auth-jwt`
+
+```ts config-catalog
+/** Plugin configuration. Exactly one verification mode must be configured. */
+export interface Config {
+  /** Expected issuer (`iss`) of accepted tokens. */
+  issuer: string
+  /** Expected audience (`aud`); when set, tokens must match. */
+  audience?: string
+  /** OIDC JWKS URI for RS256 verification; mutually exclusive with `secret`. */
+  jwksUri?: string
+  /** Shared HMAC secret for HS256 verification; mutually exclusive with `jwksUri`. */
+  secret?: string
+  /** Claim holding the tenant id. */
+  tenantIdClaim?: string
+  /** Clock-skew tolerance in seconds for `exp`/`nbf`. */
+  clockToleranceSeconds?: number
+}
+```
+
+Source: [`packages/tenant/tenant-auth-jwt/src/index.ts:23`](../packages/tenant/tenant-auth-jwt/src/index.ts)
 
 <a id="deepseek-aidsh-terminal-bash"></a>
 
@@ -2955,7 +3194,43 @@ export interface Config {
 export type ToolPresentationMode = 'native' | 'code' | 'both'
 ```
 
-Source: [`packages/core/tools/src/index.ts:654`](../packages/core/tools/src/index.ts)
+Source: [`packages/core/tools/src/index.ts:690`](../packages/core/tools/src/index.ts)
+
+<a id="deepseek-aidsh-tools-manifest"></a>
+
+## `@deepseek-ai/dsh-tools-manifest`
+
+Requires: `tools` · `subprocess`
+
+```ts config-catalog
+/** Declarative tool-loader configuration. */
+export interface Config {
+  /** Bounded stdout/stderr tail (bytes) captured per manifest-tool call. */
+  maxOutputBytes?: number
+  /** Process-tree termination grace (milliseconds) for each manifest-tool call. */
+  graceMs?: number
+  /** Working directory when a manifest omits `executor.cwd` (container deployments set `/workspace`). */
+  defaultCwd?: string
+}
+```
+
+Source: [`packages/tenant/tools-manifest/src/index.ts:35`](../packages/tenant/tools-manifest/src/index.ts)
+
+<a id="deepseek-aidsh-tools-tier"></a>
+
+## `@deepseek-ai/dsh-tools-tier`
+
+```ts config-catalog
+/** Multi-tenant tool tier configuration. */
+export interface Config {
+  /** Root holding one `<sub>/tools` directory per authenticated user. */
+  usersRoot?: string
+  /** Read-only system tool-manifest directory shared by every tenant and user. */
+  systemToolsDir?: string
+}
+```
+
+Source: [`packages/tenant/tools-tier/src/index.ts:35`](../packages/tenant/tools-tier/src/index.ts)
 
 <a id="deepseek-aidsh-typert-loader"></a>
 
@@ -3154,6 +3429,38 @@ export interface Config {
 
 Source: [`packages/web/web-search-perplexity/src/index.ts:32`](../packages/web/web-search-perplexity/src/index.ts)
 
+<a id="deepseek-aidsh-workflow-container"></a>
+
+## `@deepseek-ai/dsh-workflow-container`
+
+Requires: `containerRuntime` · `subagents`
+
+```ts config-catalog
+/** Plugin config (all optional — `static Config` supplies the defaults). */
+export interface Config {
+  /** The `ctx.subagents` provider children run on (default `spawn`). */
+  provider?: string
+  /** Concurrent `agent()` ceiling; `0` (the default) auto-resolves to `min(16, max(1, cores - 2))`. */
+  maxConcurrentAgents?: number
+  /** Total `agent()` calls one run may start — the runaway-loop backstop (default 1000). */
+  maxTotalAgents?: number
+  /** Items accepted by a single `parallel()`/`pipeline()` call (default 4096). */
+  maxItemsPerCall?: number
+  /** vm timeout for the script's initial synchronous slice, inside the container (default 5000 ms). */
+  syncTimeoutMs?: number
+  /**
+   * How long after a cancellation an unsettled script may keep running before
+   * the run force-settles `cancelled` and its container process is ABORTED
+   * (default 5000 ms); also bounds `dispose()`.
+   */
+  disposeGraceMs?: number
+  /** The hostname the container reaches the host bridge by (default `host.docker.internal`; Podman uses `host.containers.internal`). */
+  hostBridge?: string
+}
+```
+
+Source: [`packages/workflow/workflow-container/src/index.ts:28`](../packages/workflow/workflow-container/src/index.ts)
+
 <a id="deepseek-aidsh-workflow-worker-thread"></a>
 
 ## `@deepseek-ai/dsh-workflow-worker-thread`
@@ -3182,7 +3489,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/workflow/workflow-worker-thread/src/index.ts:32`](../packages/workflow/workflow-worker-thread/src/index.ts)
+Source: [`packages/workflow/workflow-worker-thread/src/index.ts:43`](../packages/workflow/workflow-worker-thread/src/index.ts)
 
 ## Loadable plugins with no config
 
@@ -3232,6 +3539,7 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 - `@deepseek-ai/dsh-command-goal` — requires `commands` · `goals` ([`packages/goal/command-goal/src/index.ts`](../packages/goal/command-goal/src/index.ts))
 - `@deepseek-ai/dsh-commands` ([`packages/interaction/commands/src/index.ts`](../packages/interaction/commands/src/index.ts))
 - `@deepseek-ai/dsh-cordis-client-runner` ([`packages/extensions/cordis-client-runner/src/index.ts`](../packages/extensions/cordis-client-runner/src/index.ts))
+- `@deepseek-ai/dsh-credentials-postgres` — requires `storage` · `storageBackendServiceKey('postgres')` ([`packages/credentials/credentials-postgres/src/index.ts`](../packages/credentials/credentials-postgres/src/index.ts))
 - `@deepseek-ai/dsh-fs-e2b` — requires `e2b` ([`packages/e2b/fs-e2b/src/index.ts`](../packages/e2b/fs-e2b/src/index.ts))
 - `@deepseek-ai/dsh-fs-observation-policy` ([`packages/fs/fs-observation-policy/src/index.ts`](../packages/fs/fs-observation-policy/src/index.ts))
 - `@deepseek-ai/dsh-goal-round-driver` — requires `agents` · `goals` · `sessions` ([`packages/goal/goal-round-driver/src/index.ts`](../packages/goal/goal-round-driver/src/index.ts))
@@ -3246,9 +3554,11 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 - `@deepseek-ai/dsh-session-log-export` — requires `commands` ([`packages/session-query/session-log-export/src/index.ts`](../packages/session-query/session-log-export/src/index.ts))
 - `@deepseek-ai/dsh-session-projection` ([`packages/session/session-projection/src/index.ts`](../packages/session/session-projection/src/index.ts))
 - `@deepseek-ai/dsh-session-stats` — requires `sessionProjections` ([`packages/session/session-stats/src/index.ts`](../packages/session/session-stats/src/index.ts))
+- `@deepseek-ai/dsh-settings-postgres` — requires `storage` · `storageBackendServiceKey('postgres')` ([`packages/settings/settings-postgres/src/index.ts`](../packages/settings/settings-postgres/src/index.ts))
 - `@deepseek-ai/dsh-skill-badge` — requires `skills` ([`packages/skill/skill-badge/src/index.ts`](../packages/skill/skill-badge/src/index.ts))
 - `@deepseek-ai/dsh-storage` ([`packages/storage/storage/src/index.ts`](../packages/storage/storage/src/index.ts))
 - `@deepseek-ai/dsh-subagent` ([`packages/subagent/subagent/src/index.ts`](../packages/subagent/subagent/src/index.ts))
+- `@deepseek-ai/dsh-subprocess-container` — requires `containerRuntime` ([`packages/tenant/subprocess-container/src/index.ts`](../packages/tenant/subprocess-container/src/index.ts))
 - `@deepseek-ai/dsh-subprocess-local` ([`packages/subprocess/subprocess-local/src/index.ts`](../packages/subprocess/subprocess-local/src/index.ts))
 - `@deepseek-ai/dsh-terminal` ([`packages/terminal/terminal/src/index.ts`](../packages/terminal/terminal/src/index.ts))
 - `@deepseek-ai/dsh-tool-ask-user` — requires `tools` · `userQuestions` ([`packages/interaction/tool-ask-user/src/index.ts`](../packages/interaction/tool-ask-user/src/index.ts))
@@ -3265,6 +3575,7 @@ Abstract service classes — a deployment loads a concrete implementation packag
 - `@deepseek-ai/dsh-attachment` — abstract `AttachmentStore` ([`packages/attachment/attachment/src/index.ts`](../packages/attachment/attachment/src/index.ts))
 - `@deepseek-ai/dsh-code-runtime` — abstract `CodeRuntime` ([`packages/code-runtime/code-runtime/src/index.ts`](../packages/code-runtime/code-runtime/src/index.ts))
 - `@deepseek-ai/dsh-compaction` — abstract `CompactionEngine` ([`packages/compaction/compaction/src/index.ts`](../packages/compaction/compaction/src/index.ts))
+- `@deepseek-ai/dsh-container` — abstract `ContainerRuntime` ([`packages/tenant/container/src/index.ts`](../packages/tenant/container/src/index.ts))
 - `@deepseek-ai/dsh-credentials` — abstract `CredentialProvider` ([`packages/credentials/credentials/src/index.ts`](../packages/credentials/credentials/src/index.ts))
 - `@deepseek-ai/dsh-file-reference` — abstract `FileReferenceService` ([`packages/context/file-reference/src/index.ts`](../packages/context/file-reference/src/index.ts))
 - `@deepseek-ai/dsh-fs` — abstract `FileSystem` ([`packages/fs/fs/src/index.ts`](../packages/fs/fs/src/index.ts))
@@ -3277,6 +3588,7 @@ Abstract service classes — a deployment loads a concrete implementation packag
 - `@deepseek-ai/dsh-shell` — abstract `ShellExecutor` ([`packages/shell/shell/src/index.ts`](../packages/shell/shell/src/index.ts))
 - `@deepseek-ai/dsh-spill` — abstract `SpillStore` ([`packages/spill/spill/src/index.ts`](../packages/spill/spill/src/index.ts))
 - `@deepseek-ai/dsh-subprocess` — abstract `SubprocessRuntime` ([`packages/subprocess/subprocess/src/index.ts`](../packages/subprocess/subprocess/src/index.ts))
+- `@deepseek-ai/dsh-tenant-auth` — abstract `TenantAuthenticator` ([`packages/tenant/tenant-auth/src/index.ts`](../packages/tenant/tenant-auth/src/index.ts))
 - `@deepseek-ai/dsh-workflow` — abstract `WorkflowEngine` ([`packages/workflow/workflow/src/index.ts`](../packages/workflow/workflow/src/index.ts))
 
 ## Library packages (no plugin entry)
@@ -3301,6 +3613,7 @@ Imported as libraries by other packages; a `cordis.yml` cannot load them.
 - `@deepseek-ai/dsh-launch-environment` ([`packages/util/launch-environment/src/index.ts`](../packages/util/launch-environment/src/index.ts))
 - `@deepseek-ai/dsh-llm-mock-server` ([`packages/test-support/llm-mock-server/src/index.ts`](../packages/test-support/llm-mock-server/src/index.ts))
 - `@deepseek-ai/dsh-loader-smoke` ([`packages/test-support/loader-smoke/src/index.ts`](../packages/test-support/loader-smoke/src/index.ts))
+- `@deepseek-ai/dsh-multi-tenant` ([`packages/bundle/multi-tenant/src/index.ts`](../packages/bundle/multi-tenant/src/index.ts))
 - `@deepseek-ai/dsh-native-command` ([`packages/util/native-command/src/index.ts`](../packages/util/native-command/src/index.ts))
 - `@deepseek-ai/dsh-output-retention` ([`packages/util/output-retention/src/index.ts`](../packages/util/output-retention/src/index.ts))
 - `@deepseek-ai/dsh-sandbox-windows-acl` ([`packages/sandbox/sandbox-windows-acl/src/index.ts`](../packages/sandbox/sandbox-windows-acl/src/index.ts))
@@ -3311,6 +3624,7 @@ Imported as libraries by other packages; a `cordis.yml` cannot load them.
 - `@deepseek-ai/dsh-session-telemetry` ([`packages/session/session-telemetry/src/index.ts`](../packages/session/session-telemetry/src/index.ts))
 - `@deepseek-ai/dsh-session-title-llm` ([`packages/session/session-title-llm/src/index.ts`](../packages/session/session-title-llm/src/index.ts))
 - `@deepseek-ai/dsh-subagent-in-process-driver` ([`packages/subagent/subagent-in-process-driver/src/index.ts`](../packages/subagent/subagent-in-process-driver/src/index.ts))
+- `@deepseek-ai/dsh-tenant-demo` ([`packages/tenant/tenant-demo/src/index.ts`](../packages/tenant/tenant-demo/src/index.ts))
 - `@deepseek-ai/dsh-timeout` ([`packages/util/timeout/src/index.ts`](../packages/util/timeout/src/index.ts))
 - `@deepseek-ai/dsh-typert-generator` ([`packages/typert/generator/src/index.ts`](../packages/typert/generator/src/index.ts))
 - `@deepseek-ai/dsh-typert-protocol` ([`packages/typert/protocol/src/index.ts`](../packages/typert/protocol/src/index.ts))

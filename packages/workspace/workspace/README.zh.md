@@ -20,6 +20,8 @@ DeepSeek Harness 的 Workspace 实体注册表（`ctx.workspaceRegistry`）：�
 
 `storageDomain` 和 `sessionPersistence` 是启动必需依赖。任一依赖服务不可用时，插件保持待处理，且不能提交空的已初始化标记。首次成功启动时，注册表调用 `SessionPersistence.list()`，仅使用头部 `id`、`cwd` 和 `createdAt` 对有效历史目录分组并持久化初始顺序；它绝不读取事件正文。已初始化标记最后写入，因此重启后可安全复用引导初始化期间的部分写入。后续仅能通过 cwd 识别的会话仍属于 Ungrouped。
 
+在 `dsh-multi-tenant` 中，注册表按 (租户, 用户) 键控状态，并惰性打开该分区的 KV 领域。在已认证请求之外（无租户或用户作用域）时，它以空的、不抛错的投影启动，不打开租户 Postgres 领域，也不写入已初始化标记。(租户, 用户) 作用域内的首次访问会打开该分区的领域（其 `tenantPartitionName` schema 加主键内嵌的 `user_id`），从 `SessionPersistence.list()` 引导初始化，并重建该分区的实体缓存；打开的领域、头部索引、实体缓存、待处理变更状态以及每个实体的宿主绑定都按 (租户, 用户) 键控。单用户（无租户）分区保持既有的急切行为。
+
 创建和删除操作会在记录和顺序可能分叉之前，先持久化明确的待处理变更标记。启动时只补全该标记所指明的变更，随后清除标记；没有标记的顺序／表不一致仍属于来源不明的损坏，并会明确报错。删除后重新注册同一路径会生成新的 Workspace id，且不会自动重新接纳保留下来的会话。
 
 ## 模型体验
@@ -42,3 +44,4 @@ DeepSeek Harness 的 Workspace 实体注册表（`ctx.workspaceRegistry`）：�
 
 - 会话删除与破坏性的文件夹移除是彼此独立且尚未提供的功能；删除 Workspace 注册记录绝不能替代二者（参见[决策记录](../../../.agents/notes/implemented/feature/2026-07-27-workspace-registration-deletion.md)）。
 - 头部索引会在启动时刷新，也会在 attach 必须解析未缓存持久 id 时刷新；另一进程执行的删除或造成的 cwd 损坏会在下次刷新或重启后被发现。
+- 同步的 `list()`/`get()`/`archivedSessionIds` 投影无法等待某个分区的惰性领域打开，因此 (租户, 用户) 作用域内的首次访问投影为空，直到某个异步方法（`create`、`delete`、`insertBefore`、`archiveSession` 或 `resolveByPath`）打开该分区。API 的 `workspace.list` 处理器完全同步，此处不做改动。

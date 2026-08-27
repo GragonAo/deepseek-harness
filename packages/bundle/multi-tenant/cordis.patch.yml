@@ -1,0 +1,187 @@
+# The dsh-multi-tenant bundle patch: the stateless multi-tenant backend over
+# the dsh-web-app layer. Applied after web-app; it replaces the shared,
+# locally-sandboxed execution world with the tenant container runtime and swaps
+# in the tenant registry / authentication / agent-http carrier, disabling the
+# single-user client-connection trust fence (agent-http mounts /api instead).
+# Tenant records, Postgres coordinates, and auth material stay in the
+# deployment's own patch layer (or env); this layer only expresses the
+# provider swap.
+
+# ── replace the local execution-and-isolation world ─────────────────────────
+
+- id: session-persistence-jsonl
+  disabled: true
+
+# Single-user KV medium (`$DSH_HOME/storages`) is replaced by the
+# (tenant, user)-keyed PostgreSQL storage backend below; the storage-domain row
+# re-points at it.
+- id: storage-json
+  disabled: true
+
+- id: storage-domain
+  config:
+    backend: postgres
+
+# Single-user file-backed settings + credentials (`$DSH_HOME/*` or a tenant's
+# dataRoot on the host) are replaced by the (tenant, user)-keyed PostgreSQL
+# providers below, so the agent plane keeps no host-side managed config files.
+- id: settings
+  disabled: true
+
+- id: credentials
+  disabled: true
+
+# The host worker-thread code runtime runs model code in the agent process,
+# where it could read host files and secrets; the tenant container backend
+# below runs it off-host instead (the container is the isolation boundary).
+- id: code-runtime
+  disabled: true
+
+# web-app disables the host worker-thread workflow engine and its tools (they
+# execute model-written orchestration scripts in the agent process). The
+# container engine below runs those scripts in the tenant container instead, and
+# the tools are re-enabled so a tenant keeps the single-user workflow/ralph
+# surface with in-container execution.
+- id: tool-workflow
+  disabled: false
+
+- id: tool-ralph
+  disabled: false
+
+- id: subprocess
+  disabled: true
+
+- id: fs-sandbox
+  disabled: true
+
+- id: bash-sandbox
+  disabled: true
+
+# The host landlock/seatbelt executor is meaningless for container commands:
+# the tenant container is the isolation boundary. sandbox-policy and approval
+# stay mounted (the tool layer resolves its per-call workspace-write mode
+# through them), pinned below to the only modes containers admit.
+- id: sandbox
+  disabled: true
+
+# The permission-preset service bundles the sandbox mode on the mounted bash
+# executor and ships a danger-full-access preset: neither maps to a tenant
+# container, which always confines to its workspace. Its workspace-write + ask
+# defaults carry over through the sandbox-policy / approval pins below.
+- id: permission
+  disabled: true
+
+- id: sandbox-policy
+  config:
+    mode: workspace-write
+
+- id: approval
+  config:
+    policy: ask
+
+# agent-http owns /api now; the single-user DNS-rebinding fence must not also
+# mount it, or webserver.register throws on the duplicate prefix.
+- id: connection
+  disabled: true
+
+# Sessions default to the container workspace, never the Host process cwd
+# (which does not exist inside the tenant container).
+- id: api-gateway
+  config:
+    cwd: /workspace
+
+# Present both the native tool surface and the Code Mode `run_code` tool
+# (which runs in the tenant container through `code-runtime-container`), so a
+# tenant keeps the single-user tool surfaces. The operator may still override
+# through DSH_TOOLS_MODE (native|code|both); unset defaults to `both` here,
+# unlike the base layer's `native`.
+- id: tools
+  config:
+    mode: !!js process.env.DSH_TOOLS_MODE || 'both'
+
+# ── tenant container execution world ────────────────────────────────────────
+
+- insert:
+    - id: container-runtime
+      name: '@deepseek-ai/dsh-container-docker'
+      config:
+        usersRoot: !!js process.env.DSH_USERS_ROOT
+
+    # Ambient case / user-global / system skill directories: the filesystem
+    # skill provider reads `ctx.skillTiers` (registered here) to append the
+    # three tier roots to its discovery, case > user-global > system.
+    - id: skill-tier
+      name: '@deepseek-ai/dsh-skill-tier'
+      config:
+        usersRoot: !!js process.env.DSH_USERS_ROOT
+
+    # Ambient case / user-global / system tool-manifest directories: the tool
+    # loader below reads `ctx.toolTiers` (registered here) to map data-only
+    # manifests onto ranked tools, case > user-global > system.
+    - id: tools-tier
+      name: '@deepseek-ai/dsh-tools-tier'
+      config:
+        usersRoot: !!js process.env.DSH_USERS_ROOT
+
+    # Declarative manifest tool loader: pure-data YAML manifests in the tier
+    # directories become in-container subprocess tools registered per agent.
+    - id: tools-manifest
+      name: '@deepseek-ai/dsh-tools-manifest'
+      config:
+        defaultCwd: /workspace
+
+    # Ambient session / case / user-global / system config directories: the
+    # settings Service Definition reads `ctx.settingsTiers` (registered here)
+    # to layer per-namespace files below the per-(tenant,user) runtime document,
+    # session > case > user-global > system, with the PG document highest.
+    - id: settings-tier
+      name: '@deepseek-ai/dsh-settings-tier'
+      config:
+        usersRoot: !!js process.env.DSH_USERS_ROOT
+
+    - id: subprocess-container
+      name: '@deepseek-ai/dsh-subprocess-container'
+
+    - id: bash-local
+      name: '@deepseek-ai/dsh-bash-local'
+
+    - id: fs-container
+      name: '@deepseek-ai/dsh-fs-container'
+      config:
+        root: /workspace
+
+    - id: code-runtime-container
+      name: '@deepseek-ai/dsh-code-runtime-container'
+
+    - id: workflow-container
+      name: '@deepseek-ai/dsh-workflow-container'
+
+    - id: session-persistence-postgres
+      name: '@deepseek-ai/dsh-session-persistence-postgres'
+      config:
+        connectionString: !!js process.env.DSH_POSTGRES_URL
+
+    - id: storage-postgres
+      name: '@deepseek-ai/dsh-storage-postgres'
+      config:
+        connectionString: !!js process.env.DSH_POSTGRES_URL
+
+    - id: settings-postgres
+      name: '@deepseek-ai/dsh-settings-postgres'
+
+    - id: credentials-postgres
+      name: '@deepseek-ai/dsh-credentials-postgres'
+
+    # ── tenant carrier: registry, authentication, gateway ─────────────────────
+
+    - id: tenant
+      name: '@deepseek-ai/dsh-tenant'
+
+    - id: tenant-auth-jwt
+      name: '@deepseek-ai/dsh-tenant-auth-jwt'
+      config:
+        issuer: !!js process.env.DSH_OIDC_ISSUER
+        secret: !!js process.env.DSH_OIDC_SECRET
+
+    - id: agent-http
+      name: '@deepseek-ai/dsh-agent-http'

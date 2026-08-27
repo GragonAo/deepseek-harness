@@ -40,6 +40,13 @@ declare module '@deepseek-ai/cordis' {
 /** Gateway plugin configuration. */
 export interface Config {
   /**
+   * Default project directory for sessions created without a workspace or
+   * `cwd`. Absent, the Host process cwd is used. A container-backed carrier
+   * (e.g. multi-tenant) pins this to the container's workspace path, since
+   * the Host cwd does not exist inside the execution container.
+   */
+  cwd?: string
+  /**
    * Whether this deployment can hand paths to a native desktop opener —
    * the `hasDocument` capability the agent-preset roster reports. Absent,
    * the platform is asked (macOS/Windows/WSL yes; Linux only with a display
@@ -73,6 +80,7 @@ export class ApiProxyService extends Service implements ApiProxy {
   ]
 
   static Config: z<Config> = z.object({
+    cwd: z.string(),
     nativeOpen: z.boolean(),
     sessionExportCompressionLevel: z.number().step(1).min(0).max(9)
       .default(DEFAULT_SESSION_LOG_COMPRESSION_LEVEL) as z<SessionLogCompressionLevel>,
@@ -98,7 +106,7 @@ export class ApiProxyService extends Service implements ApiProxy {
     const api = createApiProxy(ctx, {
       defaultModelSelection: () => ctx.agentDefaultModel.currentSelection(),
       saveDefaultModelSelection: selection => ctx.agentDefaultModel.saveSelection(selection),
-      cwd: process.cwd(),
+      cwd: config.cwd ?? process.cwd(),
       ...config.nativeOpen === undefined ? {} : { canOpenPath: () => config.nativeOpen as boolean },
       ...(config.sessionExportCompressionLevel === undefined
         ? {}

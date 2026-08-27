@@ -4,12 +4,14 @@
 
 基于文件的设置提供方。一个 YAML 或 JSON 文档承载全部 namespace 分节；外部编辑经 `ctx.settings` 热发布，`update()` 在写锁下先重读文档再原子写回，保留用户的 YAML 注释、当前未加载插件所拥有的分节，以及任何本进程尚未观察到的磁盘变更。
 
+未设置显式 `path` 时文档按租户隔离：租户作用域内位于 `<tenant.dataRoot>/settings.yaml`，租户作用域之外回退到 `<harness home>/settings.yaml`。显式 `path` 始终是各租户共享的固定全局文档；单用户（无租户）路径保持不变。
+
 ## 配置
 
 | 字段 | 含义 | 默认 |
 |---|---|---|
-| `path` | 设置文档路径；扩展名决定格式（`.yaml`/`.yml`/`.json`） | harness home 下的 `settings.yaml` |
-| `dshHome` | `path` 省略时使用的 harness home | `$DSH_HOME` 或 `~/.dsh` |
+| `path` | 固定设置文档路径（各租户共享）；扩展名决定格式（`.yaml`/`.yml`/`.json`） | 未设置（按租户隔离） |
+| `dshHome` | `path` 省略且无租户作用域时使用的 harness home 回退 | `$DSH_HOME` 或 `~/.dsh` |
 | `watch` | 监听文档并热发布外部编辑 | `true` |
 | `debounceMs` | watcher 写入稳定窗口（毫秒） | `100` |
 
@@ -27,7 +29,7 @@
 - **原生 watcher 接收规范化路径。** 在 Chokidar 打开目标之前，提供方会对层级最深的现有祖先路径执行 realpath 解析，再拼回缺失的后缀。文件访问和面向用户的诊断仍使用配置路径，从而避免 Windows 在 libuv 内部混用 8.3 别名与长格式事件路径。
 - **dispose（资源释放）在每种 watch 模式下都保证完全停稳。** 卸载先把提供方标记为已关闭，在 watcher 存在时将其关闭，再等待所有已排队或进行中的文档操作完成，之后不再有任何发布。
 - **按内容抑制自写。** 提供方缓存最后可用文本；watcher 事件内容与缓存相同（含自己的写入）即为 no-op。
-- **Host 配置适配器会收到解析后的路径。** `ctx.settings.documentPath` 是 `resolveSpec()` 得出的绝对文件名，包括自定义 YAML/JSON 路径；`prepareDocument()` 会保留现有文件，或在 Host 打开文档前，以仅属主可访问的权限独占创建缺失的空文件。浏览器只收到可用性标志，绝不重建 `$DSH_HOME`，也绝不提交文件系统目标。
+- **Host 配置适配器会收到当前生效路径。** `ctx.settings.documentPath` 是当前生效的绝对文件名——设置了 `path` 时即该固定路径，否则租户作用域内为该租户的 `<dataRoot>/settings.yaml`、作用域外为 harness home 的 `settings.yaml`；`prepareDocument()` 会保留现有文件，或在 Host 打开文档前，以仅属主可访问的权限独占创建缺失的空文件。浏览器只收到可用性标志，绝不重建 `$DSH_HOME`，也绝不提交文件系统目标。
 
 ## 模型体验
 

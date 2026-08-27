@@ -34,6 +34,7 @@
   "peerDependencies": {
     "@deepseek-ai/dsh-invariants": "workspace:^",
     "@deepseek-ai/dsh-storage": "workspace:^",
+    "@deepseek-ai/dsh-tenant": "workspace:^",
     "@deepseek-ai/cordis": "workspace:^"
   },
   "dependencies": {
@@ -43,6 +44,7 @@
   "devDependencies": {
     "@deepseek-ai/dsh-invariants": "workspace:^",
     "@deepseek-ai/dsh-storage": "workspace:^",
+    "@deepseek-ai/dsh-tenant": "workspace:^",
     "@deepseek-ai/cordis": "workspace:^"
   }
 }

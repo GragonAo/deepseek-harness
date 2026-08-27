@@ -10,6 +10,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { storageBackendServiceKey } from '@deepseek-ai/dsh-storage'
+import { currentTenant, currentUser, tenantPartitionName, userPartitionName } from '@deepseek-ai/dsh-tenant'
 import { DomainError } from './error.ts'
 import { descriptorOf } from './spec.ts'
 import type { DomainSpec } from './spec.ts'
@@ -62,13 +63,32 @@ export const Config: z<Config> = z.object({
 })
 
 /**
+ * Derive the facility's single-open key for one domain name. A tenant and
+ * user in scope partitions the guard so the same declared domain (e.g.
+ * `workspace`) opens once per (tenant, user) and never leaks a projection
+ * across tenants or users; outside either scope the bare name is the key
+ * (single-user deployments and anonymous opens). The partition names match
+ * `UNIT_NAME_RE` and the name cannot contain `.`, so the composite is
+ * unambiguous.
+ * @param name - the declared domain name.
+ * @returns the facility key for the open-domain guard.
+ */
+function partitionKey(name: string): string {
+  const tenant = currentTenant()
+  const user = currentUser()
+  if (tenant === undefined || user === undefined) return name
+  return `${tenantPartitionName(tenant.id)}.${userPartitionName(user)}.${name}`
+}
+
+/**
  * The mounted domain facility. Opens declared domains over routed backends;
  * one facility instance owns the open-domain table and enforces single-open
- * per domain name.
+ * per (tenant, domain name).
  */
 export class DomainFacility {
+  /** Open domains by {@link partitionKey}; presence is the single-open guard. */
   private readonly domains = new Map<string, DomainImpl>()
-  /** Names reserved by an in-flight or completed open, so concurrent opens of one name fail loud. */
+  /** Keys reserved by an in-flight or completed open, so concurrent opens of one (tenant, user, domain) fail loud. */
   private readonly reserved = new Set<string>()
 
   /**
@@ -98,10 +118,11 @@ export class DomainFacility {
    * @returns the opened domain handle, typed by the spec.
    */
   async open<S extends DomainSpec>(spec: S): Promise<Domain<S>> {
-    if (this.reserved.has(spec.name)) {
+    const key = partitionKey(spec.name)
+    if (this.reserved.has(key)) {
       throw new DomainError('already-open', `domain '${spec.name}' is already open`)
     }
-    this.reserved.add(spec.name)
+    this.reserved.add(key)
     try {
       const backendName = this.config.routes?.[spec.name] ?? this.config.backend
       const backend = this.ctx.storage.backend.get(backendName)
@@ -133,12 +154,15 @@ export class DomainFacility {
         // The onClosed hook runs strictly after teardown completes: writes
         // landing during the drain still emit domain/changed, and the domain
         // stays resolvable (the package invariant cross-checks each event)
-        // until fully closed — only then does the name free up for reopening.
+        // until fully closed — only then does the key free up for reopening.
+        // It closes over the open-time key: teardown can run outside any
+        // tenant scope, so the key must not be re-derived from the ambient
+        // tenant here.
         const domain: DomainImpl = new DomainImpl(this.ctx, spec, unit, tables, globalValue, () => {
-          this.domains.delete(spec.name)
-          this.reserved.delete(spec.name)
+          this.domains.delete(key)
+          this.reserved.delete(key)
         })
-        this.domains.set(spec.name, domain)
+        this.domains.set(key, domain)
         // The single type-erasure point: DomainImpl is the untyped runtime,
         // Domain<S> the spec-typed view; the unknown hop is required because
         // S's conditional global-handle type stays unresolved here.
@@ -149,21 +173,22 @@ export class DomainFacility {
       }
     } catch (error) {
       // Any failure means the domain never registered (nothing can throw
-      // after it), so releasing the name reservation is unconditional.
-      this.reserved.delete(spec.name)
+      // after it), so releasing the key reservation is unconditional.
+      this.reserved.delete(key)
       throw error
     }
   }
 
   /**
-   * Look up an open domain by name, untyped. Diagnostic surface (the package
-   * invariant cross-checks change events against live domain state); typed
-   * consumers hold the handle returned by {@link open}.
+   * Look up an open domain by name for the ambient tenant, untyped.
+   * Diagnostic surface (the package invariant cross-checks change events
+   * against live domain state); typed consumers hold the handle returned by
+   * {@link open}.
    * @param name - Domain name.
    * @returns the open domain runtime, or `undefined` when not open.
    */
   get(name: string): DomainImpl | undefined {
-    return this.domains.get(name)
+    return this.domains.get(partitionKey(name))
   }
 
   /**

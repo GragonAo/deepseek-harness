@@ -2,6 +2,17 @@
  * Workspace entity registry (`ctx.workspaceRegistry`): durable workspace records,
  * stable registry order, and header-validated session membership over the
  * domain data form.
+ *
+ * Under multi-tenancy the registry is (tenant, user)-keyed: `[Service.init]`
+ * runs outside any request and leaves the registry lazily-uninitialized when
+ * the ambient tenant is absent (the `tenant_…` storage backend rejects a
+ * tenantless open, and that is the expected fail-closed boot signal). The
+ * first access inside a tenant + user scope opens that (tenant, user)'s domain,
+ * runs the one-time history bootstrap, and rebuilds that partition's projected
+ * cache; a later access under a different tenant or user switches to that
+ * partition's own state, so two tenants or two users of one tenant never share
+ * a projection. Single-user deployments still initialize eagerly at boot under
+ * a single no-tenant partition.
  * @module @deepseek-ai/dsh-workspace
  */
 
@@ -12,6 +23,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import type { SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type { DomainGlobal, KvTable } from '@deepseek-ai/dsh-storage-domain'
+import { currentTenant, currentUser, TenantError, tenantPartitionName, userPartitionName } from '@deepseek-ai/dsh-tenant'
 import { WorkspaceEntity } from './entity.ts'
 import type { WorkspaceEntityHost } from './entity.ts'
 
@@ -63,7 +75,6 @@ export class WorkspaceOrderInvalidError extends Error {
   }
 }
 
-
 declare module '@deepseek-ai/cordis' {
   interface Context {
     workspaceRegistry: WorkspaceRegistry
@@ -74,6 +85,19 @@ interface BootstrapGroup {
   readonly path: string
   readonly headers: SessionHeader[]
   readonly newestAt: number
+}
+
+/** The registry's mutable state for one (tenant, user) partition (or the single-user partition). */
+interface TenantState {
+  table: KvTable<WorkspaceId, WorkspaceRecord>
+  global: DomainGlobal<WorkspaceDomainState>
+  state: WorkspaceDomainState
+  entities: Map<WorkspaceId, WorkspaceEntity>
+  headers: Map<SessionId, SessionHeader>
+  sessionPaths: Map<SessionId, string>
+  invalidSessionPaths: Map<SessionId, string>
+  host: WorkspaceEntityHost
+  operationTail: Promise<void>
 }
 
 const sameIds = (left: readonly WorkspaceId[], right: readonly WorkspaceId[]): boolean =>
@@ -87,56 +111,39 @@ const compareHeaders = (left: SessionHeader, right: SessionHeader): number =>
  * one canonical-cwd header index, and completes the one-time history
  * bootstrap before the service becomes active. The persistence dependency is
  * mandatory so an unavailable peer can never be mistaken for an empty
- * history and commit the initialized marker.
+ * history and commit the initialized marker. Every partition's state is keyed
+ * by tenant id (`undefined` for the single-user partition); see the module
+ * JSDoc for the multi-tenant lazy/tenant-switch contract.
  */
 export class WorkspaceRegistry extends Service {
   static inject = ['storageDomain', 'sessionPersistence']
 
-  private table?: KvTable<WorkspaceId, WorkspaceRecord>
-  private global?: DomainGlobal<WorkspaceDomainState>
-  private state?: WorkspaceDomainState
-  private readonly entities = new Map<WorkspaceId, WorkspaceEntity>()
-  private readonly headers = new Map<SessionId, SessionHeader>()
-  private readonly sessionPaths = new Map<SessionId, string>()
-  private readonly invalidSessionPaths = new Map<SessionId, string>()
-  private operationTail: Promise<void> = Promise.resolve()
-
-  private readonly host: WorkspaceEntityHost = {
-    table: () => this.requireTable(),
-    sessionPath: id => this.sessionPaths.get(id),
-    readSessionHeader: id => this.readSessionHeader(id),
-    rememberSessionPath: (id, path) => {
-      this.sessionPaths.set(id, path)
-      this.invalidSessionPaths.delete(id)
-    },
-  }
+  /** Per-partition registry state, keyed by (tenant, user) partition (`undefined` for single-user). */
+  private readonly tenants = new Map<string | undefined, TenantState>()
+  /** In-flight per-partition initializations, memoized so concurrent first accesses share one open. */
+  private readonly pending = new Map<string | undefined, Promise<TenantState>>()
+  /** Set once `[Service.init]` completes; a registry that never started rejects like before. */
+  private started = false
 
   constructor(ctx: Context) {
     super(ctx, 'workspaceRegistry')
   }
 
-  /** Open the domain, finish bootstrap when required, and rebuild the ordered cache. */
+  /**
+   * Initialize the boot-time partition. Outside a tenant scope a
+   * tenant-keyed backend rejects the open with `NO_TENANT_IN_SCOPE`, which is
+   * the expected multi-tenant boot signal: stay lazily-uninitialized with an
+   * empty projection instead of writing an initialized marker with no tenant.
+   * Any other failure (including single-user bootstrap failures) propagates.
+   */
   protected async [Service.init](): Promise<void> {
-    const domain = await this.ctx.storageDomain.open(workspaceDomainSpec)
-    this.ctx.effect(() => () => domain.close(), 'workspace.domainClose')
-    this.table = domain.table('workspaces')
-    this.global = domain.global
-    this.state = domain.global.get()
-
-    await this.recoverPendingMutation()
-    this.validateStoredState(this.state)
-    if (!this.state.initialized) {
-      const headers = await this.ctx.sessionPersistence.list()
-      await this.replaceHeaderIndex(headers)
-      await this.bootstrap(headers)
-    } else if (this.table.size > 0) {
-      await this.replaceHeaderIndex(await this.ctx.sessionPersistence.list())
+    this.started = true
+    try {
+      await this.initializeTenant(this.currentKey())
+    } catch (error) {
+      if (error instanceof TenantError && error.code === 'NO_TENANT_IN_SCOPE') return
+      throw error
     }
-
-    await this.indexLiveSessions()
-    this.validateStoredState(this.requireState())
-    this.rebuildEntities()
-    this.reportFilteredCandidates()
   }
 
   /**
@@ -156,30 +163,39 @@ export class WorkspaceRegistry extends Service {
   // drop the parameter with its @param clause and the `create(path, title?)`
   // lines in this package's README pair.
   async create(path: string, title?: string): Promise<Workspace> {
+    const state = await this.ensureTenantState()
     const canonical = await realpathNormalize(path)
     if (!(await stat(canonical)).isDirectory()) {
       throw new Error(`cannot create a workspace at '${canonical}': path is not a directory`)
     }
-    return await this.enqueueOperation(() => this.createCanonical(canonical, title))
+    return await this.enqueueOperation(state, () => this.createCanonical(state, canonical, title))
   }
 
   /**
-   * Look up a workspace by id.
+   * Look up a workspace by id for the ambient tenant. Uninitialized
+   * partitions serve `undefined` (no cross-tenant leak).
    * @param id - Workspace id.
-   * @returns the workspace, or `undefined` when unknown.
+   * @returns the workspace, or `undefined` when unknown or uninitialized.
    */
   get(id: WorkspaceId): Workspace | undefined {
-    return this.entities.get(id)
+    return this.currentState()?.entities.get(id)
   }
 
   /**
-   * Synchronous workspace projection in durable registry order. Every
-   * entity's `sessionIds` getter is already filtered by the startup/live
-   * canonical-cwd header index; this method performs no persistence reads.
+   * Synchronous workspace projection for the ambient tenant in durable
+   * registry order. An uninitialized partition (multi-tenant boot, or a
+   * tenant whose domain has not yet been opened) projects as empty rather
+   * than failing. Every entity's `sessionIds` getter is already filtered by the
+   * startup/live canonical-cwd header index; this method performs no persistence reads.
    * @returns a fresh ordered array of workspace entities.
    */
   list(): Workspace[] {
-    return this.requireState().workspaceIds.map((id) => {
+    const state = this.currentState()
+    if (state === undefined) {
+      this.assertStarted()
+      return []
+    }
+    return state.state.workspaceIds.map((id) => {
       const entity = this.entities.get(id)
       if (entity === undefined) {
         throw new Error(`workspace registry order references missing workspace '${id}'`)
@@ -196,8 +212,9 @@ export class WorkspaceRegistry extends Service {
    * @param id - Workspace registration to remove.
    * @returns `true` when a record was deleted, `false` when it was unknown.
    */
-  delete(id: WorkspaceId): Promise<boolean> {
-    return this.enqueueOperation(() => this.deleteKnown(id))
+  async delete(id: WorkspaceId): Promise<boolean> {
+    const state = await this.ensureTenantState()
+    return this.enqueueOperation(state, () => this.deleteKnown(state, id))
   }
 
   /**
@@ -207,31 +224,38 @@ export class WorkspaceRegistry extends Service {
    * @param beforeId - Workspace anchor; omitted appends.
    * @returns the complete committed workspace order.
    */
-  insertBefore(id: WorkspaceId, beforeId?: WorkspaceId): Promise<readonly WorkspaceId[]> {
-    return this.enqueueOperation(async () => {
-      const state = this.requireState()
-      if (!state.workspaceIds.includes(id)) throw new WorkspaceOrderInvalidError(id)
-      if (beforeId !== undefined && !state.workspaceIds.includes(beforeId)) {
+  async insertBefore(id: WorkspaceId, beforeId?: WorkspaceId): Promise<readonly WorkspaceId[]> {
+    const state = await this.ensureTenantState()
+    return this.enqueueOperation(state, async () => {
+      const current = state.state
+      if (!current.workspaceIds.includes(id)) throw new WorkspaceOrderInvalidError(id)
+      if (beforeId !== undefined && !current.workspaceIds.includes(beforeId)) {
         throw new WorkspaceOrderInvalidError(beforeId)
       }
-      if (beforeId === id) return state.workspaceIds
-      const without = state.workspaceIds.filter(workspaceId => workspaceId !== id)
+      if (beforeId === id) return current.workspaceIds
+      const without = current.workspaceIds.filter(workspaceId => workspaceId !== id)
       const at = beforeId === undefined ? without.length : without.indexOf(beforeId)
       const workspaceIds = [...without.slice(0, at), id, ...without.slice(at)]
-      if (sameIds(workspaceIds, state.workspaceIds)) return state.workspaceIds
-      await this.setState({ ...state, workspaceIds })
+      if (sameIds(workspaceIds, current.workspaceIds)) return current.workspaceIds
+      await this.setState(state, { ...current, workspaceIds })
       return workspaceIds
     })
   }
 
   /**
-   * The registry-global archive set: sessions hidden from every grouping
-   * surface. Archiving never touches workspace accounting — an archived
-   * session keeps its `sessionIds` slot so unarchiving restores its position.
+   * The ambient tenant's registry-global archive set: sessions hidden from
+   * every grouping surface. Archiving never touches workspace accounting — an
+   * archived session keeps its `sessionIds` slot so unarchiving restores its
+   * position. An uninitialized partition projects empty.
    * @returns the archived session ids in archive order.
    */
   get archivedSessionIds(): readonly SessionId[] {
-    return this.requireState().archivedSessionIds
+    const state = this.currentState()
+    if (state === undefined) {
+      this.assertStarted()
+      return []
+    }
+    return state.state.archivedSessionIds
   }
 
   /**
@@ -241,30 +265,18 @@ export class WorkspaceRegistry extends Service {
    * @param sessionId - The session to archive.
    * @returns resolution after durability.
    */
-  archiveSession(sessionId: SessionId): Promise<void> {
-    return this.enqueueOperation(async () => {
+  async archiveSession(sessionId: SessionId): Promise<void> {
+    const state = await this.ensureTenantState()
+    return this.enqueueOperation(state, async () => {
       // The chain slot serializes against every other registry write, so this
       // check-then-write pair cannot interleave with another archive.
-      if (this.requireState().archivedSessionIds.includes(sessionId)) return
-      if (!(await this.sessionKnown(sessionId))) {
+      if (state.state.archivedSessionIds.includes(sessionId)) return
+      if (!(await this.sessionKnown(state, sessionId))) {
         throw new WorkspaceUnknownSessionError(sessionId)
       }
-      const state = this.requireState()
-      await this.setState({ ...state, archivedSessionIds: [...state.archivedSessionIds, sessionId] })
+      const current = state.state
+      await this.setState(state, { ...current, archivedSessionIds: [...current.archivedSessionIds, sessionId] })
     })
-  }
-
-  /**
-   * Whether a session is live, header-indexed, or present in a fresh
-   * persistence listing. Only a definite miss returns false — a failing
-   * `sessionPersistence.list()` propagates so storage faults never
-   * masquerade as an unknown session.
-   */
-  private async sessionKnown(id: SessionId): Promise<boolean> {
-    if (this.ctx.get('sessions')?.get(id) !== undefined) return true
-    if (this.headers.has(id)) return true
-    await this.indexHeaders(await this.ctx.sessionPersistence.list())
-    return this.headers.has(id)
   }
 
   /**
@@ -275,21 +287,123 @@ export class WorkspaceRegistry extends Service {
    * @returns the workspace owning the canonical path, when one exists.
    */
   async resolveByPath(path: string): Promise<Workspace | undefined> {
+    const state = await this.ensureTenantState()
     const canonical = await realpathNormalize(path)
-    for (const entity of this.entities.values()) {
+    for (const entity of state.entities.values()) {
       if (entity.path === canonical) return entity
     }
     return undefined
   }
 
-  private async createCanonical(canonical: string, title?: string): Promise<WorkspaceEntity> {
-    for (const entity of this.entities.values()) {
+  /**
+   * Whether a session is live, header-indexed, or present in a fresh
+   * persistence listing. Only a definite miss returns false — a failing
+   * `sessionPersistence.list()` propagates so storage faults never
+   * masquerade as an unknown session.
+   */
+  private async sessionKnown(state: TenantState, id: SessionId): Promise<boolean> {
+    if (this.ctx.get('sessions')?.get(id) !== undefined) return true
+    if (state.headers.has(id)) return true
+    await this.indexHeaders(state, await this.ctx.sessionPersistence.list())
+    return state.headers.has(id)
+  }
+
+  /** Resolve the ambient (tenant, user) partition key (`undefined` for single-user). */
+  private currentKey(): string | undefined {
+    const tenant = currentTenant()
+    const user = currentUser()
+    if (tenant === undefined || user === undefined) return undefined
+    return `${tenantPartitionName(tenant.id)}.${userPartitionName(user)}`
+  }
+
+  /** The ambient tenant's registry state, or `undefined` when not yet opened. */
+  private currentState(): TenantState | undefined {
+    return this.tenants.get(this.currentKey())
+  }
+
+  /** Throw the pre-init error only for a registry that never started. */
+  private assertStarted(): void {
+    if (!this.started) throw new Error('workspace registry is not started yet')
+  }
+
+  /**
+   * Resolve (opening, memoizing, and bootstrapping) the ambient tenant's state.
+   * @returns the ambient tenant's initialized registry state.
+   */
+  private async ensureTenantState(): Promise<TenantState> {
+    const key = this.currentKey()
+    const existing = this.tenants.get(key)
+    if (existing !== undefined) return existing
+    if (!this.started) throw new Error('workspace registry is not started yet')
+    const inflight = this.pending.get(key)
+    if (inflight !== undefined) return await inflight
+    const init = this.initializeTenant(key)
+    this.pending.set(key, init)
+    try {
+      return await init
+    } finally {
+      this.pending.delete(key)
+    }
+  }
+
+  /**
+   * Open one (tenant, user) domain and complete its history bootstrap. The
+   * opened domain, its table/global handles, the projected entity cache,
+   * header index, and the host are all stored under that partition key.
+   */
+  private async initializeTenant(key: string | undefined): Promise<TenantState> {
+    const domain = await this.ctx.storageDomain.open(workspaceDomainSpec)
+    this.ctx.effect(() => () => domain.close(), 'workspace.domainClose')
+    const state: TenantState = {
+      table: domain.table('workspaces'),
+      global: domain.global,
+      state: domain.global.get(),
+      entities: new Map(),
+      headers: new Map(),
+      sessionPaths: new Map(),
+      invalidSessionPaths: new Map(),
+      host: {
+        table: () => state.table,
+        sessionPath: id => state.sessionPaths.get(id),
+        readSessionHeader: id => this.readSessionHeader(state, id),
+        rememberSessionPath: (id, path) => {
+          state.sessionPaths.set(id, path)
+          state.invalidSessionPaths.delete(id)
+        },
+      },
+      operationTail: Promise.resolve(),
+    }
+    this.tenants.set(key, state)
+    try {
+      await this.recoverPendingMutation(state)
+      this.validateStoredState(state)
+      if (!state.state.initialized) {
+        const headers = await this.ctx.sessionPersistence.list()
+        await this.replaceHeaderIndex(state, headers)
+        await this.bootstrap(state, headers)
+      } else if (state.table.size > 0) {
+        await this.replaceHeaderIndex(state, await this.ctx.sessionPersistence.list())
+      }
+
+      await this.indexLiveSessions(state)
+      this.validateStoredState(state)
+      this.rebuildEntities(state)
+      this.reportFilteredCandidates(state)
+      return state
+    } catch (error) {
+      this.tenants.delete(key)
+      throw error
+    }
+  }
+
+  private async createCanonical(state: TenantState, canonical: string, title?: string): Promise<WorkspaceEntity> {
+    for (const entity of state.entities.values()) {
       if (entity.path === canonical) return entity
     }
 
     const workspaceName = title ?? basename(canonical)
-    const table = this.requireTable()
-    const state = this.requireState()
+    const table = state.table
+    const current = state.state
     const id = WorkspaceId(randomUUID())
     const now = new Date().toISOString()
     const record: WorkspaceRecord = {
@@ -299,24 +413,24 @@ export class WorkspaceRegistry extends Service {
       createdAt: now,
       updatedAt: now,
     }
-    const entity = new WorkspaceEntity(this.host, id, record)
-    this.entities.set(id, entity)
+    const entity = new WorkspaceEntity(state.host, id, record)
+    state.entities.set(id, entity)
     const pendingState: WorkspaceDomainState = {
-      ...state,
+      ...current,
       pendingMutation: { operation: 'create', workspaceId: id },
     }
     try {
-      await this.setState(pendingState)
+      await this.setState(state, pendingState)
     } catch (error) {
-      this.entities.delete(id)
+      state.entities.delete(id)
       throw error
     }
     try {
       await table.put(id, record)
     } catch (error) {
-      this.entities.delete(id)
+      state.entities.delete(id)
       try {
-        await this.setState(state)
+        await this.setState(state, current)
       } catch (rollbackError) {
         throw new AggregateError(
           [error, rollbackError],
@@ -327,13 +441,13 @@ export class WorkspaceRegistry extends Service {
     }
 
     try {
-      await this.setState({
+      await this.setState(state, {
         initialized: true,
-        workspaceIds: [id, ...state.workspaceIds],
-        archivedSessionIds: state.archivedSessionIds,
+        workspaceIds: [id, ...current.workspaceIds],
+        archivedSessionIds: current.archivedSessionIds,
       })
     } catch (error) {
-      this.entities.delete(id)
+      state.entities.delete(id)
       try {
         await table.delete(id)
       } catch (rollbackError) {
@@ -343,7 +457,7 @@ export class WorkspaceRegistry extends Service {
         )
       }
       try {
-        await this.setState(state)
+        await this.setState(state, current)
       } catch (rollbackError) {
         throw new AggregateError(
           [error, rollbackError],
@@ -355,31 +469,31 @@ export class WorkspaceRegistry extends Service {
     return entity
   }
 
-  private async deleteKnown(id: WorkspaceId): Promise<boolean> {
-    const entity = this.entities.get(id)
+  private async deleteKnown(state: TenantState, id: WorkspaceId): Promise<boolean> {
+    const entity = state.entities.get(id)
     if (entity === undefined) return false
-    const state = this.requireState()
+    const current = state.state
     const nextState = {
       initialized: true,
-      workspaceIds: state.workspaceIds.filter(workspaceId => workspaceId !== id),
-      archivedSessionIds: state.archivedSessionIds,
+      workspaceIds: current.workspaceIds.filter(workspaceId => workspaceId !== id),
+      archivedSessionIds: current.archivedSessionIds,
     }
-    await this.setState({
+    await this.setState(state, {
       ...nextState,
       pendingMutation: { operation: 'delete', workspaceId: id },
     })
-    this.entities.delete(id)
+    state.entities.delete(id)
     try {
-      await this.requireTable().delete(id)
+      await state.table.delete(id)
     } catch (error) {
-      this.entities.set(id, entity)
+      state.entities.set(id, entity)
       try {
-        await this.setState(state)
+        await this.setState(state, current)
       } catch (rollbackError) {
         // The durable marker still says to finish deletion, so the cache must
         // agree with that recoverable direction rather than republish a row
         // absent from the persisted order.
-        this.entities.delete(id)
+        state.entities.delete(id)
         throw new AggregateError(
           [error, rollbackError],
           `workspace '${id}' record deletion and registry-order rollback both failed`,
@@ -388,7 +502,7 @@ export class WorkspaceRegistry extends Service {
       throw error
     }
     try {
-      await this.setState(nextState)
+      await this.setState(state, nextState)
     } catch (error) {
       // The deletion committed at the table write and was already published
       // to Host streams. Keep the durable marker for startup recovery rather
@@ -405,30 +519,30 @@ export class WorkspaceRegistry extends Service {
    * order/table divergence still reaches {@link validateStoredState} and
    * fails loud; this path never guesses which operation created a row from its shape alone.
    */
-  private async recoverPendingMutation(): Promise<void> {
-    const state = this.requireState()
-    const pending = state.pendingMutation
+  private async recoverPendingMutation(state: TenantState): Promise<void> {
+    const current = state.state
+    const pending = current.pendingMutation
     if (pending === undefined) return
-    if (state.workspaceIds.includes(pending.workspaceId)) {
+    if (current.workspaceIds.includes(pending.workspaceId)) {
       throw new Error(
         `workspace domain is inconsistent: pending ${pending.operation} workspace `
         + `'${pending.workspaceId}' is still present in registry order`,
       )
     }
-    await this.requireTable().delete(pending.workspaceId)
-    await this.setState({
-      initialized: state.initialized,
-      workspaceIds: state.workspaceIds,
-      archivedSessionIds: state.archivedSessionIds,
+    await state.table.delete(pending.workspaceId)
+    await this.setState(state, {
+      initialized: current.initialized,
+      workspaceIds: current.workspaceIds,
+      archivedSessionIds: current.archivedSessionIds,
     })
   }
 
-  private async bootstrap(headers: readonly SessionHeader[]): Promise<void> {
-    const table = this.requireTable()
-    const state = this.requireState()
+  private async bootstrap(state: TenantState, headers: readonly SessionHeader[]): Promise<void> {
+    const table = state.table
+    const current = state.state
     const groupsByPath = new Map<string, SessionHeader[]>()
     for (const header of headers) {
-      const path = this.sessionPaths.get(header.id)
+      const path = state.sessionPaths.get(header.id)
       if (path === undefined) continue
       const group = groupsByPath.get(path)
       if (group === undefined) groupsByPath.set(path, [header])
@@ -470,16 +584,16 @@ export class WorkspaceRegistry extends Service {
         continue
       }
 
-      const current = table.get(id) as WorkspaceRecord
+      const currentRecord = table.get(id) as WorkspaceRecord
       const historical = group.headers
         .map(header => header.id)
         .filter(sessionId => accounted.get(sessionId) === undefined || accounted.get(sessionId) === id)
       const historicalSet = new Set(historical)
       const sessionIds = [
         ...historical,
-        ...current.sessionIds.filter(sessionId => !historicalSet.has(sessionId)),
+        ...currentRecord.sessionIds.filter(sessionId => !historicalSet.has(sessionId)),
       ]
-      if (sameSessionIds(current.sessionIds, sessionIds)) continue
+      if (sameSessionIds(currentRecord.sessionIds, sessionIds)) continue
       await table.update(id, record => ({
         ...record,
         sessionIds,
@@ -489,7 +603,7 @@ export class WorkspaceRegistry extends Service {
     }
 
     const groupRank = new Map(groups.map(group => [group.path, group.newestAt]))
-    const priorRank = new Map(state.workspaceIds.map((id, index) => [id, index]))
+    const priorRank = new Map(current.workspaceIds.map((id, index) => [id, index]))
     const workspaceIds = [...table.entries()]
       .sort(([leftId, left], [rightId, right]) => {
         const leftTime = groupRank.get(left.path) ?? Date.parse(left.createdAt)
@@ -501,16 +615,16 @@ export class WorkspaceRegistry extends Service {
       })
       .map(([id]) => id)
 
-    if (!sameIds(state.workspaceIds, workspaceIds)) {
-      await this.setState({ initialized: false, workspaceIds, archivedSessionIds: state.archivedSessionIds })
+    if (!sameIds(current.workspaceIds, workspaceIds)) {
+      await this.setState(state, { initialized: false, workspaceIds, archivedSessionIds: current.archivedSessionIds })
     }
-    await this.setState({ initialized: true, workspaceIds, archivedSessionIds: state.archivedSessionIds })
+    await this.setState(state, { initialized: true, workspaceIds, archivedSessionIds: current.archivedSessionIds })
   }
 
-  private validateStoredState(state: WorkspaceDomainState): void {
-    const table = this.requireTable()
+  private validateStoredState(state: TenantState): void {
+    const table = state.table
     const order = new Set<WorkspaceId>()
-    for (const id of state.workspaceIds) {
+    for (const id of state.state.workspaceIds) {
       if (order.has(id)) {
         throw new Error(`workspace domain is inconsistent: registry order repeats workspace '${id}'`)
       }
@@ -519,7 +633,7 @@ export class WorkspaceRegistry extends Service {
       }
       order.add(id)
     }
-    if (state.initialized && order.size !== table.size) {
+    if (state.state.initialized && order.size !== table.size) {
       const orphan = [...table.keys()].find(id => !order.has(id))
       throw new Error(
         `workspace domain is inconsistent: workspace '${orphan as WorkspaceId}' is absent from registry order`,
@@ -550,59 +664,59 @@ export class WorkspaceRegistry extends Service {
     }
   }
 
-  private rebuildEntities(): void {
-    this.entities.clear()
-    for (const id of this.requireState().workspaceIds) {
-      const record = this.requireTable().get(id) as WorkspaceRecord
-      this.entities.set(id, new WorkspaceEntity(this.host, id, record))
+  private rebuildEntities(state: TenantState): void {
+    state.entities.clear()
+    for (const id of state.state.workspaceIds) {
+      const record = state.table.get(id) as WorkspaceRecord
+      state.entities.set(id, new WorkspaceEntity(state.host, id, record))
     }
   }
 
-  private async replaceHeaderIndex(headers: readonly SessionHeader[]): Promise<void> {
-    this.headers.clear()
-    this.sessionPaths.clear()
-    this.invalidSessionPaths.clear()
-    await this.indexHeaders(headers)
+  private async replaceHeaderIndex(state: TenantState, headers: readonly SessionHeader[]): Promise<void> {
+    state.headers.clear()
+    state.sessionPaths.clear()
+    state.invalidSessionPaths.clear()
+    await this.indexHeaders(state, headers)
   }
 
-  private async indexHeaders(headers: readonly SessionHeader[]): Promise<void> {
-    for (const header of headers) await this.indexHeader(header)
+  private async indexHeaders(state: TenantState, headers: readonly SessionHeader[]): Promise<void> {
+    for (const header of headers) await this.indexHeader(state, header)
   }
 
-  private async indexHeader(header: SessionHeader): Promise<void> {
-    this.headers.set(header.id, header)
-    this.sessionPaths.delete(header.id)
+  private async indexHeader(state: TenantState, header: SessionHeader): Promise<void> {
+    state.headers.set(header.id, header)
+    state.sessionPaths.delete(header.id)
     if (header.cwd === undefined) {
-      this.invalidSessionPaths.set(header.id, 'header has no cwd')
+      state.invalidSessionPaths.set(header.id, 'header has no cwd')
       return
     }
     try {
       const path = await realpathNormalize(header.cwd)
       if (!(await stat(path)).isDirectory()) {
-        this.invalidSessionPaths.set(header.id, `cwd '${header.cwd}' is not a directory`)
+        state.invalidSessionPaths.set(header.id, `cwd '${header.cwd}' is not a directory`)
         return
       }
-      this.sessionPaths.set(header.id, path)
-      this.invalidSessionPaths.delete(header.id)
+      state.sessionPaths.set(header.id, path)
+      state.invalidSessionPaths.delete(header.id)
     } catch {
-      this.invalidSessionPaths.set(header.id, `cwd '${header.cwd}' does not resolve`)
+      state.invalidSessionPaths.set(header.id, `cwd '${header.cwd}' does not resolve`)
     }
   }
 
-  private async indexLiveSessions(): Promise<void> {
+  private async indexLiveSessions(state: TenantState): Promise<void> {
     const sessions = this.ctx.get('sessions')
     if (sessions === undefined) return
-    await this.indexHeaders(sessions.list().map(session => session.header))
+    await this.indexHeaders(state, sessions.list().map(session => session.header))
   }
 
-  private reportFilteredCandidates(): void {
-    for (const entity of this.entities.values()) {
-      const record = this.requireTable().get(entity.id) as WorkspaceRecord
+  private reportFilteredCandidates(state: TenantState): void {
+    for (const entity of state.entities.values()) {
+      const record = state.table.get(entity.id) as WorkspaceRecord
       for (const sessionId of record.sessionIds) {
-        const path = this.sessionPaths.get(sessionId)
+        const path = state.sessionPaths.get(sessionId)
         if (path === record.path) continue
-        const reason = this.invalidSessionPaths.get(sessionId)
-          ?? (this.headers.has(sessionId)
+        const reason = state.invalidSessionPaths.get(sessionId)
+          ?? (state.headers.has(sessionId)
             ? `canonical cwd '${path}' differs from workspace path '${record.path}'`
             : 'session header is missing')
         this.ctx.logger.warn(
@@ -612,47 +726,44 @@ export class WorkspaceRegistry extends Service {
     }
   }
 
-  private async readSessionHeader(id: SessionId): Promise<SessionHeader> {
+  private async readSessionHeader(state: TenantState, id: SessionId): Promise<SessionHeader> {
     const live = this.ctx.get('sessions')?.get(id)
     if (live !== undefined) {
-      this.headers.set(id, live.header)
+      state.headers.set(id, live.header)
       return live.header
     }
-    const cached = this.headers.get(id)
+    const cached = state.headers.get(id)
     if (cached !== undefined) return cached
 
     const headers = await this.ctx.sessionPersistence.list()
-    await this.indexHeaders(headers)
-    const header = this.headers.get(id)
+    await this.indexHeaders(state, headers)
+    const header = state.headers.get(id)
     if (header === undefined) {
       throw new Error(`cannot validate session '${id}': session persistence holds no such session`)
     }
     return header
   }
 
-  private requireTable(): KvTable<WorkspaceId, WorkspaceRecord> {
-    if (this.table === undefined) throw new Error('workspace registry is not started yet')
-    return this.table
+  /** The ambient partition's entity cache (single-user tests reach it via internals). */
+  private get entities(): Map<WorkspaceId, WorkspaceEntity> {
+    const state = this.currentState()
+    if (state === undefined) throw new Error('workspace registry is not started yet')
+    return state.entities
   }
 
-  private requireState(): WorkspaceDomainState {
-    if (this.state === undefined) throw new Error('workspace registry is not started yet')
-    return this.state
+  private async setState(state: TenantState, value: WorkspaceDomainState): Promise<void> {
+    await state.global.set(value)
+    state.state = value
   }
 
-  private async setState(state: WorkspaceDomainState): Promise<void> {
-    await (this.global as DomainGlobal<WorkspaceDomainState>).set(state)
-    this.state = state
-  }
-
-  private enqueueOperation<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.operationTail.then(async () => {
+  private enqueueOperation<T>(state: TenantState, operation: () => Promise<T>): Promise<T> {
+    const result = state.operationTail.then(async () => {
       // A committed delete may leave only its marker cleanup pending. Retry
       // recovery before another create/delete can overwrite that pending operation record.
-      await this.recoverPendingMutation()
+      await this.recoverPendingMutation(state)
       return await operation()
     })
-    this.operationTail = result.then(() => {}, () => {})
+    state.operationTail = result.then(() => {}, () => {})
     return result
   }
 }

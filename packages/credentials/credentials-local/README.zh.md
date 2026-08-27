@@ -7,7 +7,7 @@
 | 层 | 来源 id | 可写 | 优先 |
 |---|---|---|---|
 | 继承的进程环境 | `env` | 否 | 始终优先 |
-| `$DSH_HOME/.credentials.yaml` 文档 | `file` | 是（`set`/`unset`） | 高于两个 `.env` 层 |
+| 当前 `.credentials.yaml` 文档 | `file` | 是（`set`/`unset`） | 高于两个 `.env` 层 |
 | `<invocation cwd>/.env` | `project-env` | 不在此处 | 高于用户 `.env` |
 | `$DSH_HOME/.env` | `user-env` | 不在此处 | 其余情况 |
 
@@ -15,14 +15,16 @@
 
 它之下的所有来源优先级都低于受管存储，因此 Models 页写入的密钥会立即生效，即使某个 `.env` 里还留着更旧的密钥。没有存储任何东西时这两层仍会参与解析，`describe()` 会把来源报告为 `project-env` 或 `user-env` 且 `writable: true`——存入一个密钥就会取代它们成为生效来源。
 
+多租户部署给每个租户独立的文档：`path` 缺省时，提供方在每次调用时都从当前环境中的租户解析出 `config.path ?? <tenant.dataRoot>/.credentials.yaml`，因此租户 A 与租户 B 绝不共享存储；而租户作用域之外的请求（以及单用户 CLI）仍读取和写入 `$DSH_HOME/.credentials.yaml`。显式的 `path` 始终是一个固定的全局文档，不做租户作用域化。只有受管文档是按租户隔离的——继承环境和两个 `.env` 后备层属于进程本身，不属于任何租户，因此保持全局。
+
 在产品 CLI（命令行界面）下，解析读取的是启动器冻结的[环境快照](../../util/launch-environment/README.md)而不是 `process.env`：只有快照才说得清某个值来自启动 shell 还是来自某个文件。并非由产品 CLI 启动的组合只有继承环境这一层，这让嵌入方保持它们原有的语义。
 
 ## 配置
 
 | 字段 | 默认值 | 含义 |
 |---|---|---|
-| `path` | `<harness home>/.credentials.yaml` | 凭据文档位置。 |
-| `dshHome` | `$DSH_HOME` 或 `~/.dsh` | `path` 缺省时使用的 harness home。 |
+| `path` | `<tenant.dataRoot>/.credentials.yaml`，否则 `<harness home>/.credentials.yaml` | 凭据文档位置。 |
+| `dshHome` | `$DSH_HOME` 或 `~/.dsh` | `path` 缺省且不在租户作用域内时使用的 harness home。 |
 | `watch` | `true` | 热发布外部编辑。 |
 | `debounceMs` | `100` | watcher 写入稳定窗口。 |
 

@@ -18,7 +18,18 @@ import { validateMeta } from './meta.ts'
 import type { WorkerInit, WorkerLimits } from './types.ts'
 
 export { validateMeta } from './meta.ts'
-export { materializeFromRealm, MaterializeError } from './realm.ts'
+export { materializeFromRealm, MaterializeError, renderThrown } from './realm.ts'
+// The transport protocol is shared with the container engine provider
+// (`@deepseek-ai/dsh-workflow-container`), which drives the SAME worker-side
+// runtime over HTTP instead of a thread; both providers speak this wire.
+export { HostToWorkerType, WorkerToHostType } from './protocol.ts'
+export type {
+  HostToWorkerMessage,
+  HostToWorkerPayloads,
+  WorkerToHostMessage,
+  WorkerToHostPayloads,
+} from './protocol.ts'
+export type { ExecutionObserver } from './runtime.ts'
 export type {
   ChildHandle,
   ChildPort,

@@ -3,12 +3,14 @@ import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import Storage from '@deepseek-ai/dsh-storage'
-import type { StorageBackend } from '@deepseek-ai/dsh-storage'
+import Storage, { StorageError } from '@deepseek-ai/dsh-storage'
+import type { KvUnit, KvUnitDescriptor, StorageBackend } from '@deepseek-ai/dsh-storage'
 import { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import type { DomainChanged } from '@deepseek-ai/dsh-storage-domain'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionHeader } from '@deepseek-ai/dsh-session'
+import { requireTenant, requireUser, runWithTenant, runWithUser, TenantId, UserId } from '@deepseek-ai/dsh-tenant'
+import type { Tenant } from '@deepseek-ai/dsh-tenant'
 import { MemoryMediaPool, MemoryStorageBackend } from '../../../storage/storage-domain/tests/helpers/memory-backend.ts'
 import WorkspaceRegistry, {
   WorkspaceId,
@@ -127,6 +129,102 @@ function selectiveFailureBackend(
     },
     close: () => inner.close(),
   }
+}
+
+function tenant(id: string): Tenant {
+  return {
+    id: TenantId(id),
+    name: id,
+    dataRoot: `/data/${id}`,
+    workspaceRoot: `/workspace/${id}`,
+  }
+}
+
+/**
+ * (Tenant, user)-keyed in-memory backend mirroring `storage-postgres`: one
+ * medium per (tenant, user, unit) and an open that fails closed outside any
+ * scope, so a tenantless boot presents the same `NO_TENANT_IN_SCOPE` the
+ * registry treats as its lazily-uninitialized signal.
+ */
+class TenantMemoryBackend implements StorageBackend {
+  readonly kv: { open(descriptor: KvUnitDescriptor): Promise<KvUnit> }
+  private readonly openKeys = new Set<string>()
+  private readonly media = new Map<string, { tables: Map<string, Map<string, unknown>>; global: unknown }>()
+
+  constructor() {
+    this.kv = {
+      open: async (descriptor) => {
+        const active = requireTenant()
+        const user = requireUser()
+        const key = `${active.id}:${user}:${descriptor.name}`
+        if (this.openKeys.has(key)) {
+          throw new Error(`tenant memory unit '${descriptor.name}' is already open (double-open is a caller bug)`)
+        }
+        this.openKeys.add(key)
+        const medium = this.media.get(key) ?? { tables: new Map(), global: null }
+        this.media.set(key, medium)
+        const assertOpen = (): void => {
+          if (!this.openKeys.has(key)) {
+            throw new StorageError('closed', `tenant memory unit '${descriptor.name}' is closed`)
+          }
+          // Mirrors the per-operation (tenant, user) guard of the postgres backend.
+          requireTenant()
+          requireUser()
+        }
+        return {
+          loadAll: async () => {
+            assertOpen()
+            const tables: Record<string, Record<string, unknown>> = {}
+            for (const table of descriptor.tables) {
+              tables[table] = Object.fromEntries(medium.tables.get(table) ?? [])
+            }
+            return { tables, global: medium.global }
+          },
+          putRecord: async (table, key2, value) => {
+            assertOpen()
+            let records = medium.tables.get(table)
+            if (records === undefined) {
+              records = new Map()
+              medium.tables.set(table, records)
+            }
+            records.set(key2, value)
+          },
+          deleteRecord: async (table, key2) => {
+            assertOpen()
+            medium.tables.get(table)?.delete(key2)
+          },
+          setGlobal: async (value) => {
+            assertOpen()
+            medium.global = value
+          },
+          close: async () => {
+            this.openKeys.delete(key)
+          },
+        }
+      },
+    }
+  }
+
+  async close(): Promise<void> {
+    this.openKeys.clear()
+    this.media.clear()
+  }
+}
+
+/** Boot the registry over the tenant-keyed backend, with no tenant in scope. */
+async function tenantHarness() {
+  const ctx = new Context()
+  await ctx.plugin(Storage)
+  ctx.storage.backend.register('memory', new TenantMemoryBackend())
+  const facility = new DomainFacility(ctx, { backend: 'memory', routes: {} })
+  ctx.storage.mount('domain', facility)
+  ctx.provide('storageDomain', facility)
+  const list = vi.fn(async () => [] as SessionHeader[])
+  const load = vi.fn(() => { throw new Error('event bodies must not be loaded') })
+  const inspect = vi.fn(() => { throw new Error('event bodies must not be inspected') })
+  ctx.provide('sessionPersistence', { list, load, inspect } as never)
+  await ctx.plugin(WorkspaceRegistry)
+  return { ctx, registry: ctx.workspaceRegistry }
 }
 
 function record(path: string, sessionIds: string[], createdAt = '2026-07-24T00:00:00.000Z'): WorkspaceRecord {
@@ -562,13 +660,12 @@ describe('WorkspaceRegistry create and lookup', () => {
     })
   })
 
-  it('rejects table access before the registry has started', async () => {
+  it('rejects registry access before the registry has started', async () => {
     const dir = await makeDir('unstarted')
     const registry = new WorkspaceRegistry(new Context())
     await expect(registry.create(dir)).rejects.toThrow(/not started/)
     expect(() => registry.list()).toThrow(/not started/)
-    const internals = registry as unknown as { requireTable(): unknown }
-    expect(() => internals.requireTable()).toThrow(/not started/)
+    expect(() => registry.archivedSessionIds).toThrow(/not started/)
   })
 })
 
@@ -940,5 +1037,59 @@ describe('registry-global session archive', () => {
     )
     const upgraded = await harness({ pool: legacy })
     expect(upgraded.registry.archivedSessionIds).toEqual([])
+  })
+})
+
+describe('tenant-scoped registry', () => {
+  /** Enter the ambient (tenant, user) scope most request paths run under. */
+  const scoped = <T>(t: Tenant, user: string, fn: () => T): T =>
+    runWithTenant(t, () => runWithUser(UserId(user), fn))
+
+  it('boots outside any scope to an empty, non-throwing projection', async () => {
+    const { registry } = await tenantHarness()
+    expect(registry.list()).toEqual([])
+    expect(registry.archivedSessionIds).toEqual([])
+    expect(registry.get(WorkspaceId('00000000-0000-4000-8000-000000000001'))).toBeUndefined()
+  })
+
+  it('isolates workspace registries per (tenant, user) on create/list switches', async () => {
+    const dirA = await makeDir('tenant-a')
+    const dirB = await makeDir('tenant-b')
+    const { registry } = await tenantHarness()
+
+    await scoped(tenant('acme'), 'user-1', () => registry.create(dirA))
+    // A different tenant or user has never been accessed: its projection is
+    // still empty, not A's.
+    expect(scoped(tenant('globex'), 'user-1', () => registry.list())).toEqual([])
+    expect(scoped(tenant('acme'), 'user-2', () => registry.list())).toEqual([])
+    // A sees exactly its own workspace.
+    const acmePaths = scoped(tenant('acme'), 'user-1', () => registry.list()).map(workspace => workspace.path)
+    expect(acmePaths).toEqual([await realpath(dirA)])
+
+    await scoped(tenant('globex'), 'user-1', () => registry.create(dirB))
+    expect(scoped(tenant('globex'), 'user-1', () => registry.list()).map(workspace => workspace.path))
+      .toEqual([await realpath(dirB)])
+    // A's projection is unchanged by B's create.
+    expect(scoped(tenant('acme'), 'user-1', () => registry.list()).map(workspace => workspace.path))
+      .toEqual([await realpath(dirA)])
+
+    // Outside any scope, no partition is addressable: empty projection.
+    expect(registry.list()).toEqual([])
+  })
+
+  it('keeps two users of one tenant to separate workspace registries', async () => {
+    const dirA = await makeDir('user-a')
+    const dirB = await makeDir('user-b')
+    const { registry } = await tenantHarness()
+
+    await scoped(tenant('acme'), 'user-1', () => registry.create(dirA))
+    // user-2 of the same tenant has its own (empty) projection.
+    expect(scoped(tenant('acme'), 'user-2', () => registry.list())).toEqual([])
+    await scoped(tenant('acme'), 'user-2', () => registry.create(dirB))
+    expect(scoped(tenant('acme'), 'user-2', () => registry.list()).map(workspace => workspace.path))
+      .toEqual([await realpath(dirB)])
+    // user-1 still sees exactly its own workspace.
+    expect(scoped(tenant('acme'), 'user-1', () => registry.list()).map(workspace => workspace.path))
+      .toEqual([await realpath(dirA)])
   })
 })

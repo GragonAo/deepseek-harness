@@ -59,6 +59,10 @@
 
 `ctx.skills.register(...)` 是嵌入式运行时 skill 的便利接口。运行时 skill 使用 rank `250`：项目提供方可覆盖它们，它们则覆盖已发布本地提供方的自定义根目录和用户根目录。运行时定义和嵌套资源元数据均以只读方式借用；服务只物化一个顶层定义，以补入省略的调用策略和 `provider` 默认值。运行时贡献内的注册使用先到先得，因此重复贡献无法通过其 disposer 移除当前生效的贡献。
 
+## 环境层级 skill
+
+多租户载体注册 `ctx.skillTiers`——一个可选的 `SkillTierProvider` 服务——而非运行时 skill。它的 `roots()` 把环境的 (租户, 用户) 作用域映射为三个宿主 skill 目录，并以 `CASE_SKILL_RANK` `30`、`USER_GLOBAL_SKILL_RANK` `40`、`SYSTEM_SKILL_RANK` `50` 返回，因此案件层胜过用户全局层，进而胜过系统层，进而胜过所有静态提供方 rank（`100` 及以上）。文件系统提供方会追加这个可选服务提供的任何根；单用户安装从不注册它。
+
 ## 消费方边界
 
 注册表不渲染模型指引，也不注册面向模型的工具。[`@deepseek-ai/dsh-tool-skill`](../tool-skill) 消费 `ctx.skills` 以提供持久会话目录和 `skill` 工具，因此提供方仍与模型接口独立。

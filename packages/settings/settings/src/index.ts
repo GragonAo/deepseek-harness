@@ -8,6 +8,7 @@
 
 import { Context, Service } from '@deepseek-ai/cordis'
 import type z from '@deepseek-ai/schemastery'
+import { currentTenant, currentUser } from '@deepseek-ai/dsh-tenant'
 import { redactSecrets } from './redact.ts'
 import type { RedactedSecret } from './redact.ts'
 import type { SettingsNamespace, SettingsUpdateSource } from './types.ts'
@@ -15,6 +16,45 @@ import type { SettingsNamespace, SettingsUpdateSource } from './types.ts'
 export { redactSecrets } from './redact.ts'
 export type { RedactedSecret, RedactedValue } from './redact.ts'
 export type { SettingsNamespace, SettingsUpdateSource } from './types.ts'
+
+/**
+ * Precedence ranks for the multi-tenant ambient configuration tiers. Lower
+ * ranks win a duplicate key within one resolution, so the session tier
+ * outranks the case tier, which outranks the user-global tier, which outranks
+ * the read-only system tier (`$DSH_HOME/system/config`). The per-(tenant,user)
+ * runtime document has no rank because it layers above every tier.
+ */
+/** Precedence rank of the ambient session configuration tier; the nearest tier. */
+export const SESSION_CONFIG_RANK = 20
+/** Precedence rank of the ambient case configuration tier, below session above user-global. */
+export const CASE_CONFIG_RANK = 30
+/** Precedence rank of the ambient user-global configuration tier, above system below case. */
+export const USER_GLOBAL_CONFIG_RANK = 40
+/** Precedence rank of the ambient system configuration tier, also the lowest disk tier. */
+export const SYSTEM_CONFIG_RANK = 50
+
+/** Which ambient carrier tier a configuration directory belongs to. */
+export type SettingsTierKind = 'session' | 'case' | 'user-global' | 'system'
+
+/**
+ * One ambient configuration directory the carrier resolves from the current
+ * (tenant, user, session) scope. `path` is a host directory outside the tenant
+ * container, so the consuming resolver reads it with host I/O.
+ */
+export interface SettingsTierRoot {
+  readonly kind: SettingsTierKind
+  readonly path: string
+  readonly rank: number
+  readonly trustedHost: boolean
+}
+
+/** Optional ambient configuration-tier supplier; only the multi-tenant carrier registers it. */
+export interface SettingsTierProvider {
+  /** Resolve the session, case, user-global, and system config directories nearest tier first. */
+  roots(): readonly SettingsTierRoot[]
+  /** Read and deep-merge the per-namespace config files across every tier, nearest tier wins. */
+  merged(ns: SettingsNamespace): Record<string, unknown>
+}
 
 const NAMESPACE_PATTERN = /^[a-z][a-z0-9-]*$/
 
@@ -131,6 +171,8 @@ export interface SettingsScope<T> {
 declare module '@deepseek-ai/cordis' {
   interface Context {
     settings: SettingsProvider
+    /** Ambient multi-tenant configuration tier provider; only the multi-tenant carrier registers it. */
+    settingsTiers?: SettingsTierProvider | undefined
   }
 }
 
@@ -293,8 +335,11 @@ function cloneJsonShaped(
  * carries `undefined` entries — sections come from parsed documents and write
  * snapshots pass {@link cloneJsonShaped}, which strips them so a sparse patch
  * cannot erase lower keys.
+ * @param under - the lower layer values merge over.
+ * @param over - the upper layer; its values win a duplicate key.
+ * @returns the recursively merged value.
  */
-function mergeLayers(under: unknown, over: unknown): unknown {
+export function mergeLayers(under: unknown, over: unknown): unknown {
   if (over === undefined) return under
   if (!isPlainObject(under) || !isPlainObject(over)) return over
   const merged: Record<string, unknown> = { ...under }
@@ -349,8 +394,10 @@ interface SettingsRegistration {
  */
 export abstract class SettingsProvider extends Service {
   private readonly registrations = new Map<SettingsNamespace, SettingsRegistration>()
-  /** Latest published raw document; empty until the provider's first publish. */
-  private document: Record<string, unknown> = {}
+  /** (Tenant, user)-keyed raw documents; the empty key is the no-scope global document. */
+  private readonly documents = new Map<string, Record<string, unknown>>()
+  /** Key of the document currently backing namespace resolution. */
+  private activeKey = ''
   /** Per-namespace write chains; settled tails, so a failure never poisons the queue. */
   private readonly writeQueues = new Map<SettingsNamespace, Promise<unknown>>()
   /** In-flight watcher invocation segments, drained by the dispose teardown. */
@@ -444,7 +491,7 @@ export abstract class SettingsProvider extends Service {
       ...options?.validate === undefined
         ? {}
         : { validate: options.validate as (value: unknown) => void },
-      resolved: deepFreeze(this.resolve(schema, options?.base, this.section(ns), options?.validate)),
+      resolved: deepFreeze(this.resolve(ns, schema, options?.base, this.section(ns), options?.validate)),
       revision: 0,
       watchers: new Set(),
     }
@@ -455,7 +502,7 @@ export abstract class SettingsProvider extends Service {
       return () => this.registrations.delete(ns)
     }, `settings.register(${JSON.stringify(String(ns))})`)
     return {
-      get: () => registration.resolved as T,
+      get: () => this.get(ns) as T,
       watch: (callback) => {
         const watcher: SettingsWatcher = { callback: callback, tail: Promise.resolve(), active: true }
         registration.watchers.add(watcher)
@@ -477,6 +524,7 @@ export abstract class SettingsProvider extends Service {
    * @returns one descriptor per registered namespace, in registration order.
    */
   describe(options?: SettingsDescribeOptions): SettingsDescriptor[] {
+    this.activate()
     return [...this.registrations.values()].map((registration) => {
       let user: Record<string, unknown> | undefined
       try {
@@ -517,6 +565,7 @@ export abstract class SettingsProvider extends Service {
    * @returns the resolved value, or `undefined` while unregistered.
    */
   get(ns: SettingsNamespace): unknown {
+    this.activate()
     return this.registrations.get(ns)?.resolved
   }
 
@@ -592,6 +641,10 @@ export abstract class SettingsProvider extends Service {
     if (!this.writable) {
       throw new Error(`settings provider is read-only: "${ns}" cannot be updated in-process`)
     }
+    // Bind the write to the (tenant, user) ambient at call entry so a queued
+    // write still targets the scope that issued it, not whichever one is
+    // ambient when the queue reaches it.
+    const key = this.scopeKey()
     // A mutate's ops array is wrapped so one JSON-shape walk covers both
     // shapes; merge/replace carry the section itself.
     let payload: Record<string, unknown>
@@ -616,6 +669,10 @@ export abstract class SettingsProvider extends Service {
       if (this.registrations.get(ns) !== registration) {
         throw new Error(`settings namespace "${ns}" registration was disposed before the queued ${verb} ran`)
       }
+      // Load the write's tenant document (once) before reading the section it
+      // merges over, so a write never resurrects a stale field of a sibling
+      // namespace the tenant already has on disk.
+      await this.ensureActive(key)
       // Every mode derives from the section as it stands NOW, at the front of
       // the queue — never from whatever the caller last saw.
       const current = this.section(ns) ?? {}
@@ -630,12 +687,14 @@ export abstract class SettingsProvider extends Service {
         : mode === 'replace'
           ? snapshot
           : (snapshot['ops'] as SettingsPathOp[]).reduce(applyPathOp, current)
-      const next = deepFreeze(this.resolve(registration.schema, registration.base, section, registration.validate))
+      const next = deepFreeze(this.resolve(ns, registration.schema, registration.base, section, registration.validate))
       await this.persist(ns, section)
       // The write reached storage either way; the cache must say so. Commit
       // only when this registration is still the namespace owner — a fiber
       // disposed (or replaced) mid-persist must not receive the notification.
-      this.document[ns] = section
+      const document = this.documents.get(key) ?? {}
+      document[ns] = section
+      this.documents.set(key, document)
       // TODO(settings-replacement-resync): Re-resolve any replacement registration
       // from this persisted section so an old in-flight write cannot leave it stale.
       if (this.registrations.get(ns) === registration && !this.isStopped()) {
@@ -648,13 +707,71 @@ export abstract class SettingsProvider extends Service {
   }
 
   /**
-   * Provider hook: commit a complete raw document observed in storage. Each
-   * registered namespace re-resolves; an invalid section keeps that
-   * namespace's last good value and warns, other namespaces still commit.
+   * Whether this provider stores one document per ambient tenant. Tenant-keyed
+   * providers override this to `true`; a fixed-document provider (one document
+   * shared by every tenant) keeps `false`, which is also the single-user
+   * behavior.
+   */
+  protected get tenantScoped(): boolean {
+    return false
+  }
+
+  /**
+   * Whether this provider stores one document per ambient user, nested inside
+   * the tenant's document set. User-scoped providers are necessarily
+   * tenant-scoped; non-user-scoped providers keep `false`. The per-user key is
+   * only formed while both a tenant and a user are ambient.
+   */
+  protected get userScoped(): boolean {
+    return false
+  }
+
+  /** The (tenant, user) scope key of the ambient scope: a composite, or '' without one. */
+  protected scopeKey(): string {
+    if (this.userScoped) {
+      const tenant = currentTenant()
+      const user = currentUser()
+      if (tenant === undefined || user === undefined) return ''
+      return `${tenant.id}\u0000${user}`
+    }
+    if (!this.tenantScoped) return ''
+    const tenant = currentTenant()
+    return tenant === undefined ? '' : tenant.id
+  }
+
+  /** The raw document currently backing namespace resolution. */
+  private get document(): Record<string, unknown> {
+    return this.documents.get(this.activeKey) ?? {}
+  }
+
+  /**
+   * Provider hook: commit a complete raw document observed in storage for the
+   * ambient (tenant, user) scope. Each registered namespace re-resolves; an
+   * invalid section keeps that namespace's last good value and warns, other
+   * namespaces still commit.
    * @param doc - the detached raw document (unregistered sections preserved).
    * @param source - change origin; defaults to `provider`.
    */
   protected publish(doc: Record<string, unknown>, source: SettingsUpdateSource = 'provider'): void {
+    this.publishFor(this.scopeKey(), doc, source)
+  }
+
+  /**
+   * Commit one raw document under an explicit scope key without consulting the
+   * ambient scope. The publish hook delegates here; a provider whose detached
+   * watcher fires outside any request publishes to the key it captured at
+   * watch time.
+   * @param key - the (tenant, user) scope key the document belongs to ('' = global).
+   * @param doc - the detached raw document.
+   * @param source - change origin; defaults to `provider`.
+   */
+  protected publishFor(key: string, doc: Record<string, unknown>, source: SettingsUpdateSource = 'provider'): void {
+    this.activeKey = key
+    this.commitDocument(doc, source)
+  }
+
+  /** Swap the active document and re-resolve every registered namespace against it. */
+  private commitDocument(doc: Record<string, unknown>, source: SettingsUpdateSource): void {
     // Read every raw section BEFORE swapping the document, so the revision
     // bump below compares what was stored with what now is — an external edit
     // moves the revision exactly like an in-process write.
@@ -668,11 +785,12 @@ export abstract class SettingsProvider extends Service {
         before.set(registration.ns, undefined)
       }
     }
-    this.document = doc
+    this.documents.set(this.activeKey, doc)
     for (const registration of this.registrations.values()) {
       let next: unknown
       try {
-        next = deepFreeze(this.resolve(registration.schema, registration.base, this.section(registration.ns), registration.validate))
+        next = deepFreeze(this.resolve(registration.ns, registration.schema, registration.base,
+          this.section(registration.ns), registration.validate))
       } catch (error) {
         this.ctx.logger.warn('settings: keeping last good "%s" after invalid stored section', registration.ns)
         this.ctx.logger.warn(error)
@@ -681,6 +799,36 @@ export abstract class SettingsProvider extends Service {
       this.bumpRevision(registration, before.get(registration.ns), this.section(registration.ns))
       this.commit(registration, next, source)
     }
+  }
+
+  /**
+   * Synchronously surface the ambient scope's cached document so a read in a
+   * new (tenant, user) scope reflects that scope's own sections. An un-loaded
+   * scope resolves from its empty document; async writes load it lazily first.
+   */
+  private activate(): void {
+    const key = this.scopeKey()
+    if (key === this.activeKey) return
+    this.activeKey = key
+    this.commitDocument(this.documents.get(key) ?? {}, 'provider')
+  }
+
+  /**
+   * Activate the ambient (tenant, user) scope for a write, loading its
+   * document through the provider when this process has not observed it yet,
+   * so a read-modify-write never merges over a sibling section that already
+   * exists on disk.
+   * @param key - the scope key captured at write call entry.
+   */
+  private async ensureActive(key: string): Promise<void> {
+    if (key === this.activeKey) return
+    let document = this.documents.get(key)
+    if (document === undefined) {
+      document = await this.load()
+      this.documents.set(key, document)
+    }
+    this.activeKey = key
+    this.commitDocument(document, 'provider')
   }
 
   /** Read one namespace's raw user section, rejecting non-object sections. */
@@ -693,8 +841,13 @@ export abstract class SettingsProvider extends Service {
     return section
   }
 
-  /** Resolve one namespace value: schema defaults, then `base`, then the user layer. */
+  /**
+   * Resolve one namespace value: schema defaults, then `base`, then the
+   * ambient tier document (when a `settingsTiers` supplier is mounted), then
+   * the per-(tenant, user) user layer.
+   */
   private resolve<T>(
+    ns: SettingsNamespace,
     schema: z<T>,
     base: unknown,
     section: Record<string, unknown> | undefined,
@@ -702,11 +855,23 @@ export abstract class SettingsProvider extends Service {
   ): T {
     // The merged candidate is untyped by construction; the schema call is the
     // runtime validation that admits it into T.
-    const value = schema(mergeLayers(base, section) as never)
-    // The owner's own check runs on the admitted value, so it sees defaults
-    // and the composition base exactly as the owner will.
+    const value = schema(mergeLayers(mergeLayers(base, this.tierSection(ns)), section) as never)
+    // The owner's own check runs on the admitted value, so it sees defaults,
+    // the composition base, and the tier document exactly as the owner will.
     validate?.(value)
     return value
+  }
+
+  /**
+   * Read the ambient tier document for one namespace: the merged per-namespace
+   * config files across the session, case, user-global, and system tiers when
+   * a `settingsTiers` supplier is mounted, absent otherwise. Throws propagate
+   * so a malformed tier file fails registration loudly and a later edit keeps
+   * the namespace's last good value through {@link commitDocument}'s guard.
+   */
+  private tierSection(ns: SettingsNamespace): Record<string, unknown> | undefined {
+    const tiers = this.ctx.get('settingsTiers')
+    return tiers === undefined ? undefined : tiers.merged(ns)
   }
 
   /**

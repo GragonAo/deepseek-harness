@@ -4,6 +4,8 @@ English | [中文](README.zh.md)
 
 User-settings Service Definition (`ctx.settings`). One provider holds a raw document of per-namespace sections; plugins register a namespace schema and read a resolved value layered as schema defaults, then the registrant's composition `base` (its cordis.yml entry-config subset), then the user document section. Without a mounted provider nothing changes for consumers: they keep resolving entry config alone, so every composition works with or without settings.
 
+When a provider declares itself tenant-scoped (`tenantScoped: true`), the base service keys the in-memory parsed document by the ambient tenant id (`''` when no tenant) and re-sources each namespace's resolved snapshot when the ambient tenant changes, so no tenant's section leaks into another. A user-scoped provider (`userScoped: true`, necessarily tenant-scoped) keys that document by the composite `(tenant, user)` scope key instead, so two users of one tenant keep separate documents; the per-user key is formed only while both a tenant and a user are in scope. Outside any scope the single global document (`''`) is used unchanged.
+
 ## Service API
 
 - `documentPath` — absolute path of the provider's user-editable file when it has one; non-file providers leave it `undefined`. Host configuration adapters derive availability from it, while browser protocols expose only a boolean capability and never a filesystem target.

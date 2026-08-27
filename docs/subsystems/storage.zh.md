@@ -162,7 +162,7 @@ Source: [`packages/storage/storage/src/index.ts:47`](../../packages/storage/stor
 
 ### `ctx.storageDomain` — `DomainFacility`
 
-The mounted domain facility. Opens declared domains over routed backends; one facility instance owns the open-domain table and enforces single-open per domain name.
+The mounted domain facility. Opens declared domains over routed backends; one facility instance owns the open-domain table and enforces single-open per (tenant, domain name).
 
 ```ts cordis-catalog
 /**
@@ -184,9 +184,10 @@ The mounted domain facility. Opens declared domains over routed backends; one fa
 async open<S extends DomainSpec>(spec: S): Promise<Domain<S>>
 
 /**
- * Look up an open domain by name, untyped. Diagnostic surface (the package
- * invariant cross-checks change events against live domain state); typed
- * consumers hold the handle returned by {@link open}.
+ * Look up an open domain by name for the ambient tenant, untyped.
+ * Diagnostic surface (the package invariant cross-checks change events
+ * against live domain state); typed consumers hold the handle returned by
+ * {@link open}.
  * @param name - Domain name.
  * @returns the open domain runtime, or `undefined` when not open.
  */
@@ -201,7 +202,7 @@ get(name: string): DomainImpl | undefined
 async closeAll(): Promise<void>
 ```
 
-Source: [`packages/storage/storage-domain/src/index.ts:69`](../../packages/storage/storage-domain/src/index.ts)
+Source: [`packages/storage/storage-domain/src/index.ts:88`](../../packages/storage/storage-domain/src/index.ts)
 
 <a id="domain-events"></a>
 

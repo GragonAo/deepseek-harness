@@ -159,6 +159,17 @@ describe('loadProfile', () => {
     }
     expect(readProfileManifest('t', resolveProfileDir('web', home)).dsh?.profile?.bundles)
       .toEqual([...PROFILE_TEMPLATES.web ?? []])
+    // The multi-tenant template layers the tenant bundle after the web host rows.
+    expect(PROFILE_TEMPLATES['multi-tenant']).toEqual([
+      '@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@deepseek-ai/dsh-multi-tenant',
+    ])
+    try {
+      loadProfile('t', 'multi-tenant', anchor, home)
+    } catch {
+      // Resolution failure is the plain-Node outcome for this empty anchor.
+    }
+    expect(readProfileManifest('t', resolveProfileDir('multi-tenant', home)).dsh?.profile?.bundles)
+      .toEqual([...PROFILE_TEMPLATES['multi-tenant'] ?? []])
   })
 
   it('normalizes only the exact installation-owned headless bundle tuple', () => {

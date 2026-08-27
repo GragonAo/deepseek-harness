@@ -108,6 +108,11 @@ export const SERVICE_PAGE: Record<string, string> = {
   web: 'web.md',
   workflowEngine: 'workflow.md',
   workspaceRegistry: 'workspace.md',
+  agentHttp: 'multi-tenant.md',
+  containerRuntime: 'multi-tenant.md',
+  tenantAuth: 'multi-tenant.md',
+  tenantHttpApi: 'multi-tenant.md',
+  tenants: 'multi-tenant.md',
 }
 
 /**
@@ -156,6 +161,9 @@ export const SERVICE_WALK_EXEMPTIONS: Record<string, string> = {
   slots: 'client-side interface-typed browser service — packages/client/runtime/README.md owns the API',
   theme: 'client-side interface-typed browser service — packages/client/ui-theme/README.md owns the API',
   workspaces: 'client-side interface-typed browser service — packages/client/runtime/README.md owns the API',
+  settingsTiers: 'optional tier-carrier accessor (SettingsTierProvider | undefined) read by the settings Service Definition — packages/settings/settings/README.md owns the API',
+  skillTiers: 'optional tier-carrier accessor (SkillTierProvider | undefined) read by the skill filesystem provider — packages/skill/skill/README.md owns the API',
+  toolTiers: 'optional tier-carrier accessor (ToolTierProvider | undefined) read by the tool-manifest loader — packages/core/tools/README.md owns the API',
 }
 
 /**
@@ -518,6 +526,8 @@ export const FOUNDATION_TYPE_NAMES: ReadonlySet<string> = new Set([
   'Promise',
   'Record',
   'Readonly',
+  'Request',
+  'Response',
   'Uint8Array',
 ])
 
@@ -596,6 +606,13 @@ export const TYPE_LINK_EXEMPTIONS: Readonly<Record<string, string>> = {
   WorkflowAgentEndInfo: 'event-local snapshot is owned by packages/workflow/workflow/src/index.ts',
   WorkflowAgentInfo: 'event-local snapshot is owned by packages/workflow/workflow/src/index.ts',
   WorkflowResultInfo: 'event-local snapshot is owned by packages/workflow/workflow/src/index.ts',
+  TenantId: 'tenant identity is owned by packages/tenant/tenant/README.md',
+  UserId: 'user identity is owned by packages/tenant/tenant/README.md',
+  Tenant: 'resolved tenant record is owned by packages/tenant/tenant/README.md',
+  TenantPrincipal: 'authenticated tenant principal is owned by packages/tenant/tenant-auth/README.md',
+  TenantOperation: 'tenant HTTP operation contract is owned by packages/tenant/api-http/README.md',
+  ContainerCommandResult: 'container command result is owned by packages/tenant/container/README.md',
+  ContainerExecOptions: 'container exec options are owned by packages/tenant/container/README.md',
 }
 
 /** Repository data policy consumed by the Cordis catalog projector. */

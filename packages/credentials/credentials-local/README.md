@@ -7,7 +7,7 @@ File-backed [credentials](../credentials/README.md) provider: four layers, one h
 | Layer | Source id | Writable | Wins |
 |---|---|---|---|
 | Inherited process environment | `env` | no | always |
-| `$DSH_HOME/.credentials.yaml` document | `file` | yes (`set`/`unset`) | over both `.env` layers |
+| active `.credentials.yaml` document | `file` | yes (`set`/`unset`) | over both `.env` layers |
 | `<invocation cwd>/.env` | `project-env` | not here | over the user `.env` |
 | `$DSH_HOME/.env` | `user-env` | not here | otherwise |
 
@@ -15,14 +15,16 @@ The launching environment wins because a per-run override (`DEEPSEEK_API_KEY=…
 
 Everything below it loses to the managed store, so a key written by the Models page takes effect immediately even when an older key sits in a `.env`. Those two layers still resolve when nothing is stored, and `describe()` names them `project-env` or `user-env` with `writable: true` — storing a key replaces them as the effective source.
 
+A multi-tenant deployment gives every tenant its own document: with `path` omitted the provider resolves `config.path ?? <tenant.dataRoot>/.credentials.yaml` from the ambient tenant at each call, so tenant A and tenant B never share a store, while a request outside any tenant scope (and the single-user CLI) keeps reading and writing `$DSH_HOME/.credentials.yaml`. An explicit `path` stays one fixed global document with no tenant scoping. Only the managed document is tenant-scoped — the inherited environment and the two `.env` fallback layers are the process's own, never a tenant's, and stay global.
+
 Under the product CLI, resolution reads the launcher's frozen [environment snapshot](../../util/launch-environment/README.md) rather than `process.env`: only the snapshot can say whether a value came from the launching shell or from a file. A composition the product CLI did not boot has the inherited environment as its only layer, which keeps embedders on the semantics they already had.
 
 ## Config
 
 | Field | Default | Meaning |
 |---|---|---|
-| `path` | `<harness home>/.credentials.yaml` | Credentials document location. |
-| `dshHome` | `$DSH_HOME` or `~/.dsh` | Harness home used when `path` is omitted. |
+| `path` | `<tenant.dataRoot>/.credentials.yaml`, else `<harness home>/.credentials.yaml` | Credentials document location. |
+| `dshHome` | `$DSH_HOME` or `~/.dsh` | Harness home used when `path` is omitted and no tenant is in scope. |
 | `watch` | `true` | Hot-publish external edits. |
 | `debounceMs` | `100` | Watcher write-settle window. |
 

@@ -27,6 +27,19 @@ const RUNTIME_RANK = 250
 export const BUNDLED_SKILL_RANK = 600
 
 /**
+ * Precedence ranks for the multi-tenant ambient skill tiers. Lower ranks win
+ * duplicate names within one registry layer, so the case tier outranks the
+ * user-global tier, which outranks the system tier, which in turn outranks
+ * project, runtime, custom, user, and bundled entries (those ranks are 100+).
+ */
+/** Precedence rank of the ambient case tier; the nearest, highest-priority tier. */
+export const CASE_SKILL_RANK = 30
+/** Precedence rank of the ambient user-global tier, above system but below case. */
+export const USER_GLOBAL_SKILL_RANK = 40
+/** Precedence rank of the ambient system tier, above every static provider rank. */
+export const SYSTEM_SKILL_RANK = 50
+
+/**
  * Return whether a string is a valid kebab-case skill name.
  * @param name - candidate skill name to validate.
  * @returns whether the name matches the public skill-name grammar.
@@ -117,6 +130,32 @@ export interface SkillLookupOptions {
 export interface SkillViewOptions extends SkillLookupOptions {
   /** Viewing scope (the calling agent); omitted reads the global layer alone. */
   readonly scope?: ScopeKey | undefined
+}
+
+/** Ambient tier a filesystem tier root belongs to. */
+export type SkillTierKind = 'case' | 'user-global' | 'system'
+
+/**
+ * One ambient multi-tenant skill tier root resolved by the carrier for the
+ * current (tenant, user) scope: case-shared, user-global, and system skill
+ * directories. A carrier-provided root is a host path outside the container's
+ * own filesystem, so it must be read with host-trusted I/O.
+ */
+export interface SkillTierRoot {
+  readonly kind: SkillTierKind
+  readonly path: string
+  readonly rank: number
+  readonly trustedHost: boolean
+}
+
+/**
+ * Provider of the ambient skill tier roots for the current request scope,
+ * ordered nearest (highest precedence) tier first. Registered only by the
+ * multi-tenant carrier; absent in single-user bundles.
+ */
+export interface SkillTierProvider {
+  /** Resolve the ambient tier roots at call time, or empty outside any (tenant, user) scope. */
+  roots(): readonly SkillTierRoot[]
 }
 
 /**
@@ -284,6 +323,8 @@ export interface Config {
 declare module '@deepseek-ai/cordis' {
   interface Context {
     skills: SkillRegistry
+    /** Ambient multi-tenant skill tier provider; only the multi-tenant carrier registers it. */
+    skillTiers?: SkillTierProvider | undefined
   }
 
   interface Events {

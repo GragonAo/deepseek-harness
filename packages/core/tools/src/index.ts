@@ -6,7 +6,7 @@
 
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { AnonymousEntries, NamedEntries, ScopedLayers, scopeOf, scopeTarget } from '@deepseek-ai/dsh-scope'
+import { AnonymousEntries, ScopedLayers, scopeOf, scopeTarget } from '@deepseek-ai/dsh-scope'
 import type { ScopeKey, ScopeLayer, Scoped } from '@deepseek-ai/dsh-scope'
 import type { CallId, ContentBlock, ToolSchema } from '@deepseek-ai/dsh-llm'
 import { assertNever, deepFreeze, HarnessError } from '@deepseek-ai/dsh-llm'
@@ -56,6 +56,40 @@ const COLLAPSE_SECTION_ORDER = 99
  * model can only discover by being denied is one it corrects too late.
  */
 const CODE_ONLY_INSTRUCTION = `\`${RUN_CODE_NAME}\` is the only tool you can call directly — a tool call naming any other tool fails. Reach every tool the SDK declares below from inside the program.`
+
+/**
+ * Precedence ranks for the multi-tenant ambient tool tiers. Lower ranks win a
+ * duplicate name within one registration layer, so the case tier outranks the
+ * user-global tier, which outranks the system tier (built-in native tools and
+ * the read-only `$DSH_HOME/system/tools` directory).
+ */
+/** Precedence rank of the ambient case tool tier; the nearest, highest-priority tier. */
+export const CASE_TOOL_RANK = 30
+/** Precedence rank of the ambient user-global tool tier, above system but below case. */
+export const USER_GLOBAL_TOOL_RANK = 40
+/** Precedence rank of the ambient system tool tier, also the built-in native tools' rank. */
+export const SYSTEM_TOOL_RANK = 50
+
+/** Which ambient carrier tier a tool-manifest directory belongs to. */
+export type ToolTierKind = 'case' | 'user-global' | 'system'
+
+/**
+ * One ambient tool-manifest directory the carrier resolves from the current
+ * (tenant, user) scope. `path` is a host directory outside the tenant
+ * container, so the consuming loader reads it with host I/O.
+ */
+export interface ToolTierRoot {
+  readonly kind: ToolTierKind
+  readonly path: string
+  readonly rank: number
+  readonly trustedHost: boolean
+}
+
+/** Optional ambient tool-tier supplier; only the multi-tenant carrier registers it. */
+export interface ToolTierProvider {
+  /** Resolve the case, user-global, and system tool directories nearest tier first. */
+  roots(): readonly ToolTierRoot[]
+}
 
 const SDK_RENDERERS: Record<string, (schemas: ToolSdkSchema[]) => string> = {
   typescript: renderToolsSdk,
@@ -137,6 +171,8 @@ export type {
 declare module '@deepseek-ai/cordis' {
   interface Context {
     tools: ToolRuntime
+    /** Ambient multi-tenant tool tier provider; only the multi-tenant carrier registers it. */
+    toolTiers?: ToolTierProvider | undefined
   }
 
   interface Events {
@@ -710,9 +746,120 @@ interface ToolView {
  */
 export type ToolGuard = (execution: Readonly<ToolExecution>) => string | undefined
 
+/** One borrowed ranked tool entry: its identity, name, definition, and precedence rank. */
+interface RankedToolEntry {
+  /** Per-insertion identity so a shadowed disposer removes exactly its own entry. */
+  readonly id: symbol
+  readonly name: string
+  readonly definition: ToolDefinition
+  readonly rank: number | undefined
+}
+
+/**
+ * Ranked tool-name table for one registry layer. Native tools register with no
+ * rank; tier-mapped manifests register with a {@link ToolTierRoot} rank. A
+ * duplicate name within one effective rank (two unranked native tools, or two
+ * declarations from the same tier) still throws, while a lower rank shadows a
+ * higher one — so a case declaration overrides a same-named user-global tool,
+ * which overrides a same-named system tool, and any ranked declaration
+ * overrides a same-named unranked native tool. Disposing a nearer entry
+ * restores the shadowed entry it replaced, so a scope that loads
+ * system→user-global→case and disposes case→user-global→system returns to the
+ * empty view regardless of disposal order.
+ */
+class ToolEntries {
+  private winner = new Map<string, RankedToolEntry>()
+  private shadowed = new Map<string, RankedToolEntry[]>()
+
+  constructor(private readonly duplicateError: (name: string) => Error) {}
+
+  /**
+   * Insert one tool name at a rank.
+   * @param name - tool name.
+   * @param definition - borrowed definition to retain.
+   * @param rank - precedence rank (lower wins); `undefined` = native, the lowest precedence.
+   * @returns an idempotent undo that removes exactly this insertion and restores any entry it shadowed.
+   */
+  insert(name: string, definition: ToolDefinition, rank: number | undefined): () => void {
+    const entry: RankedToolEntry = { id: Symbol(), name, definition, rank }
+    const current = this.winner.get(name)
+    if (current !== undefined) {
+      const newRank = precedence(rank)
+      const currentRank = precedence(current.rank)
+      if (newRank === currentRank) throw this.duplicateError(name)
+      if (newRank < currentRank) {
+        this.pushShadowed(name, current)
+        this.winner.set(name, entry)
+      } else {
+        this.pushShadowed(name, entry)
+      }
+    } else {
+      this.winner.set(name, entry)
+    }
+    return this.disposer(entry)
+  }
+
+  /** Iterate the currently visible entries in insertion order. */
+  *entries(): IterableIterator<[string, ToolDefinition]> {
+    for (const [name, entry] of this.winner) yield [name, entry.definition]
+  }
+
+  /** Whether no name is currently visible (mirrors `NamedEntries#isEmpty`). */
+  isEmpty(): boolean {
+    return this.winner.size === 0
+  }
+
+  private pushShadowed(name: string, entry: RankedToolEntry): void {
+    const stack = this.shadowed.get(name)
+    if (stack === undefined) this.shadowed.set(name, [entry])
+    else stack.push(entry)
+  }
+
+  /**
+   * The one disposer every insertion shares: drop the entry whether it is
+   * currently the visible winner (restoring the nearest shadowed entry) or a
+   * shadowed entry (removing it from the stack), so out-of-order disposal
+   * stays correct.
+   */
+  private disposer(entry: RankedToolEntry): () => void {
+    let active = true
+    return () => {
+      if (!active) return
+      active = false
+      const name = entry.name
+      if (this.winner.get(name)?.id === entry.id) {
+        const stack = this.shadowed.get(name)
+        const restored = stack === undefined ? undefined : stack.pop()
+        if (restored !== undefined) {
+          this.winner.set(name, restored)
+          if (stack !== undefined && stack.length === 0) this.shadowed.delete(name)
+        } else {
+          this.winner.delete(name)
+        }
+      } else {
+        this.pullShadowed(name, entry.id)
+      }
+    }
+  }
+
+  private pullShadowed(name: string, id: symbol): void {
+    const stack = this.shadowed.get(name)
+    if (stack === undefined) return
+    const index = stack.findIndex(entry => entry.id === id)
+    if (index === -1) return
+    stack.splice(index, 1)
+    if (stack.length === 0) this.shadowed.delete(name)
+  }
+}
+
+/** Effective precedence: unranked native tools rank below every numbered tier. */
+function precedence(rank: number | undefined): number {
+  return rank === undefined ? Number.POSITIVE_INFINITY : rank
+}
+
 /** One scope's complete tool-registry contribution. */
 class ToolLayer implements ScopeLayer {
-  readonly tools: NamedEntries<ToolDefinition>
+  readonly tools: ToolEntries
   readonly restrictions = new AnonymousEntries<CompiledToolRestriction>()
   readonly guards = new AnonymousEntries<ToolGuard>()
   /**
@@ -723,7 +870,7 @@ class ToolLayer implements ScopeLayer {
   mode: ToolPresentationMode | undefined
 
   constructor(scope: ScopeKey | undefined) {
-    this.tools = new NamedEntries(name => new Error(scope === undefined
+    this.tools = new ToolEntries(name => new Error(scope === undefined
       ? `tool "${name}" is already registered (for a per-agent variant, register through that agent's \`agent.ctx\` instead)`
       : `tool "${name}" is already registered in this scope`))
   }
@@ -969,7 +1116,6 @@ export class ToolRuntime extends Service {
         yield ctx.systemPrompt.section(this.sdkSection())
       }
     }.bind(this), 'tools.presentAs()')
-    // oxlint-disable-next-line typescript/no-misused-promises -- synchronous composite teardown; direct return preserves disposer identity
     return dispose
   }
 
@@ -1030,11 +1176,13 @@ export class ToolRuntime extends Service {
 
   /**
    * Register globally or in the calling agent scope. Scoped tools shadow
-   * globals; duplicates within one layer and the reserved `run_code` name fail.
+   * globals; duplicates within one rank and the reserved `run_code` name fail.
    * @param definition - tool schema, execution, and optional finalization/presentation callbacks.
+   * @param rank - optional precedence rank: a lower rank shadows a same-named higher-rank registration, and
+   *   any rank shadows an unranked native tool. Reserved for the ambient tier manifest loader; ordinary tools omit it.
    * @returns the exact disposer that unregisters the tool.
    */
-  register(definition: ToolDefinition): () => void {
+  register(definition: ToolDefinition, rank?: number): () => void {
     const name = definition.name
     const output = (definition as Partial<ToolDefinition>).output
     if (output === undefined || typeof output !== 'object'
@@ -1056,7 +1204,7 @@ export class ToolRuntime extends Service {
     }
     return this.layers.effect(
       this.ctx,
-      layer => layer.tools.insert(name, definition),
+      layer => layer.tools.insert(name, definition, rank),
       { label: 'tools.register()' },
     )
   }

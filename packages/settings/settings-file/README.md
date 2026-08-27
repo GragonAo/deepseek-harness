@@ -4,12 +4,14 @@ English | [中文](README.zh.md)
 
 File-backed settings provider. One YAML or JSON document carries every namespace section; external edits hot-publish through `ctx.settings`, and `update()` re-reads the document under a writer lock before writing back atomically, preserving the user's YAML comments, any section owned by a plugin that is not currently loaded, and any on-disk change this process has not observed yet.
 
+Without an explicit `path` the document is tenant-scoped: inside a tenant scope it lives at `<tenant.dataRoot>/settings.yaml`, and outside any tenant scope it falls back to `<harness home>/settings.yaml`. An explicit `path` stays one fixed global document shared by every tenant; the single-user (no-tenant) path is unchanged.
+
 ## Config
 
 | Field | Meaning | Default |
 |---|---|---|
-| `path` | Settings document path; extension picks the format (`.yaml`/`.yml`/`.json`) | `settings.yaml` under the harness home |
-| `dshHome` | Harness home used when `path` is omitted | `$DSH_HOME` or `~/.dsh` |
+| `path` | Fixed settings document path shared by every tenant; extension picks the format (`.yaml`/`.yml`/`.json`) | unset (tenant-scoped) |
+| `dshHome` | Harness home fallback used when `path` is omitted and no tenant is in scope | `$DSH_HOME` or `~/.dsh` |
 | `watch` | Watch the document and hot-publish external edits | `true` |
 | `debounceMs` | Watcher write-settle window in milliseconds | `100` |
 
@@ -27,7 +29,7 @@ Defaulting is one explicit `resolveSpec(config)` step; an unsupported extension 
 - **The native watcher receives a canonical path.** Before Chokidar opens the target, the provider realpaths its deepest existing ancestor and restores any missing suffix. File access and user-facing diagnostics retain the configured path, while Windows cannot mix an 8.3 alias with long-form event paths inside libuv.
 - **Dispose quiesces in every watch mode.** Teardown marks the provider closed, closes the watcher when present, then waits out every queued or in-flight document operation, so nothing publishes after disposal.
 - **Self-write suppression by content.** The provider caches the last good text; a watcher event whose content equals the cache (its own write included) is a no-op.
-- **Host configuration adapters receive the resolved path.** `ctx.settings.documentPath` is the absolute `resolveSpec()` filename, including a custom YAML/JSON path; `prepareDocument()` preserves an existing file or exclusively creates an absent empty file with owner-only permissions before the Host opens it. The browser receives only an availability flag, never reconstructs `$DSH_HOME`, and never submits a filesystem target.
+- **Host configuration adapters receive the active path.** `ctx.settings.documentPath` is the absolute active filename — the fixed `path` when set, otherwise the ambient tenant's `<dataRoot>/settings.yaml` in scope and the harness-home `settings.yaml` out of scope; `prepareDocument()` preserves an existing file or exclusively creates an absent empty file with owner-only permissions before the Host opens it. The browser receives only an availability flag, never reconstructs `$DSH_HOME`, and never submits a filesystem target.
 
 ## Model Experience
 

@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { mkdir, readdir, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { Context } from '@deepseek-ai/cordis'
-import SkillRegistry from '@deepseek-ai/dsh-skill'
+import { Context, Service } from '@deepseek-ai/cordis'
+import SkillRegistry, { CASE_SKILL_RANK, SYSTEM_SKILL_RANK, USER_GLOBAL_SKILL_RANK, type SkillTierProvider, type SkillTierRoot } from '@deepseek-ai/dsh-skill'
 import { FileSystem, FsError, FsVersion, type FsDirEntry, type FsEditOutcome, type FsEditRequest, type FsInfo, type FsPathInfo, type FsTarget, type FsWriteOutcome } from '@deepseek-ai/dsh-fs'
 import * as SkillFileSystem from '../src/index.ts'
 
@@ -160,6 +160,17 @@ async function waitFor<T>(read: () => Promise<T>, accept: (value: T) => boolean)
   }
 }
 
+/** Fixed ambient tier service so a test can pin the three tier roots without the carrier. */
+class FixedTiers extends Service implements SkillTierProvider {
+  constructor(ctx: Context, private readonly fixed: readonly SkillTierRoot[]) {
+    super(ctx, 'skillTiers')
+  }
+
+  roots(): readonly SkillTierRoot[] {
+    return this.fixed
+  }
+}
+
 describe('dsh-skill-filesystem plugin exports', () => {
   it('declares stable plugin metadata', () => {
     expect(SkillFileSystem.name).toBe('skill-filesystem')
@@ -168,6 +179,33 @@ describe('dsh-skill-filesystem plugin exports', () => {
 })
 
 describe('FileSystemSkillProvider', () => {
+  it('discovers ambient tier roots with case > user-global > system precedence and union', async () => {
+    const caseDir = await tempDir('skill-tier-case')
+    const userDir = await tempDir('skill-tier-user')
+    const systemDir = await tempDir('skill-tier-system')
+    await writeSkill(caseDir, 'shadowed', 'case body', 'CASE BODY')
+    await writeSkill(userDir, 'shadowed', 'user body', 'USER BODY')
+    await writeSkill(systemDir, 'shadowed', 'system body', 'SYSTEM BODY')
+    await writeSkill(caseDir, 'case-only', 'case only', 'C')
+    await writeSkill(userDir, 'user-only', 'user only', 'U')
+    await writeSkill(systemDir, 'system-only', 'system only', 'S')
+
+    const ctx = new Context()
+    await ctx.plugin(SkillRegistry)
+    new FixedTiers(ctx, [
+      { kind: 'case', path: caseDir, rank: CASE_SKILL_RANK, trustedHost: true },
+      { kind: 'user-global', path: userDir, rank: USER_GLOBAL_SKILL_RANK, trustedHost: true },
+      { kind: 'system', path: systemDir, rank: SYSTEM_SKILL_RANK, trustedHost: true },
+    ])
+    await ctx.plugin(SkillFileSystem, { includeDefaultRoots: false, watch: false })
+    try {
+      const listed = await ctx.skills.list()
+      expect(listed.map(skill => skill.name).sort()).toEqual(['case-only', 'shadowed', 'system-only', 'user-only'])
+      expect((await ctx.skills.get('shadowed'))?.content).toBe('CASE BODY')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
   it('discovers project, custom, user, and agents skill roots in priority order', async () => {
     const home = await tempDir('skill-home')
     const project = await tempDir('skill-project')

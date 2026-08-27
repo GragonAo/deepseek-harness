@@ -3,7 +3,9 @@
  * harness home carries every namespace section; external edits hot-publish
  * through the seam, and every write re-reads the document under a
  * cross-process writer lock before patching it as a comment-preserving
- * leaf-level diff.
+ * leaf-level diff. Without an explicit `path`, the document lives under the
+ * ambient tenant's `dataRoot` (or the harness home outside any tenant scope),
+ * so each tenant stores its own `settings.yaml`.
  * @module @deepseek-ai/dsh-settings-file
  */
 
@@ -15,11 +17,12 @@ import { dirname, extname, join, resolve } from 'node:path'
 import { Document, parseDocument } from 'yaml'
 import { withFileLock, writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { canonicalizeWatchPath, resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+import { currentTenant } from '@deepseek-ai/dsh-tenant'
 import { SettingsProvider, deepEqualJson, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
 
 /** Plugin config: file location and hot-reload behavior. */
 export interface Config {
-  /** Settings document path; defaults to `settings.yaml` under the harness home. */
+  /** Settings document path; when set this is a fixed global file, tenant-independent. */
   path?: string
   /** Harness home used when `path` is omitted; defaults to `$DSH_HOME` or `~/.dsh`. */
   dshHome?: string
@@ -29,7 +32,7 @@ export interface Config {
   debounceMs?: number
 }
 
-/** Document format derived from the configured file extension. */
+/** Document format derived from the file extension. */
 type SettingsFormat = 'yaml' | 'json'
 
 const FORMATS: Record<string, SettingsFormat> = {
@@ -40,30 +43,53 @@ const FORMATS: Record<string, SettingsFormat> = {
 
 /** Fully resolved provider parameters; defaulting happens here, never inline. */
 interface ResolvedSpec {
-  filename: string
-  format: SettingsFormat
+  /** Fixed document path when `config.path` was set; `undefined` scopes per tenant. */
+  explicitPath: string | undefined
+  /** Resolved harness home; the non-tenant fallback root when no explicit path. */
+  home: string
   watch: boolean
   debounceMs: number
 }
 
 /**
  * Resolve the runtime spec from plugin config: an explicit `path` wins,
- * otherwise the document lives at `<harness home>/settings.yaml`.
+ * otherwise the document lives at `<tenant dataRoot>/settings.yaml` inside a
+ * tenant scope and `<harness home>/settings.yaml` outside one.
  * @param config - raw plugin config.
- * @returns the resolved file location, format, and watch behavior.
+ * @returns the resolved location flags and watch behavior.
  */
 export function resolveSpec(config: Config): ResolvedSpec {
-  const filename = resolve(config.path ?? join(resolveDshHome(config.dshHome), 'settings.yaml'))
+  const explicitPath = config.path === undefined ? undefined : resolve(config.path)
+  if (explicitPath !== undefined && FORMATS[extname(explicitPath)] === undefined) {
+    throw new Error(`settings-file: extension "${extname(explicitPath)}" is not supported (use .yaml, .yml, or .json)`)
+  }
+  return {
+    explicitPath,
+    home: resolveDshHome(config.dshHome),
+    watch: config.watch ?? true,
+    debounceMs: config.debounceMs ?? 100,
+  }
+}
+
+/**
+ * Resolve the active document filename for one call: a fixed `config.path`
+ * when set, otherwise `<tenant.dataRoot>/settings.yaml` inside a tenant scope
+ * and `<harness home>/settings.yaml` outside one.
+ * @param config - raw plugin config.
+ * @returns the absolute active document path.
+ */
+export function resolveActiveFilename(config: Config): string {
+  if (config.path !== undefined) return resolve(config.path)
+  return resolve(join(currentTenant()?.dataRoot ?? resolveDshHome(config.dshHome), 'settings.yaml'))
+}
+
+/** Derive the document format from a filename's extension, failing loud. */
+function formatOf(filename: string): SettingsFormat {
   const format = FORMATS[extname(filename)]
   if (format === undefined) {
     throw new Error(`settings-file: extension "${extname(filename)}" is not supported (use .yaml, .yml, or .json)`)
   }
-  return {
-    filename,
-    format,
-    watch: config.watch ?? true,
-    debounceMs: config.debounceMs ?? 100,
-  }
+  return format
 }
 
 /** Whether a parsed YAML value is a map for diffing purposes. */
@@ -101,7 +127,7 @@ function isEEXIST(error: unknown): boolean {
   return (error as NodeJS.ErrnoException | null)?.code === 'EEXIST'
 }
 
-/** File-backed settings provider (`settings.yaml`/`.json`). */
+/** File-backed settings provider (`settings.yaml`/`.json`), tenant-scoped by default. */
 export class FileSettingsProvider extends SettingsProvider {
   static Config: z<Config> = z.object({
     path: z.string(),
@@ -112,11 +138,12 @@ export class FileSettingsProvider extends SettingsProvider {
 
   private readonly spec: ResolvedSpec
   /**
-   * Raw text of the last successfully parsed or persisted document;
-   * `undefined` while the file is absent. Watcher events whose content equals
-   * this cache are no-ops, which is also the self-write suppression.
+   * Raw text of the last successfully parsed or persisted document per
+   * filename; `undefined` while that file is absent. A watcher event whose
+   * content equals this cache is a no-op, which is also the self-write
+   * suppression.
    */
-  private text: string | undefined
+  private readonly texts = new Map<string, string | undefined>()
   /**
    * Single exclusive operation chain: watcher reloads and document writes run
    * one at a time in queue order (settled tail), so a write can never render
@@ -124,6 +151,8 @@ export class FileSettingsProvider extends SettingsProvider {
    * read a half-committed write.
    */
   private operations: Promise<void> = Promise.resolve()
+  /** Chokidar watchers by filename, lazily created; dispose closes every one. */
+  private readonly watchers = new Map<string, ReturnType<typeof chokidarWatch>>()
   /** Set at dispose: refuse new watcher events and let in-flight work no-op. */
   private closed = false
 
@@ -139,45 +168,67 @@ export class FileSettingsProvider extends SettingsProvider {
     this.spec = resolveSpec(config)
   }
 
+  /** Whether this provider resolves one document per ambient tenant. */
+  override get tenantScoped(): boolean {
+    return this.spec.explicitPath === undefined
+  }
+
   /** The local document is always writable through {@link SettingsProvider.update}. */
   get writable(): boolean {
     return true
   }
 
-  /** The resolved YAML/JSON document path exposed to local configuration surfaces. */
+  /** The document path for the ambient tenant (or the harness home), exposed to surfaces. */
   override get documentPath(): string {
-    return this.spec.filename
+    return this.activeFilename()
   }
 
-  /** Materialize an absent owner-only document, then return its resolved path. */
+  /** Resolve the document filename for the ambient scope at this instant. */
+  private activeFilename(): string {
+    if (this.spec.explicitPath !== undefined) return this.spec.explicitPath
+    return resolve(join(currentTenant()?.dataRoot ?? this.spec.home, 'settings.yaml'))
+  }
+
+  /** The active document filename and the tenant key it belongs to. */
+  private activeTarget(): { filename: string; key: string } {
+    return { filename: this.activeFilename(), key: this.scopeKey() }
+  }
+
+  /** Materialize an absent owner-only document, then return its active path. */
   override prepareDocument(): Promise<string> {
     return this.enqueue(async () => {
-      await mkdir(dirname(this.spec.filename), { recursive: true, mode: 0o700 })
-      await withFileLock(this.spec.filename, async () => {
+      const { filename, key } = this.activeTarget()
+      await mkdir(dirname(filename), { recursive: true, mode: 0o700 })
+      await withFileLock(filename, async () => {
         try {
-          await writeFile(this.spec.filename, '', { flag: 'wx', mode: 0o600 })
+          await writeFile(filename, '', { flag: 'wx', mode: 0o600 })
         } catch (error) {
           if (isEEXIST(error)) return
           throw error
         }
-        this.text = ''
-        if (!this.isClosed()) this.publish({})
+        this.texts.set(filename, '')
+        if (!this.isClosed()) this.publishFor(key, {})
       })
-      return this.spec.filename
+      void this.watchFile(filename, key).catch((error: unknown) => {
+        this.ctx.logger.warn('settings-file: failed to watch %s', filename)
+        this.ctx.logger.warn(error)
+      })
+      return filename
     })
   }
 
   protected async load(): Promise<Record<string, unknown>> {
+    const filename = this.activeFilename()
     let text: string
     try {
-      text = await readFile(this.spec.filename, 'utf8')
+      text = await readFile(filename, 'utf8')
     } catch (error) {
       if (!isENOENT(error)) throw error
-      this.text = undefined
+      this.texts.set(filename, undefined)
       return {}
     }
-    const doc = this.parse(text)
-    this.text = text
+    const doc = this.parse(text, filename)
+    this.texts.set(filename, text)
     return doc
   }
 
@@ -197,35 +248,74 @@ export class FileSettingsProvider extends SettingsProvider {
   }
 
   /** Queue a reload; only an invariant violation escaping a commit can reject it. */
-  private queueRefresh(): void {
-    void this.enqueue(() => this.refresh()).catch((error: unknown) => {
+  private queueRefresh(filename: string, key: string): void {
+    void this.enqueue(() => this.refresh(filename, key)).catch((error: unknown) => {
       // Only an invariant violation escaping the commit path can reject a
       // refresh; keep the operation queue alive and surface it as an error so
       // one poisoned commit cannot silently end hot reloading forever.
-      this.ctx.logger.error('settings-file: reload commit failed at %s', this.spec.filename)
+      this.ctx.logger.error('settings-file: reload commit failed at %s', filename)
       this.ctx.logger.error(error)
     })
   }
 
+  /**
+   * Lazily create (or reuse) the watcher for one document filename. The
+   * `key` binds later events to the tenant that filename belongs to, even
+   * though a detached watcher event fires outside any request scope.
+   * @param filename - absolute document path to watch.
+   * @param key - the tenant key the filename is scoped to ('' = global).
+   */
+  private async watchFile(filename: string, key: string): Promise<void> {
+    if (!this.spec.watch || this.closed || this.watchers.has(filename)) return
+    const watcher = chokidarWatch(await canonicalizeWatchPath(filename), {
+      ignoreInitial: true,
+      awaitWriteFinish: {
+        stabilityThreshold: this.spec.debounceMs,
+        pollInterval: Math.max(1, Math.min(this.spec.debounceMs, 10)),
+      },
+    })
+    this.watchers.set(filename, watcher)
+    watcher.on('all', () => {
+      if (this.closed) return
+      this.queueRefresh(filename, key)
+    })
+    watcher.on('ready', () => {
+      // The initial load raced the watcher's own setup: a change written
+      // between that read and the watcher becoming active never fires an
+      // event. One reconcile at ready closes the gap.
+      if (this.closed) return
+      this.queueRefresh(filename, key)
+    })
+    watcher.on('error', (error) => {
+      this.ctx.logger.warn('settings-file: watcher error on %s', filename)
+      this.ctx.logger.warn(error)
+    })
+  }
+
   private async persistSection(ns: SettingsNamespace, section: Record<string, unknown>): Promise<void> {
+    const { filename, key } = this.activeTarget()
     // The writer lock's exclusive create needs the parent to exist before
     // writeFileAtomic gets its own chance to create it.
     // 0700: the harness home holds user-private documents.
-    await mkdir(dirname(this.spec.filename), { recursive: true, mode: 0o700 })
-    await withFileLock(this.spec.filename, async () => {
+    await mkdir(dirname(filename), { recursive: true, mode: 0o700 })
+    await withFileLock(filename, async () => {
       // Read-modify-write: fold in any on-disk state this process has not
       // observed yet — an external edit still inside the watcher debounce
       // window, a change the watcher missed, or another process's write — so
       // the render below can never resurrect a stale document. An unparsable
       // on-disk document fails the write loud instead of silently overwriting
       // a user's manual edit.
-      await this.reconcileFromDisk()
-      const output = this.spec.format === 'yaml'
-        ? this.renderYaml(ns, section)
-        : this.renderJson(ns, section)
+      await this.reconcileFromDisk(filename, key)
+      const output = formatOf(filename) === 'yaml'
+        ? this.renderYaml(ns, section, filename)
+        : this.renderJson(ns, section, filename)
       // 0600: a document that may hold personal values is never world-readable.
-      await writeFileAtomic(this.spec.filename, output, { mode: 0o600, dirMode: 0o700 })
-      this.text = output
+      await writeFileAtomic(filename, output, { mode: 0o600, dirMode: 0o700 })
+      this.texts.set(filename, output)
+    })
+    void this.watchFile(filename, key).catch((error: unknown) => {
+      this.ctx.logger.warn('settings-file: failed to watch %s', filename)
+      this.ctx.logger.warn(error)
     })
   }
 
@@ -234,50 +324,26 @@ export class FileSettingsProvider extends SettingsProvider {
     // failure: an existing-but-invalid document must fail loud, never be
     // silently ignored or overwritten.
     yield* super[Service.init]()
-    const watcher = this.spec.watch
-      ? chokidarWatch(await canonicalizeWatchPath(this.spec.filename), {
-        ignoreInitial: true,
-        awaitWriteFinish: {
-          stabilityThreshold: this.spec.debounceMs,
-          pollInterval: Math.max(1, Math.min(this.spec.debounceMs, 10)),
-        },
-      })
-      : undefined
-    if (watcher !== undefined) {
-      watcher.on('all', () => {
-        if (this.closed) return
-        this.queueRefresh()
-      })
-      watcher.on('ready', () => {
-        // The base init's load raced the watcher's own setup: a change written
-        // between that read and the watcher becoming active never fires an
-        // event. One reconcile at ready closes the gap.
-        if (this.closed) return
-        this.queueRefresh()
-      })
-      watcher.on('error', (error) => {
-        this.ctx.logger.warn('settings-file: watcher error on %s', this.spec.filename)
-        this.ctx.logger.warn(error)
-      })
-    }
+    const { filename, key } = this.activeTarget()
+    await this.watchFile(filename, key)
     yield async () => {
       // Quiesce every operation chain, even when no watcher is configured.
       this.closed = true
-      await watcher?.close()
+      await Promise.all([...this.watchers.values()].map(watcher => watcher.close()))
       await this.operations
     }
   }
 
   /** Parse one document text into raw sections, failing on a non-map root. */
-  private parse(text: string): Record<string, unknown> {
+  private parse(text: string, filename: string): Record<string, unknown> {
     let root: unknown
-    if (this.spec.format === 'yaml') {
+    if (formatOf(filename) === 'yaml') {
       // `prettyErrors` is on only for `linePos`; `error.message` is never
       // used, because the parser quotes the offending source line and a
       // settings document can hold a `role('secret')` value.
       const document = parseDocument(text, { prettyErrors: true })
       if (document.errors.length > 0) {
-        throw new Error(`settings-file: invalid document at ${this.spec.filename}: ${
+        throw new Error(`settings-file: invalid document at ${filename}: ${
           document.errors.map((error) => {
             const at = error.linePos?.[0]
             /* v8 ignore next -- `prettyErrors` populates linePos on every error; the guard answers its optional type */
@@ -289,52 +355,53 @@ export class FileSettingsProvider extends SettingsProvider {
       root = text.trim().length === 0 ? {} : JSON.parse(text)
     }
     if (typeof root !== 'object' || root === null || Array.isArray(root)) {
-      throw new TypeError(`settings-file: ${this.spec.filename} must be a map of namespace sections`)
+      throw new TypeError(`settings-file: ${filename} must be a map of namespace sections`)
     }
     return root as Record<string, unknown>
   }
 
   /**
-   * Re-read the document after a watcher event. Unchanged content (including
+   * Re-read one document after a watcher event. Unchanged content (including
    * this provider's own writes) is a no-op; an unreadable or unparsable
    * document keeps the last good sections and warns — a live hot-reload must
    * never take the process down. An invariant violation escaping a commit is
    * not a reload failure and propagates to the queue's error surface.
    */
-  private async refresh(): Promise<void> {
+  private async refresh(filename: string, key: string): Promise<void> {
     if (this.closed) return
     try {
-      await this.reconcileFromDisk()
+      await this.reconcileFromDisk(filename, key)
     } catch (error) {
       if ((error as { code?: unknown } | null)?.code === 'INVARIANT') throw error
-      this.ctx.logger.warn('settings-file: reload failed at %s; keeping the last good document', this.spec.filename)
+      this.ctx.logger.warn('settings-file: reload failed at %s; keeping the last good document', filename)
       this.ctx.logger.warn(error)
     }
   }
 
   /**
-   * Compare the on-disk text against the cache and publish any difference
-   * into the seam. Absence publishes the empty document; an unreadable or
-   * unparsable file throws, so each caller picks its policy — a reload warns
-   * and keeps the last good document, a write fails loud.
+   * Compare one file's on-disk text against its cache and publish any
+   * difference into the seam under `key`. Absence publishes the empty
+   * document; an unreadable or unparsable file throws, so each caller picks
+   * its policy — a reload warns and keeps the last good document, a write
+   * fails loud.
    */
-  private async reconcileFromDisk(): Promise<void> {
+  private async reconcileFromDisk(filename: string, key: string): Promise<void> {
     let text: string | undefined
     try {
-      text = await readFile(this.spec.filename, 'utf8')
+      text = await readFile(filename, 'utf8')
     } catch (error) {
       if (!isENOENT(error)) throw error
       text = undefined
     }
-    if (text === this.text || this.isClosed()) return
+    if (text === this.texts.get(filename) || this.isClosed()) return
     if (text === undefined) {
-      this.text = undefined
-      this.publish({})
+      this.texts.set(filename, undefined)
+      this.publishFor(key, {})
       return
     }
-    const doc = this.parse(text)
-    this.text = text
-    this.publish(doc)
+    const doc = this.parse(text, filename)
+    this.texts.set(filename, text)
+    this.publishFor(key, doc)
   }
 
   /**
@@ -344,24 +411,26 @@ export class FileSettingsProvider extends SettingsProvider {
    * delete — so comments inside the section survive edits to their siblings,
    * not just comments outside it.
    */
-  private renderYaml(ns: SettingsNamespace, section: Record<string, unknown>): string {
-    if (this.text === undefined) {
+  private renderYaml(ns: SettingsNamespace, section: Record<string, unknown>, filename: string): string {
+    const text = this.texts.get(filename)
+    if (text === undefined) {
       return new Document({ [ns]: section }).toString()
     }
-    // this.text only ever caches content that parsed successfully, so this
+    // The cached text only ever caches content that parsed successfully, so this
     // re-parse (for the mutable comment-preserving tree) cannot fail, and
     // parse() already rejected any non-map root.
-    const document = parseDocument(this.text)
+    const document = parseDocument(text)
     const root: unknown = document.toJS()
     patchNode(document, [ns], isMapLike(root) ? root[ns] : undefined, section)
     return document.toString()
   }
 
   /** Render the next JSON text by replacing one namespace key. */
-  private renderJson(ns: SettingsNamespace, section: Record<string, unknown>): string {
-    const root = this.text === undefined
+  private renderJson(ns: SettingsNamespace, section: Record<string, unknown>, filename: string): string {
+    const text = this.texts.get(filename)
+    const root = text === undefined
       ? {}
-      : this.parse(this.text)
+      : this.parse(text, filename)
     root[ns] = section
     return `${JSON.stringify(root, null, 2)}\n`
   }

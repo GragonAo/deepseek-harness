@@ -32,13 +32,16 @@ Default roots are resolved in this provider's rank order:
 
 | Rank | Source | Path |
 |---|---|---|
+| 30 | `case` | `<tenant.workspaceRoot>/shared/skills` |
+| 40 | `user-global` | `<usersRoot>/<sub>/skills` |
+| 50 | `system` | `<systemSkillsDir>` or `$DSH_HOME/system/skills` |
 | 100 | `project-dsh` | `<projectRoot>/.dsh/skills` |
 | 200 | `project-agents` | `<projectRoot>/.agents/skills` |
 | 300 | `custom` | `Config.customSkillDirs` |
 | 400 | `user-dsh` | `<dshHome>/skills` |
 | 500 | `user-agents` | `<agentsHome>/skills` |
 
-The project root is the nearest ancestor containing `.git`; without one, the current cwd is used. The user DSH root skips its `.system` child so system-owned directories are not treated as normal user skills. `includeDefaultRoots: false` omits the project and user rows and the `$DSH_BUNDLED_SKILL_DIR` environment default while retaining explicitly configured custom and bundled roots, allowing several uniquely named isolated providers to see only their own roots. This provider supplies project and user skills; another provider may supply built-in system skills.
+The three ranked-30/40/50 rows are ambient tier roots provided by the `ctx.skillTiers` service (the [`@deepseek-ai/dsh-skill-tier`](../../tenant/skill-tier/README.md) carrier registers it); when that optional service is absent they simply do not appear. They are appended before every static root, are host paths outside the tenant container, and are marked trusted host so discovery uses host I/O. The project root is the nearest ancestor containing `.git`; without one, the current cwd is used. The user DSH root skips its `.system` child so system-owned directories are not treated as normal user skills. `includeDefaultRoots: false` omits the project and user rows and the `$DSH_BUNDLED_SKILL_DIR` environment default while retaining explicitly configured custom and bundled roots, allowing several uniquely named isolated providers to see only their own roots. This provider supplies project, user, and ambient tier skills.
 
 When `ctx.fs` is available, discovery lists roots through `ctx.fs.listDir`, reads skill files through `ctx.fs.readText`, and probes `.git` through the filesystem service. Full skill loads forward the lookup abort signal to filesystem metadata and content reads. Without a filesystem service, the provider falls back to abortable Node filesystem I/O so minimal local contexts can still load skills. Confirmed missing paths are valid empty state, malformed or non-text entries warn and skip, and unexpected discovery/read failures make the registry snapshot incomplete rather than replacing a last-good model catalog with a misleading deletion.
 

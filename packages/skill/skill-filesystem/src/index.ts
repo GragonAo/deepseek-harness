@@ -240,6 +240,13 @@ export class FileSystemSkillProvider implements SkillProvider {
 
   private async roots(cwd: string | undefined): Promise<SkillRoot[]> {
     const roots: SkillRoot[] = []
+    // Ambient multi-tenant tier roots (case, user-global, system), nearest tier
+    // first, outrank every static root by their lower rank. They are host paths
+    // outside the container filesystem, so the carrier marks them trustedHost to
+    // use host I/O rather than the container-scoped `ctx.fs` service.
+    for (const tier of this.ctx.get('skillTiers')?.roots() ?? []) {
+      roots.push({ path: tier.path, source: tier.kind, rank: tier.rank, trustedHost: tier.trustedHost })
+    }
     if (this.includeDefaultRoots && cwd !== undefined) {
       const projectRoot = await findProjectRoot(resolve(cwd), optionalFileSystem(this.ctx))
       roots.push(
@@ -396,7 +403,6 @@ class SkillWatchManager {
       const current = await resolveRootWatchMode(state.root.path, this.config.followSymlinks)
       // A child unlink can publish an empty catalog before root unlinkDir arrives.
       // Discovery therefore revalidates the retained handle independently.
-      // oxlint-disable-next-line typescript/no-unnecessary-condition -- watcher callbacks can mark unhealthy while the probe awaits
       if (!state.unhealthy && sameWatchMode(watcher.mode, current)) return
     }
     await this.replaceWatcher(state)
@@ -413,7 +419,6 @@ class SkillWatchManager {
       /* v8 ignore next -- The loop returns no handle only when teardown wins between awaited probes. */
       if (watcher === undefined) return
       /* v8 ignore start -- Post-open teardown is timing-dependent; the disposal race has an explicit integration test. */
-      // oxlint-disable-next-line typescript/no-unnecessary-condition -- teardown can race awaited watcher startup
       if (this.closing || state.owners.size === 0) {
         await this.closeWatcher(watcher)
         return
@@ -422,7 +427,6 @@ class SkillWatchManager {
       state.watcher = watcher
       state.unhealthy = false
     } catch (error) {
-      // oxlint-disable-next-line typescript/no-unnecessary-condition -- teardown can race awaited watcher startup
       if (!this.closing) {
         state.unhealthy = true
         this.ctx.logger.warn(`skill-filesystem: failed to watch ${state.root.path}: ${errorMessage(error)}`)

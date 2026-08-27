@@ -101,6 +101,19 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'agentHttp',
+    summary: 'Multi-tenant carrier registered as `ctx.agentHttp`.',
+    description: 'Multi-tenant carrier registered as `ctx.agentHttp`.',
+    methods: [
+      {
+        signature: 'async fetch(request: Request): Promise<Response>',
+        description: 'Authenticate one request and answer it through the shared gateway under the resolved tenant\'s authority. Authentication and tenant resolution fail closed before any method runs.',
+        parameters: [{ name: 'request', description: 'the incoming Fetch request (unary RPC or SSE channel).' }],
+        returns: 'the gateway\'s response, or a 401/403/500 fail-closed rejection.',
+      },
+    ],
+  },
+  {
     key: 'agentLoop',
     summary: 'Concrete agent factory and driver service.',
     description: 'Concrete agent factory and driver service.',
@@ -572,6 +585,20 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [{ name: 'start', description: 'first surface seq, inclusive.' }, { name: 'end', description: 'last surface seq, inclusive.' }, { name: 'agent', description: 'context whose session is mutated and whose routing options guide summarization.' }, { name: 'signal', description: 'optional cancellation; model-backed implementations must forward it.' }],
         returns: 'the appended event seqs, summary, replaced range, and token accounting.',
         throws: ['when compaction is active or the range is missing, reversed, or unbalanced.'],
+      },
+    ],
+  },
+  {
+    key: 'containerRuntime',
+    summary: 'Abstract container runtime (`ctx.containerRuntime`).',
+    description: 'Abstract container runtime (`ctx.containerRuntime`). A provider runs commands inside the ambient tenant\'s container — the container whose `/workspace` binds that tenant\'s workspace root and `/tools` binds its tooling — resolved per call from `requireTenant()`.',
+    methods: [
+      {
+        signature: 'abstract exec( command: string, args: readonly string[], opts?: ContainerExecOptions, ): Promise<ContainerCommandResult>',
+        description: 'Run one command in the ambient tenant\'s container and capture its streams.',
+        parameters: [{ name: 'command', description: 'the executable inside the container.' }, { name: 'args', description: 'positional arguments (never shell-interpreted here).' }, { name: 'opts', description: 'optional stdin feed and cancellation.' }],
+        returns: 'the command\'s exit code and captured stdout/stderr.',
+        throws: ['`TenantError` code `NO_TENANT_IN_SCOPE` outside an authenticated request.'],
       },
     ],
   },
@@ -1665,7 +1692,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
   {
     key: 'storageDomain',
     summary: 'The mounted domain facility.',
-    description: 'The mounted domain facility. Opens declared domains over routed backends; one facility instance owns the open-domain table and enforces single-open per domain name.',
+    description: 'The mounted domain facility. Opens declared domains over routed backends; one facility instance owns the open-domain table and enforces single-open per (tenant, domain name).',
     methods: [
       {
         signature: 'async open<S extends DomainSpec>(spec: S): Promise<Domain<S>>',
@@ -1675,7 +1702,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'get(name: string): DomainImpl | undefined',
-        description: 'Look up an open domain by name, untyped. Diagnostic surface (the package invariant cross-checks change events against live domain state); typed consumers hold the handle returned by open.',
+        description: 'Look up an open domain by name for the ambient tenant, untyped. Diagnostic surface (the package invariant cross-checks change events against live domain state); typed consumers hold the handle returned by open.',
         parameters: [{ name: 'name', description: 'Domain name.' }],
         returns: 'the open domain runtime, or `undefined` when not open.',
       },
@@ -1848,6 +1875,73 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'tenantAuth',
+    summary: 'Abstract tenant authenticator (`ctx.tenantAuth`).',
+    description: 'Abstract tenant authenticator (`ctx.tenantAuth`). Subclass, implement authenticate, and load the subclass as a plugin.',
+    methods: [
+      {
+        signature: 'abstract authenticate(credential: string): Promise<TenantPrincipal>',
+        description: 'Verify a credential and return the principal it proves.',
+        parameters: [{ name: 'credential', description: 'the credential bytes, including any `Bearer ` scheme (providers strip or reject scheme prefixes they accept).' }],
+        returns: 'the authenticated tenant principal.',
+        throws: ['`TenantAuthError` code `MISSING_CREDENTIAL` when no credential is supplied, or `INVALID_TOKEN` when it cannot be verified or lacks the required claims.'],
+      },
+    ],
+  },
+  {
+    key: 'tenantHttpApi',
+    summary: 'Stateless tenant HTTP API registered as `ctx.tenantHttpApi`.',
+    description: 'Stateless tenant HTTP API registered as `ctx.tenantHttpApi`.',
+    methods: [
+      {
+        signature: 'register(operation: TenantOperation): () => void',
+        description: 'Register the single request operation and its HTTP route.',
+        parameters: [{ name: 'operation', description: 'the tenant-scoped request operation.' }],
+        returns: 'the disposer removing both the operation and its route.',
+      },
+    ],
+  },
+  {
+    key: 'tenants',
+    summary: 'Tenant record registry (`ctx.tenants`).',
+    description: 'Tenant record registry (`ctx.tenants`). Records are registered by the deployment assembly — from cordis.yml through Config.tenants, or by calling register directly — and authentication resolves an authenticated id through resolve, which rejects absent or disabled tenants fail-closed.',
+    methods: [
+      {
+        signature: 'register(tenant: Tenant): () => void',
+        description: 'Register one tenant record. Returns the exact disposer that removes it.',
+        parameters: [{ name: 'tenant', description: 'the tenant record.' }],
+        returns: 'the disposer.',
+        throws: ['`TenantError` code `DUPLICATE_TENANT` when the id exists.'],
+      },
+      {
+        signature: 'get(id: TenantId): Tenant | undefined',
+        description: 'Look up a registered record without failing on its absence.',
+        parameters: [{ name: 'id', description: 'the tenant id.' }],
+        returns: 'the record, or undefined when unknown.',
+      },
+      {
+        signature: 'resolve(id: TenantId): Tenant',
+        description: 'Resolve an authenticated id to a live tenant, failing closed.',
+        parameters: [{ name: 'id', description: 'the authenticated tenant id.' }],
+        returns: 'the record.',
+        throws: ['`TenantError` code `TENANT_UNKNOWN` when unregistered, or `TENANT_DISABLED` when the record is disabled.'],
+      },
+      {
+        signature: 'resolveMember(id: TenantId, subject: UserId): Tenant',
+        description: 'Resolve an authenticated id to a live tenant, then fail closed when the subject is not a member of it. The membership gate is here, on top of resolve, so the carrier authenticates and authorizes in one call.',
+        parameters: [{ name: 'id', description: 'the authenticated tenant id.' }, { name: 'subject', description: 'the authenticated subject.' }],
+        returns: 'the record.',
+        throws: ['`TenantError` code `TENANT_UNKNOWN`/`TENANT_DISABLED`, or `NOT_A_MEMBER` when the tenant lists members excluding this subject.'],
+      },
+      {
+        signature: 'list(): Tenant[]',
+        description: 'All registered records in registration order.',
+        parameters: [],
+        returns: 'a fresh array.',
+      },
+    ],
+  },
+  {
     key: 'terminals',
     summary: 'In-process registry for replaceable PTY backends and exact-Agent sessions.',
     description: 'In-process registry for replaceable PTY backends and exact-Agent sessions.',
@@ -2007,9 +2101,9 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the exact disposer that restores the deployment default.',
       },
       {
-        signature: 'register(definition: ToolDefinition): () => void',
-        description: 'Register globally or in the calling agent scope. Scoped tools shadow globals; duplicates within one layer and the reserved `run_code` name fail.',
-        parameters: [{ name: 'definition', description: 'tool schema, execution, and optional finalization/presentation callbacks.' }],
+        signature: 'register(definition: ToolDefinition, rank?: number): () => void',
+        description: 'Register globally or in the calling agent scope. Scoped tools shadow globals; duplicates within one rank and the reserved `run_code` name fail.',
+        parameters: [{ name: 'definition', description: 'tool schema, execution, and optional finalization/presentation callbacks.' }, { name: 'rank', description: 'optional precedence rank: a lower rank shadows a same-named higher-rank registration, and any rank shadows an unranked native tool. Reserved for the ambient tier manifest loader; ordinary tools omit it.' }],
         returns: 'the exact disposer that unregisters the tool.',
       },
       {
@@ -2218,7 +2312,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
   {
     key: 'workspaceRegistry',
     summary: 'Durable workspace registry.',
-    description: 'Durable workspace registry. Startup waits for `sessionPersistence`, builds one canonical-cwd header index, and completes the one-time history bootstrap before the service becomes active. The persistence dependency is mandatory so an unavailable peer can never be mistaken for an empty history and commit the initialized marker.',
+    description: 'Durable workspace registry. Startup waits for `sessionPersistence`, builds one canonical-cwd header index, and completes the one-time history bootstrap before the service becomes active. The persistence dependency is mandatory so an unavailable peer can never be mistaken for an empty history and commit the initialized marker. Every partition\'s state is keyed by tenant id (`undefined` for the single-user partition); see the module JSDoc for the multi-tenant lazy/tenant-switch contract.',
     methods: [
       {
         signature: 'async create(path: string, title?: string): Promise<Workspace>',
@@ -2228,30 +2322,30 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'get(id: WorkspaceId): Workspace | undefined',
-        description: 'Look up a workspace by id.',
+        description: 'Look up a workspace by id for the ambient tenant. Uninitialized partitions serve `undefined` (no cross-tenant leak).',
         parameters: [{ name: 'id', description: 'Workspace id.' }],
-        returns: 'the workspace, or `undefined` when unknown.',
+        returns: 'the workspace, or `undefined` when unknown or uninitialized.',
       },
       {
         signature: 'list(): Workspace[]',
-        description: 'Synchronous workspace projection in durable registry order. Every entity\'s `sessionIds` getter is already filtered by the startup/live canonical-cwd header index; this method performs no persistence reads.',
+        description: 'Synchronous workspace projection for the ambient tenant in durable registry order. An uninitialized partition (multi-tenant boot, or a tenant whose domain has not yet been opened) projects as empty rather than failing. Every entity\'s `sessionIds` getter is already filtered by the startup/live canonical-cwd header index; this method performs no persistence reads.',
         parameters: [],
         returns: 'a fresh ordered array of workspace entities.',
       },
       {
-        signature: 'delete(id: WorkspaceId): Promise<boolean>',
+        signature: 'async delete(id: WorkspaceId): Promise<boolean>',
         description: 'Delete one workspace registration while retaining its directory and every session log. The durable order is updated before the table deletion; a failed table write restores the prior order and keeps the entity published. Unknown ids are an idempotent no-op for domain callers.',
         parameters: [{ name: 'id', description: 'Workspace registration to remove.' }],
         returns: '`true` when a record was deleted, `false` when it was unknown.',
       },
       {
-        signature: 'insertBefore(id: WorkspaceId, beforeId?: WorkspaceId): Promise<readonly WorkspaceId[]>',
+        signature: 'async insertBefore(id: WorkspaceId, beforeId?: WorkspaceId): Promise<readonly WorkspaceId[]>',
         description: 'Move one workspace within the durable display order, DOM-insertBefore-like. With an anchor it lands before that workspace; without one it appends.',
         parameters: [{ name: 'id', description: 'Workspace to move.' }, { name: 'beforeId', description: 'Workspace anchor; omitted appends.' }],
         returns: 'the complete committed workspace order.',
       },
       {
-        signature: 'archiveSession(sessionId: SessionId): Promise<void>',
+        signature: 'async archiveSession(sessionId: SessionId): Promise<void>',
         description: 'Archive one session durably. The session must exist (live or in session persistence); its workspace accounting — or lack of one — is irrelevant. An already archived id resolves without writing.',
         parameters: [{ name: 'sessionId', description: 'The session to archive.' }],
         returns: 'resolution after durability.',
@@ -2941,6 +3035,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type ConfinedSandboxMode = Exclude<SandboxMode, \'danger-full-access\'>;',
   },
   {
+    name: 'ContainerCommandResult',
+    declaration: 'export interface ContainerCommandResult {\n    exitCode: number;\n    stdout: string;\n    stderr: string;\n}',
+  },
+  {
+    name: 'ContainerExecOptions',
+    declaration: 'export interface ContainerExecOptions {\n    stdin?: string;\n    cwd?: string;\n    env?: Readonly<Record<string, string>>;\n    signal?: AbortSignal;\n}',
+  },
+  {
     name: 'ContentBlockMap',
     declaration: 'export interface ContentBlockMap {\n    \'text\': TextBlock;\n    \'reasoning\': ReasoningBlock;\n    \'image\': ImageBlock;\n    \'tool-call\': ToolCallBlock;\n    \'tool-result\': ToolResultBlock;\n}',
   },
@@ -3382,7 +3484,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'KvUnitDescriptor',
-    declaration: 'export interface KvUnitDescriptor {\n    readonly name: string;\n    readonly version: number;\n    readonly tables: readonly string[];\n    readonly hasGlobal: boolean;\n}',
+    declaration: 'export interface KvUnitDescriptor {\n    readonly name: string;\n    readonly version: number;\n    readonly tables: readonly string[];\n    readonly hasGlobal: boolean;\n    readonly shared?: boolean;\n}',
   },
   {
     name: 'LlmAdapter',
@@ -4425,6 +4527,26 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface TeamWaitResult {\n    readonly timedOut: boolean;\n}',
   },
   {
+    name: 'Tenant',
+    declaration: 'export interface Tenant {\n    readonly id: TenantId;\n    readonly name: string;\n    readonly dataRoot: string;\n    readonly workspaceRoot: string;\n    readonly toolsRoot?: string;\n    readonly enabled?: boolean;\n    readonly network?: \'none\' | \'internal\';\n    readonly members?: readonly string[];\n}',
+  },
+  {
+    name: 'TenantId',
+    declaration: 'export type TenantId = Branded<\'TenantId\'>;',
+  },
+  {
+    name: 'TenantOperation',
+    declaration: 'export type TenantOperation<T = unknown> = (input: TenantOperationInput) => Promise<T>;',
+  },
+  {
+    name: 'TenantOperationInput',
+    declaration: 'export interface TenantOperationInput {\n    readonly tenant: Tenant;\n    readonly principal: TenantPrincipal;\n    readonly body: unknown;\n}',
+  },
+  {
+    name: 'TenantPrincipal',
+    declaration: 'export interface TenantPrincipal {\n    readonly tenantId: TenantId;\n    readonly subject: string;\n    readonly scopes?: readonly string[];\n}',
+  },
+  {
     name: 'TerminalBackend',
     declaration: 'export interface TerminalBackend {\n    readonly type: string;\n    spawn(spec: TerminalBackendSpawnSpec): Promise<TerminalBackendSession>;\n}',
   },
@@ -4622,7 +4744,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ToolRuntime',
-    declaration: 'export class ToolRuntime extends Service {\n    static inject;\n    static Config: z<Config>;\n    readonly [TOOL_RUNTIME_SCHEDULER]: ToolRuntimeScheduler;\n    constructor(ctx: Context, config: Config = {});\n    presentAs(mode: ToolPresentationMode): () => void;\n    register(definition: ToolDefinition): () => void;\n    restrict(filter: ToolRestriction): () => void;\n    guard(guard: ToolGuard): () => void;\n    get(name: string, scope?: ScopeKey): ToolDefinition | undefined;\n    schemas(scope?: ScopeKey): ToolSchema[];\n    executionMode(exec: ToolExecutionInput): ToolExecutionMode;\n    async execute(exec: ToolExecutionInput): Promise<ToolExecutionResult>;\n}',
+    declaration: 'export class ToolRuntime extends Service {\n    static inject;\n    static Config: z<Config>;\n    readonly [TOOL_RUNTIME_SCHEDULER]: ToolRuntimeScheduler;\n    constructor(ctx: Context, config: Config = {});\n    presentAs(mode: ToolPresentationMode): () => void;\n    register(definition: ToolDefinition, rank?: number): () => void;\n    restrict(filter: ToolRestriction): () => void;\n    guard(guard: ToolGuard): () => void;\n    get(name: string, scope?: ScopeKey): ToolDefinition | undefined;\n    schemas(scope?: ScopeKey): ToolSchema[];\n    executionMode(exec: ToolExecutionInput): ToolExecutionMode;\n    async execute(exec: ToolExecutionInput): Promise<ToolExecutionResult>;\n}',
   },
   {
     name: 'ToolRuntimeScheduler',
@@ -4707,6 +4829,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'UpdateTeamTaskRequest',
     declaration: 'export interface UpdateTeamTaskRequest {\n    readonly taskId: TeamTaskId;\n    readonly expectedRevision: number;\n    readonly action: TeamTaskAction;\n    readonly subject?: string;\n    readonly description?: string;\n    readonly blockedBy?: readonly TeamTaskId[];\n    readonly writeScopes?: readonly string[];\n    readonly owner?: string;\n}',
+  },
+  {
+    name: 'UserId',
+    declaration: 'export type UserId = Branded<\'UserId\'>;',
   },
   {
     name: 'UserMessage',

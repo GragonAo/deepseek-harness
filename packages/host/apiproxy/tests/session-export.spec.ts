@@ -153,6 +153,13 @@ describe('cold blank probe config', () => {
   })
 })
 
+describe('default project cwd config', () => {
+  it('stays absent when omitted (Host cwd is the fallback) and passes an explicit path through', () => {
+    expect(ApiProxyService.Config({})).not.toHaveProperty('cwd')
+    expect(ApiProxyService.Config({ cwd: '/workspace' })).toMatchObject({ cwd: '/workspace' })
+  })
+})
+
 describe('session.export download endpoint', () => {
   it('streams a ZIP with the root artifact verbatim under its original filename', async () => {
     const api = await buildApi({ 'session-root': artifact('session-root') })

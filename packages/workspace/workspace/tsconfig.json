@@ -30,6 +30,9 @@
       "path": "../../session/session-persistence"
     },
     {
+      "path": "../../tenant/tenant"
+    },
+    {
       "path": "../../util/brand"
     },
     {

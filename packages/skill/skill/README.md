@@ -59,6 +59,10 @@ Definitions remain progressively loaded. `get()` asks the winning provider for t
 
 `ctx.skills.register(...)` is a convenience for embedded runtime skills. Runtime skills use rank `250`: project providers can override them, while they override the shipped local provider's custom and user roots. Runtime definitions and nested resource metadata are borrowed readonly; the service materializes one top-level definition to supply omitted invocation and provider defaults. Registration is first-wins within runtime contributions, so a duplicate contribution cannot remove the active one through its disposer.
 
+## Ambient skill tiers
+
+The multi-tenant carrier registers `ctx.skillTiers`, an optional `SkillTierProvider` service, instead of runtime skills. Its `roots()` maps the ambient (tenant, user) scope to three host skill directories and returns them with `CASE_SKILL_RANK` `30`, `USER_GLOBAL_SKILL_RANK` `40`, and `SYSTEM_SKILL_RANK` `50`, so the case tier outranks the user-global tier, which outranks the system tier, which outranks every static provider rank (`100` and above). The filesystem provider appends whatever roots this optional service supplies; single-user installs never register it.
+
 ## Consumer boundary
 
 The registry does not render model guidance or register model-facing tools. [`@deepseek-ai/dsh-tool-skill`](../tool-skill) consumes `ctx.skills` to provide durable session catalogs and the `skill` tool, so providers remain independent of model-facing behavior.

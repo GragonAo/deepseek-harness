@@ -20,6 +20,8 @@ The entity/storage rationale lives in the [domain Agent Note](../../../.agents/n
 
 `storageDomain` and `sessionPersistence` are required startup dependencies. An unavailable peer leaves the plugin pending and cannot commit an empty initialized marker. On the first successful start, the registry calls `SessionPersistence.list()` and uses only header `id`, `cwd`, and `createdAt` to group valid historical directories and persist initial order; it never reads event bodies. The initialized marker is written last, so partial bootstrap writes are reused safely after restart. Later cwd-only sessions remain Ungrouped.
 
+In `dsh-multi-tenant` the registry keys its state by (tenant, user) and opens that partition's KV domain lazily. Outside an authenticated request (no tenant or user in scope) it boots to an empty, non-throwing projection without opening the tenant Postgres domain or writing an initialized marker. The first access inside a tenant+user scope opens that partition's domain (its `tenantPartitionName` schema with the in-primary-key `user_id`), bootstraps from `SessionPersistence.list()`, and rebuilds that partition's entity cache; the open domain, header index, entity cache, pending-mutation state, and per-entity host bindings are all keyed by (tenant, user). The single-user (no-tenant) partition keeps the existing eager behavior.
+
 Create and delete persist an explicit pending-mutation marker before their record and order can diverge. Startup completes only the marked mutation, then clears the marker; an unmarked order/table mismatch remains unexplained corruption and fails loud. Deleting and re-registering the same path creates a fresh Workspace id and does not automatically re-adopt the retained Sessions.
 
 ## Model Experience
@@ -42,3 +44,4 @@ Independent of live requests: the package never touches a request prefix, so it 
 
 - Session deletion and destructive folder removal are separate, absent capabilities; Workspace registration deletion never substitutes for either ([decision](../../../.agents/notes/implemented/feature/2026-07-27-workspace-registration-deletion.md)).
 - The header index refreshes at startup and when attach must resolve an uncached persisted id; deletion or cwd damage performed by another process is observed after the next refresh or restart.
+- The synchronous `list()`/`get()`/`archivedSessionIds` projections cannot await a partition's lazy domain open, so the first access inside a (tenant, user) scope is empty until an asynchronous method (`create`, `delete`, `insertBefore`, `archiveSession`, or `resolveByPath`) opens that partition. The API's `workspace.list` handler is fully synchronous and is not changed here.

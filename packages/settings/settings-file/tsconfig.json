@@ -27,6 +27,9 @@
       "path": "../settings"
     },
     {
+      "path": "../../tenant/tenant"
+    },
+    {
       "path": "../../runtime-diagnostics/invariants"
     }
   ]

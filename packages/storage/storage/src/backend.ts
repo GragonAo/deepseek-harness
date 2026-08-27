@@ -52,6 +52,12 @@ export interface KvUnitDescriptor {
   readonly tables: readonly string[]
   /** Whether this unit carries the global singleton slot. */
   readonly hasGlobal: boolean
+  /**
+   * Whether this unit is case-shared: its records and global slot are stored
+   * under the tenant alone (no per-user `user_id`), so every subject of the
+   * tenant reads and writes the same case-level memory. Defaults to per-user.
+   */
+  readonly shared?: boolean
 }
 
 /**

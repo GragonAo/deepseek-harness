@@ -34,6 +34,40 @@ const echoTool = defineTool({
 })
 
 describe('ToolRuntime', () => {
+  it('shadows a same-named registration by rank (lower wins, native lowest) and restores on dispose', async () => {
+    const ctx = await setup()
+    const make = (value: string) => defineTool({
+      name: 'probe',
+      description: 'probe',
+      parameters: {},
+      output: { schema: { type: 'string' }, render: (_args, out) => [{ type: 'text', text: out }] },
+      async execute() { return value },
+    })
+    // Native (unranked) is the baseline; every ranked tier shadows it.
+    const native = make('native')
+    ctx.tools.register(native)
+    const system = make('system')
+    const user = make('user')
+    const caseTool = make('case')
+    const disposeSystem = ctx.tools.register(system, 50)
+    const disposeUser = ctx.tools.register(user, 40)
+    const disposeCase = ctx.tools.register(caseTool, 30)
+    expect(ctx.tools.get('probe')).toBe(caseTool)
+
+    disposeCase()
+    expect(ctx.tools.get('probe')).toBe(user)
+    // Out-of-order disposal: the shadowed system entry leaves without disturbing the user winner.
+    disposeSystem()
+    expect(ctx.tools.get('probe')).toBe(user)
+    disposeUser()
+    expect(ctx.tools.get('probe')).toBe(native)
+
+    // Same-rank duplicates still fail: two unranked native names, and two same-tier names.
+    expect(() => ctx.tools.register(make('native2'))).toThrowError(/already registered/)
+    ctx.tools.register(defineTool({ name: 'dup', description: 'dup', parameters: {}, output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] }, async execute() { return 'a' } }), 40)
+    expect(() => ctx.tools.register(defineTool({ name: 'dup', description: 'dup', parameters: {}, output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] }, async execute() { return 'b' } }), 40)).toThrowError(/already registered/)
+  })
+
   it('registers tools, exposes schemas, and feeds the system-prompt assembly', async () => {
     const ctx = await setup()
     ctx.tools.register(echoTool)
