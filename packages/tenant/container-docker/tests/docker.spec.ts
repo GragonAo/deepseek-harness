@@ -64,7 +64,7 @@ describe('DockerContainerRuntime', () => {
   it('starts a tool-exec container with the three-layer mounts after publishing its loopback port, then POSTs /exec', async () => {
     const runner = new FakeRunner()
     const client = new FakeClient()
-    const runtime = mount(runner, client, { runtime: 'docker', usersRoot: '/users' })
+    const runtime = mount(runner, client, { runtime: 'docker', usersRoot: '/users', systemRoot: '/opt/.dsh/system' })
     await scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi']))
     const runCall = runner.calls.find(c => c[0] === 'run')
     expect(runCall).toContain('-p')
@@ -76,6 +76,7 @@ describe('DockerContainerRuntime', () => {
     expect(runCall).toContain('/workspace/acme/shared:/shared')
     expect(runCall).toContain('/users/user-1:/global')
     expect(runCall).toContain('/tools/acme:/tools:ro')
+    expect(runCall).toContain('/opt/.dsh/system:/opt/.dsh/system:ro')
     expect(runCall).toContain('dsh-tool-exec:latest')
     expect(runCall).not.toContain('tail')
     const name = runCall?.[runCall?.indexOf('--name') + 1]
@@ -135,6 +136,14 @@ describe('DockerContainerRuntime', () => {
     expect(runCall).toContain('/workspace/acme/users/user-1:/workspace')
     expect(runCall).toContain('/workspace/acme/shared:/shared')
     expect(runCall).not.toContain('/global')
+  })
+
+  it('omits the system skill mount when no systemRoot is configured', async () => {
+    const runner = new FakeRunner()
+    const runtime = mount(runner, new FakeClient())
+    await scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi']))
+    const runCall = runner.calls.find(c => c[0] === 'run')
+    expect(runCall).not.toContain('/opt/.dsh/system')
   })
 
   it('waits for the tool-exec server to answer before the first exec', async () => {

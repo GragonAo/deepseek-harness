@@ -83,6 +83,16 @@ export interface Config {
    * mount is skipped (single-user deployments without a cross-case directory).
    */
   usersRoot?: string
+  /**
+   * Host directory holding the system-wide skill tree, bind-mounted read-only at
+   * the same absolute path. A skill's instructions reference companion files
+   * (templates, methodology, verification scripts) relative to the directory the
+   * skill was discovered in, so the sandbox must see that directory at the path
+   * the host resolved it to; mounting it elsewhere would break every reference.
+   * When omitted the system skill tree stays host-only and only skill bodies
+   * reach the model.
+   */
+  systemRoot?: string
   /** Milliseconds of exec idleness before the container is reaped. Omit to keep. */
   idleTimeoutMs?: number
   /**
@@ -117,6 +127,7 @@ export class DockerContainerRuntime extends ContainerRuntime {
     publishHost: z.string().default('127.0.0.1'),
     connectHost: z.string().default('127.0.0.1'),
     usersRoot: z.string(),
+    systemRoot: z.string(),
     idleTimeoutMs: z.natural().min(1),
     memoryLimit: z.string(),
     cpuLimit: z.natural().min(1),
@@ -130,6 +141,7 @@ export class DockerContainerRuntime extends ContainerRuntime {
   private readonly publishHost: string
   private readonly connectHost: string
   private readonly usersRoot: string | undefined
+  private readonly systemRoot: string | undefined
   private readonly idleTimeoutMs: number | undefined
   private readonly memoryLimit: string | undefined
   private readonly cpuLimit: number | undefined
@@ -147,6 +159,7 @@ export class DockerContainerRuntime extends ContainerRuntime {
     this.publishHost = config.publishHost ?? '127.0.0.1'
     this.connectHost = config.connectHost ?? '127.0.0.1'
     this.usersRoot = config.usersRoot
+    this.systemRoot = config.systemRoot
     this.idleTimeoutMs = config.idleTimeoutMs
     this.memoryLimit = config.memoryLimit
     this.cpuLimit = config.cpuLimit
@@ -241,6 +254,13 @@ export class DockerContainerRuntime extends ContainerRuntime {
     )
     if (this.usersRoot !== undefined) {
       args.push('-v', `${this.usersRoot}/${user}:/global`)
+    }
+    if (this.systemRoot !== undefined) {
+      // Read-only at its own absolute path: skill bodies reach the model through the
+      // host-side skill provider, but the companion files they cite are readable only
+      // through the sandbox, which mounts nothing of the host beyond /workspace,
+      // /shared and /global.
+      args.push('-v', `${this.systemRoot}:${this.systemRoot}:ro`)
     }
     if (tenant.toolsRoot !== undefined) {
       args.push('-v', `${tenant.toolsRoot}:/tools:ro`)

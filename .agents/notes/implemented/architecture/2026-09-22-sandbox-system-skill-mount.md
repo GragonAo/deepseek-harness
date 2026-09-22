@@ -1,0 +1,36 @@
+# 沙箱只读挂载系统 skill 树
+
+**日期**：2026-09-22
+**状态**：implemented
+**范围**：`packages/tenant/container-docker`
+
+## 问题
+
+skill 分三层：案件共享（`<workspaceRoot>/shared/skills`）> 用户全局（`<usersRoot>/<sub>/skills`）> 系统（`$DSH_HOME/system/skills`）。沙箱容器只挂了三个目录：
+
+```
+<workspaceRoot>/users/<sub>  ->  /workspace
+<workspaceRoot>/shared       ->  /shared
+<usersRoot>/<sub>            ->  /global
+```
+
+前两层的目录**恰好**落在挂载点内，所以它们的配套文件在沙箱里可读。系统层不在任何挂载点内：skill 正文经宿主侧 provider 注入模型上下文（大文件还会 spill 到沙箱 `/tmp/dsh-spill-*`），正文里引用的配套文件（报告模板、方法论、校验脚本、范例 HTML）在沙箱里**读不到**。
+
+重资产 skill 会在正文里按**相对 skill 目录**的路径引用这些文件，并要求执行其中的脚本。实测一个 55 KB 的线索初核 skill：agent 加载正文后按指令找 `report_template.md`，只能 `find / -name` 满世界搜索，找不到，收口阶段的 `verify_delivery.py` 也无法执行。
+
+## 决定
+
+`container-docker` 新增 `systemRoot` 配置项，把系统 skill 树**以同一绝对路径**只读挂进沙箱：
+
+```
+-v <systemRoot>:<systemRoot>:ro
+```
+
+同路径而非固定的容器内位置，因为 skill 正文引用的相对路径要相对**宿主解析出的那个目录**成立；挂到别处会让每一条引用失效。只读，因为沙箱只执行、不拥有系统资产。省略该配置时行为不变：系统 skill 树留在宿主侧，只有正文能到达模型。
+
+case 层与用户层不需要对应配置：`/shared` 和 `/global` 本来就是它们的挂载点。
+
+## 后果
+
+- 部署侧要保证宿主容器把 `$DSH_HOME` 挂在与容器内**相同**的绝对路径上，否则宿主交给 docker 的路径在真实宿主上不存在，docker 会建空目录挂进去。`docker-compose.yml` 与 `.env.example` 已按此约束写死绝对路径。
+- 沙箱多一个只读挂载点；`/opt/.dsh/system` 下的内容因此对沙箱内进程可见（本就无凭据，系统 skill 是共享资产）。
