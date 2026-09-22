@@ -4,7 +4,7 @@
  * (tenant, user) — the case workspace bind-mounted at `/workspace`, the
  * case-shared directory at `/shared`, the subject's cross-case global directory
  * at `/global`, and tooling at `/tools` (read-only) — publishes its HTTP port
- * on the host loopback, and runs commands by POSTing to that server (ip+host).
+ * on a configurable host address, and runs commands by POSTing to that server (ip+host).
  * The container is started lazily on the subject's first tool call and never
  * pays a pre-warmed cold-start it could not honor (a per-user container has no
  * user to warm at boot); its stable name means a non-graceful host shutdown
@@ -63,6 +63,21 @@ export interface Config {
   /** Container port the tool-exec server binds (published to a random host port). */
   toolExecPort?: number
   /**
+   * Host address the tool-exec port is published on. Defaults to the host
+   * loopback, which only a harness on the same host network namespace can
+   * reach. The server itself authenticates nothing, so widen this to the
+   * container bridge gateway (e.g. `172.17.0.1`) rather than to
+   * `0.0.0.0` when the harness runs in a container: that keeps an
+   * unauthenticated command surface off the surrounding network.
+   */
+  publishHost?: string
+  /**
+   * Host address the harness dials to reach that published port. Defaults to
+   * the host loopback. A harness running in its own container reaches the host
+   * by the gateway name instead (e.g. `host.docker.internal`).
+   */
+  connectHost?: string
+  /**
    * Host root holding one sub-directory per subject (their cross-case global
    * directory), bind-mounted read-write at `/global`. When omitted the `/global`
    * mount is skipped (single-user deployments without a cross-case directory).
@@ -99,6 +114,8 @@ export class DockerContainerRuntime extends ContainerRuntime {
     network: z.string().default('bridge'),
     toolExecImage: z.string().default('dsh-tool-exec:latest'),
     toolExecPort: z.natural().min(1).default(8642),
+    publishHost: z.string().default('127.0.0.1'),
+    connectHost: z.string().default('127.0.0.1'),
     usersRoot: z.string(),
     idleTimeoutMs: z.natural().min(1),
     memoryLimit: z.string(),
@@ -110,6 +127,8 @@ export class DockerContainerRuntime extends ContainerRuntime {
   private readonly network: string
   private readonly toolExecImage: string
   private readonly toolExecPort: number
+  private readonly publishHost: string
+  private readonly connectHost: string
   private readonly usersRoot: string | undefined
   private readonly idleTimeoutMs: number | undefined
   private readonly memoryLimit: string | undefined
@@ -125,6 +144,8 @@ export class DockerContainerRuntime extends ContainerRuntime {
     this.network = config.network ?? 'bridge'
     this.toolExecImage = config.toolExecImage ?? 'dsh-tool-exec:latest'
     this.toolExecPort = config.toolExecPort ?? 8642
+    this.publishHost = config.publishHost ?? '127.0.0.1'
+    this.connectHost = config.connectHost ?? '127.0.0.1'
     this.usersRoot = config.usersRoot
     this.idleTimeoutMs = config.idleTimeoutMs
     this.memoryLimit = config.memoryLimit
@@ -155,7 +176,12 @@ export class DockerContainerRuntime extends ContainerRuntime {
     if (opts?.cwd !== undefined) req.cwd = opts.cwd
     if (opts?.env !== undefined) req.env = { ...opts.env }
     if (opts?.stdin !== undefined) req.stdin = opts.stdin
-    return this.client.exec(`http://127.0.0.1:${runtime.port}`, req, opts?.signal)
+    return this.client.exec(this.toolExecBaseUrl(runtime.port), req, opts?.signal)
+  }
+
+  /** The tool-exec server's address as the harness reaches it. */
+  private toolExecBaseUrl(port: number): string {
+    return `http://${this.connectHost}:${String(port)}`
   }
 
   private networkFor(tenant: Tenant): string {
@@ -199,7 +225,7 @@ export class DockerContainerRuntime extends ContainerRuntime {
       // mounted runtime (code-runtime-container) can bridge its declared
       // host-side bindings back over the loopback HTTP surface it publishes.
       '--add-host', 'host.docker.internal:host-gateway',
-      '-p', `127.0.0.1::${String(this.toolExecPort)}`,
+      '-p', `${this.publishHost}::${String(this.toolExecPort)}`,
     ]
     if (this.memoryLimit !== undefined) {
       // Without the matching --memory-swap Docker defaults it to twice the memory
@@ -251,7 +277,7 @@ export class DockerContainerRuntime extends ContainerRuntime {
    * @throws when the server stays unreachable past the readiness timeout.
    */
   private async waitReady(runtime: TenantRuntime): Promise<void> {
-    const baseUrl = `http://127.0.0.1:${runtime.port}`
+    const baseUrl = this.toolExecBaseUrl(runtime.port)
     const deadline = Date.now() + TOOL_EXEC_READY_TIMEOUT_MS
     let lastError: unknown
     while (Date.now() < deadline) {

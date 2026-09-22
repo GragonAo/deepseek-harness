@@ -7,6 +7,16 @@ interface Entry { type: 'file' | 'directory'; content?: string }
 
 interface Call { script: string; opts?: { stdin?: string } }
 
+/** Mount a filesystem whose `find` always fails with the given stderr text. */
+function mountListing(stderr: string): ContainerFileSystem {
+  const containerRuntime = {
+    exec: async (): Promise<ContainerCommandResult> => ({ exitCode: 1, stdout: '', stderr }),
+  }
+  const ctx = new Context()
+  ctx.provide('containerRuntime', containerRuntime)
+  return new ContainerFileSystem(ctx, { root: '/workspace' })
+}
+
 function mount() {
   const store = new Map<string, Entry>([
     ['/workspace', { type: 'directory' }],
@@ -102,6 +112,28 @@ describe('ContainerFileSystem', () => {
     expect(entries.map(entry => entry.name)).toEqual(['a.txt', 'sub'])
     expect(entries[0]?.type).toBe('file')
     expect(entries[1]?.type).toBe('directory')
+  })
+
+  it('lists a directory as absent when `find` reports it missing', async () => {
+    // `find` exits non-zero with "No such file or directory" for an absent root.
+    // An absent root is empty state, not an I/O failure: callers that treat it as
+    // empty (skill and tool tier discovery under /workspace) key on FS_NOT_FOUND,
+    // and a misreported code discards their whole catalog instead of one root.
+    const fs = mountListing("find: '/workspace/.dsh/skills': No such file or directory\n")
+    const target = await fs.resolve('/workspace/.dsh/skills')
+    await expect(fs.listDir(target)).rejects.toMatchObject({ code: 'FS_NOT_FOUND' })
+  })
+
+  it('keeps a non-directory target distinct from an absent one', async () => {
+    const fs = mountListing("find: '/workspace/a.txt/x': Not a directory\n")
+    const target = await fs.resolve('/workspace/a.txt/x')
+    await expect(fs.listDir(target)).rejects.toMatchObject({ code: 'FS_NOT_DIRECTORY' })
+  })
+
+  it('still reports an unrecognized listing failure as an I/O error', async () => {
+    const fs = mountListing('find: permission denied\n')
+    const target = await fs.resolve('/workspace')
+    await expect(fs.listDir(target)).rejects.toMatchObject({ code: 'FS_IO_ERROR' })
   })
 
   it('writes create/update atomically and guards create-if-absent', async () => {

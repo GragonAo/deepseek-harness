@@ -89,6 +89,23 @@ describe('DockerContainerRuntime', () => {
     ])
   })
 
+  it('publishes the tool-exec port on, and dials it at, the configured host addresses', async () => {
+    const runner = new FakeRunner()
+    const client = new FakeClient()
+    const runtime = mount(runner, client, {
+      runtime: 'docker',
+      publishHost: '172.17.0.1',
+      connectHost: 'host.docker.internal',
+    })
+    await scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi']))
+    const runCall = runner.calls.find(c => c[0] === 'run')
+    expect(runCall).toContain('172.17.0.1::8642')
+    expect(client.requests.map(request => request.baseUrl)).toEqual([
+      'http://host.docker.internal:43210',
+      'http://host.docker.internal:43210',
+    ])
+  })
+
   it('caps memory (with swap) and CPU when ceilings are configured, and passes neither otherwise', async () => {
     const capped = new FakeRunner()
     await scoped(tenant('acme'), 'user-1', () =>

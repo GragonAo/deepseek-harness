@@ -3,11 +3,14 @@ import { Context } from '@deepseek-ai/cordis'
 import TenantRegistry, {
   TenantId,
   UserId,
+  currentScopes,
   currentTenant,
   currentUser,
   isTenantMember,
+  requireScope,
   requireTenant,
   requireUser,
+  runWithScopes,
   runWithTenant,
   runWithUser,
   tenantPartitionName,
@@ -97,6 +100,31 @@ describe('user authority', () => {
   })
 })
 
+describe('scopes authority', () => {
+  it('fails closed outside a run', () => {
+    expect(currentScopes()).toBeUndefined()
+    expect(() => requireScope('dsh:tenant-admin')).toThrowMatchingObject({ code: 'MISSING_SCOPE' })
+  })
+
+  it('exposes the entered scopes across an async boundary, then clears', async () => {
+    expect(currentScopes()).toBeUndefined()
+    await runWithScopes(['read', 'dsh:tenant-admin'], async () => {
+      expect(currentScopes()).toEqual(['read', 'dsh:tenant-admin'])
+      expect(requireScope('dsh:tenant-admin')).toEqual(['read', 'dsh:tenant-admin'])
+      await Promise.resolve()
+      expect(requireScope('dsh:tenant-admin')).toEqual(['read', 'dsh:tenant-admin'])
+    })
+    expect(currentScopes()).toBeUndefined()
+  })
+
+  it('admits an explicit undefined scope run, still rejecting requirement', () => {
+    runWithScopes(undefined, () => {
+      expect(currentScopes()).toBeUndefined()
+      expect(() => requireScope('dsh:tenant-admin')).toThrowMatchingObject({ code: 'MISSING_SCOPE' })
+    })
+  })
+})
+
 describe('isTenantMember', () => {
   it('treats an absent or empty members list as open', () => {
     expect(isTenantMember(tenant('acme'), UserId('anyone'))).toBe(true)
@@ -174,6 +202,41 @@ describe('TenantRegistry', () => {
     ctx.tenants.register(disabled)
     expect(ctx.tenants.get(disabled.id)).toBe(disabled)
     expect(() => ctx.tenants.resolve(disabled.id)).toThrowMatchingObject({ code: 'TENANT_DISABLED' })
+  })
+
+  it('updates a record in place and restores it on dispose', async () => {
+    const ctx = new Context()
+    await ctx.plugin(TenantRegistry)
+    const original = tenant('acme', { name: 'Acme' })
+    ctx.tenants.register(original)
+    const renamed = tenant('acme', { name: 'Acme Renamed', members: ['alice'] })
+    const dispose = ctx.tenants.update(renamed)
+    expect(ctx.tenants.get(renamed.id)).toBe(renamed)
+    expect(ctx.tenants.resolve(TenantId('acme')).name).toBe('Acme Renamed')
+    dispose()
+    expect(ctx.tenants.get(renamed.id)).toBe(original)
+  })
+
+  it('rejects an update for an unknown id', async () => {
+    const ctx = new Context()
+    await ctx.plugin(TenantRegistry)
+    expect(() => ctx.tenants.update(tenant('missing'))).toThrowMatchingObject({ code: 'TENANT_UNKNOWN' })
+  })
+
+  it('removes a record and re-registers it on dispose', async () => {
+    const ctx = new Context()
+    await ctx.plugin(TenantRegistry)
+    ctx.tenants.register(tenant('acme'))
+    const dispose = ctx.tenants.remove(TenantId('acme'))
+    expect(ctx.tenants.get(TenantId('acme'))).toBeUndefined()
+    dispose()
+    expect(ctx.tenants.resolve(TenantId('acme')).id).toBe(TenantId('acme'))
+  })
+
+  it('rejects a remove for an unknown id', async () => {
+    const ctx = new Context()
+    await ctx.plugin(TenantRegistry)
+    expect(() => ctx.tenants.remove(TenantId('missing'))).toThrowMatchingObject({ code: 'TENANT_UNKNOWN' })
   })
 
   it('registers config tenants (branding the wire id) and disposes them on teardown', async () => {

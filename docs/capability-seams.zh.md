@@ -82,6 +82,11 @@ flowchart LR
   pkg_tenant_demo["tenant-demo"]
   pkg_agent_http["agent-http"]
   svc_agentHttp["ctx.agentHttp<br/>Multi-tenant agent HTTP carrier"]
+  pkg_tenant_admin["tenant-admin"]
+  svc_tenantAdmin["ctx.tenantAdmin<br/>Scope-gated tenant administration"]
+  svc_tenantRecordStore["ctx.tenantRecordStore<br/>Durable tenant-record store seam"]
+  pkg_tenant_admin_postgres["tenant-admin-postgres"]
+  svc_tenantSchemaLifecycle["ctx.tenantSchemaLifecycle<br/>Per-tenant storage-partition lifecycle seam"]
   svc_sessionQuery["ctx.sessionQuery<br/>Session reads, traces, filters, and search"]
   pkg_session_reference["session-reference"]
   pkg_tool_session_query["tool-session-query"]
@@ -316,6 +321,11 @@ flowchart LR
   pkg_subprocess_local --> svc_subprocess
   pkg_system_prompt --> svc_systemPrompt
   pkg_tenant --> svc_tenants
+  pkg_tenant_admin --> svc_tenantAdmin
+  pkg_tenant_admin --> svc_tenantRecordStore
+  pkg_tenant_admin --> svc_tenantSchemaLifecycle
+  pkg_tenant_admin_postgres --> svc_tenantRecordStore
+  pkg_tenant_admin_postgres --> svc_tenantSchemaLifecycle
   pkg_tenant_auth --> svc_tenantAuth
   pkg_tenant_auth_jwt --> svc_tenantAuth
   pkg_terminal --> svc_terminals
@@ -426,8 +436,11 @@ flowchart LR
   svc_systemPrompt --> pkg_tool_terminal
   svc_systemPrompt --> pkg_tool_web
   svc_systemPrompt --> pkg_tools
+  svc_tenantAdmin --> pkg_apiproxy
   svc_tenantAuth --> pkg_api_http
   svc_tenantHttpApi --> pkg_tenant_demo
+  svc_tenantRecordStore --> pkg_tenant_admin
+  svc_tenantSchemaLifecycle --> pkg_tenant_admin
   svc_tenants --> pkg_api_http
   svc_terminals --> pkg_tool_terminal
   svc_tokenMeter --> pkg_compaction_basic
@@ -478,6 +491,9 @@ flowchart LR
 | `ctx.containerRuntime` | `seam` | [`container`](../packages/tenant/container) | [`container-docker`](../packages/tenant/container-docker) | [`subprocess-container`](../packages/tenant/subprocess-container), [`fs-container`](../packages/tenant/fs-container) | - | Runs a command inside the ambient tenant's container; subprocess and filesystem providers delegate into that one world. |
 | `ctx.tenantHttpApi` | `core` | [`api-http`](../packages/tenant/api-http) | - | [`tenant-demo`](../packages/tenant/tenant-demo) | - | Authenticates, resolves the tenant, enters runWithTenant, and runs the single registered operation. |
 | `ctx.agentHttp` | `core` | [`agent-http`](../packages/tenant/agent-http) | - | [`tenant-demo`](../packages/tenant/tenant-demo) | - | Wraps the single-tenant gateway (ctx.apiProxy via toFetchHandler) with bearer authentication, tenant + user authority, and session-scoped channel filtering; the tenant demo drives it directly and the multi-tenant bundle registers it as the request entry point. |
+| `ctx.tenantAdmin` | `core` | [`tenant-admin`](../packages/tenant/tenant-admin) | - | `apiproxy` | - | Tenant CRUD, enable/disable, member admission, and the partition/directory lifecycle behind the tenant.admin.* methods; every method refuses with tenant-forbidden unless the ambient scopes carry the administrative scope. |
+| `ctx.tenantRecordStore` | `seam` | [`tenant-admin`](../packages/tenant/tenant-admin) | [`tenant-admin-postgres`](../packages/tenant/tenant-admin-postgres) | [`tenant-admin`](../packages/tenant/tenant-admin) | - | Loads, upserts, and deletes the durable tenant list; tenantAdmin hydrates its live registry from it at boot, and a stored record wins over a same-id config seed. |
+| `ctx.tenantSchemaLifecycle` | `seam` | [`tenant-admin`](../packages/tenant/tenant-admin) | [`tenant-admin-postgres`](../packages/tenant/tenant-admin-postgres) | [`tenant-admin`](../packages/tenant/tenant-admin) | - | Provisions the tenant partition on create and drops it on purge, so a new tenant's providers share no storage with another tenant. |
 | `ctx.sessionQuery` | `seam` | [`session-query`](../packages/session-query/session-query) | [`session-query-sqlite`](../packages/session-query/session-query-sqlite) | [`session-reference`](../packages/context/session-reference), [`tool-session-query`](../packages/session-query/tool-session-query) | - | The interface supplies exact reads, filters, and traces; its concrete backend adds full-text reconciliation, ranking, snippets, and cursor generations, while the model consumer owns workspace authority and cursor-free rendering. |
 | `ctx.fileReferences` | `seam` | [`file-reference`](../packages/context/file-reference) | [`file-reference-local`](../packages/context/file-reference-local) | - | - | The interface returns path-only completion candidates within the addressed Agent cwd through its unary Remote contract; providers own namespace access and ranking without reading file contents. |
 | `ctx.sessionReferenceResolver` | `core` | [`session-reference`](../packages/context/session-reference) | - | - | - | Projects bounded current-surface conversation snapshots into durable untrusted message context; host adapters own mention syntax. |

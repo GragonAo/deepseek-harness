@@ -13,6 +13,8 @@
     network: 'bridge'               # used unless the tenant sets network: 'none'
     toolExecImage: 'dsh-tool-exec:latest'  # in-container /exec server image
     toolExecPort: 8642              # container port that server binds
+      publishHost: '127.0.0.1'        # host address that port is published on
+      connectHost: '127.0.0.1'        # host address the harness dials for it
     usersRoot: '/root/.dsh/users'   # host root of per-subject /global dirs; omit to skip /global
     # idleTimeoutMs: 300000         # optional: reap a container this long after its last exec
 ```
@@ -24,14 +26,16 @@
 ```
 docker rm -f dsh-<tenantPartition>-<userPartition>
 docker run -d --name dsh-<tenantPartition>-<userPartition> \
-  --network <network|none> -p 127.0.0.1::<toolExecPort> \
+  --network <network|none> -p <publishHost>::<toolExecPort> \
   -v <workspaceRoot>/users/<sub>:/workspace \
   -v <workspaceRoot>/shared:/shared \
   [-v <usersRoot>/<sub>:/global] [-v <toolsRoot>:/tools:ro] \
   <toolExecImage>
 ```
 
-随后读取已发布宿主机端口（`docker port`），等待容器的 `/exec` 服务应答（设上限，从而没有 exec 会与容器内 Node 绑定端口的时序竞争），再把每次 exec POST 到 `http://127.0.0.1:<port>/exec`——agent 端从不执行 `docker exec`。同一作用域并发首次调用会并入那次进行中的启动，所以每个 (租户, 用户) 每进程最多付一次冷启动。运行镜像来自 `toolExecImage`；租户记录本身不携带镜像。设置 `idleTimeoutMs` 时，空闲容器会被 `docker rm -f` 回收，下次 exec 再懒式重启。
+随后读取已发布宿主机端口（`docker port`），等待容器的 `/exec` 服务应答（设上限，从而没有 exec 会与容器内 Node 绑定端口的时序竞争），再把每次 exec POST 到 `http://<connectHost>:<port>/exec`——agent 端从不执行 `docker exec`。同一作用域并发首次调用会并入那次进行中的启动，所以每个 (租户, 用户) 每进程最多付一次冷启动。运行镜像来自 `toolExecImage`；租户记录本身不携带镜像。设置 `idleTimeoutMs` 时，空闲容器会被 `docker rm -f` 回收，下次 exec 再懒式重启。
+
+`publishHost` 与 `connectHost` 默认是宿主机回环，前提是宿主进程与宿主机共用网络命名空间。宿主自身跑在容器里时，要通过 Docker 网关访问已发布端口：把 `connectHost` 设为 `host.docker.internal`，并把 `publishHost` 放宽到网桥网关地址（例如 `172.17.0.1`）。优先用网关地址而不是 `0.0.0.0`——`/exec` 服务不做任何鉴权，发布到所有网卡等于把无鉴权的命令执行暴露给周边网络。
 
 tool-exec 镜像把零依赖的 `/exec` 服务（`src/tool-exec.ts`）打包到 Debian-slim + Node 上，从而保住文件系统适配器 `stat`/`find`/`base64`/`test`/`command -v` 的 coreutils 语义。在仓库根目录构建：
 

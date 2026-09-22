@@ -52,6 +52,8 @@
     "@deepseek-ai/dsh-storage-postgres": "workspace:^",
     "@deepseek-ai/dsh-subprocess-container": "workspace:^",
     "@deepseek-ai/dsh-tenant": "workspace:^",
+    "@deepseek-ai/dsh-tenant-admin": "workspace:^",
+    "@deepseek-ai/dsh-tenant-admin-postgres": "workspace:^",
     "@deepseek-ai/dsh-tenant-auth-jwt": "workspace:^",
     "@deepseek-ai/dsh-tools-manifest": "workspace:^",
     "@deepseek-ai/dsh-tools-tier": "workspace:^",

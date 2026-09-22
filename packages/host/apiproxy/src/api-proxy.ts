@@ -40,7 +40,7 @@ import type {
   ModelCatalogFailure, ModelProviderGroup,
   ModelReasoning, MuxFrame, PromptContentPart, QuestionResponsePayload, SessionListMetadata, SessionProjectionsBlock, SessionSearchItem,
   QueuedInboxItem, SessionSummary, SettingsNamespaceView, SubagentAddress, JobView, ToolEventView,
-  WorkspaceId, WorkspaceView,
+  WorkspaceId, WorkspaceView, TenantAdminView,
 } from './api/index.ts'
 import {
   DEFAULT_SESSION_LOG_COMPRESSION_LEVEL,
@@ -81,6 +81,12 @@ import type {} from '@deepseek-ai/dsh-skill'
 import { SettingsConflictError, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { SettingsDescriptor, SettingsNamespace, SettingsPathOp } from '@deepseek-ai/dsh-settings'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import { DEFAULT_TENANT_ADMIN_SCOPE, TenantError } from '@deepseek-ai/dsh-tenant'
+import type { Tenant } from '@deepseek-ai/dsh-tenant'
+// Value edge: the tenant-admin errors narrow to stable codes at this boundary;
+// the service type also resolves `ctx.get('tenantAdmin')`.
+import { TenantAdminError } from '@deepseek-ai/dsh-tenant-admin'
+import type { TenantAdmin } from '@deepseek-ai/dsh-tenant-admin'
 // Value edge: the rename impl narrows the title service's validation failure; the import also resolves `ctx.get('sessionTitle')`.
 import { SessionTitleInvalidError } from '@deepseek-ai/dsh-session-title'
 import type { CallId } from '@deepseek-ai/dsh-llm/brand'
@@ -1816,6 +1822,63 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     return { code: 'internal', message: 'settings service is absent: this deployment does not mount a settings provider (e.g. @deepseek-ai/dsh-settings-file) in its composition', details: {} }
   }
 
+  /** Map one tenant record to its wire view, normalizing optional fields. */
+  function tenantAdminView(tenant: Tenant): TenantAdminView {
+    return {
+      id: String(tenant.id),
+      name: tenant.name,
+      dataRoot: tenant.dataRoot,
+      workspaceRoot: tenant.workspaceRoot,
+      ...(tenant.toolsRoot !== undefined ? { toolsRoot: tenant.toolsRoot } : {}),
+      enabled: tenant.enabled ?? true,
+      ...(tenant.network !== undefined ? { network: tenant.network } : {}),
+      members: [...(tenant.members ?? [])],
+    }
+  }
+
+  /** Map a tenant-admin failure to its wire error. */
+  function tenantAdminError(error: unknown, id?: string): RpcError {
+    if (error instanceof TenantError) {
+      if (error.code === 'MISSING_SCOPE') {
+        return { code: 'tenant-forbidden', message: error.message, details: { scope: DEFAULT_TENANT_ADMIN_SCOPE } }
+      }
+      if (error.code === 'TENANT_UNKNOWN') {
+        return { code: 'tenant-not-found', message: error.message, details: { id: id ?? 'unknown' } }
+      }
+      if (error.code === 'DUPLICATE_TENANT') {
+        return { code: 'tenant-conflict', message: error.message, details: { id: id ?? 'unknown' } }
+      }
+    }
+    if (error instanceof TenantAdminError) {
+      if (error.code === 'invalid-input') {
+        return { code: 'tenant-invalid', message: error.message, details: { reason: error.message } }
+      }
+      return { code: 'tenant-provision-failed', message: error.message, details: { reason: error.message } }
+    }
+    return { code: 'internal', message: error instanceof Error ? error.message : String(error), details: {} }
+  }
+
+  /** Run one tenant-admin operation under the shared error mapping. */
+  async function tenantAdminRun<T>(
+    request: RpcRequest<unknown>,
+    run: (admin: TenantAdmin) => T | Promise<T>,
+  ): Promise<RpcResponse<T>> {
+    const admin = ctx.get('tenantAdmin')
+    if (admin === undefined) {
+      return err(request, {
+        code: 'tenant-provision-failed',
+        message: 'tenant administration is not mounted in this deployment',
+        details: { reason: 'no tenantAdmin service' },
+      })
+    }
+    const id = (request.payload as { id?: unknown } | undefined)?.id
+    try {
+      return ok(request, await run(admin))
+    } catch (error: unknown) {
+      return err(request, tenantAdminError(error, typeof id === 'string' ? id : undefined))
+    }
+  }
+
   /** Open one Host-resolved target and map native failures onto the wire vocabulary. */
   async function openTarget(
     request: RpcRequest<unknown>, path: string, signal: AbortSignal,
@@ -3230,6 +3293,27 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       update: request => settingsWrite(request, request.payload.ns, 'update', request.payload.patch, request.payload.expectedRevision),
       replace: request => settingsWrite(request, request.payload.ns, 'replace', request.payload.section, request.payload.expectedRevision),
       mutate: request => settingsWrite(request, request.payload.ns, 'mutate', request.payload.ops, request.payload.expectedRevision),
+    },
+
+    tenantAdmin: {
+      list: request => tenantAdminRun(request, admin => ({ items: admin.list().map(tenantAdminView) })),
+      get: request => tenantAdminRun(request, admin => tenantAdminView(admin.get(request.payload.id))),
+      create: request => tenantAdminRun(request, admin => admin.create(request.payload).then(tenantAdminView)),
+      update: request => tenantAdminRun(request, admin => admin.update(request.payload.id, {
+        ...(request.payload.name !== undefined ? { name: request.payload.name } : {}),
+        ...(request.payload.workspaceRoot !== undefined ? { workspaceRoot: request.payload.workspaceRoot } : {}),
+        ...(request.payload.toolsRoot !== undefined ? { toolsRoot: request.payload.toolsRoot } : {}),
+        ...(request.payload.network !== undefined ? { network: request.payload.network } : {}),
+      }).then(tenantAdminView)),
+      enable: request => tenantAdminRun(request, admin => admin.enable(request.payload.id).then(tenantAdminView)),
+      disable: request => tenantAdminRun(request, admin => admin.disable(request.payload.id).then(tenantAdminView)),
+      remove: request => tenantAdminRun(request, admin => admin.remove(request.payload.id, request.payload.purge ?? false)),
+      membersList: request => tenantAdminRun(request, admin => ({ members: admin.membersList(request.payload.id) })),
+      membersAdd: request => tenantAdminRun(request, admin =>
+        admin.membersAdd(request.payload.id, request.payload.subject).then(members => ({ members }))),
+      membersRemove: request => tenantAdminRun(request, admin =>
+        admin.membersRemove(request.payload.id, request.payload.subject).then(members => ({ members }))),
+      usersEnsure: request => tenantAdminRun(request, admin => admin.usersEnsure(request.payload.subject)),
     },
 
     credentials: {

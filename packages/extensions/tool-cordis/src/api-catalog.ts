@@ -748,7 +748,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'abstract listDir(target: FsTarget, signal?: AbortSignal): Promise<FsDirEntry[]>',
-        description: 'List direct children of a directory in stable name order. Returns resolved child targets plus cheap metadata only; never reads file contents.',
+        description: 'List direct children of a directory in stable name order. Returns resolved child targets plus cheap metadata only; never reads file contents.\n\nAn absent directory rejects with `FS_NOT_FOUND` and a non-directory target with `FS_NOT_DIRECTORY`; every other listing failure rejects with `FS_IO_ERROR`. Callers that treat an absent root as empty state depend on that distinction, so a provider must not report an absent directory as an I/O failure.',
         parameters: [{ name: 'target', description: 'the resolved directory target.' }, { name: 'signal', description: 'aborts the listing.' }],
         returns: 'one entry per direct child, in stable name order.',
       },
@@ -1875,6 +1875,79 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'tenantAdmin',
+    summary: 'Tenant administration service.',
+    description: 'Tenant administration service. Load with a tenant registry always present; persistence and partition lifecycle are optional providers read by key so a test assembly can run the surface ephemeral.',
+    methods: [
+      {
+        signature: 'list(): Tenant[]',
+        description: 'List every registered tenant, in registration order.',
+        parameters: [],
+        returns: 'the records, enabled and disabled.',
+      },
+      {
+        signature: 'get(id: string): Tenant',
+        description: 'Resolve one tenant, including disabled records.',
+        parameters: [{ name: 'id', description: 'the tenant id.' }],
+        returns: 'the record.',
+      },
+      {
+        signature: 'async create(request: CreateTenantRequest): Promise<Tenant>',
+        description: 'Provision a tenant: create its storage partition and host directories, register it, and persist the record.',
+        parameters: [{ name: 'request', description: 'the create fields.' }],
+        returns: 'the created record.',
+      },
+      {
+        signature: 'async update(id: string, patch: UpdateTenantRequest): Promise<Tenant>',
+        description: 'Change recoverable metadata; `id` and `dataRoot` are immutable.',
+        parameters: [{ name: 'id', description: 'the tenant id.' }, { name: 'patch', description: 'the fields to change (absent fields are left unchanged).' }],
+        returns: 'the updated record.',
+      },
+      {
+        signature: 'async enable(id: string): Promise<Tenant>',
+        description: 'Re-enable a disabled tenant.',
+        parameters: [{ name: 'id', description: 'the tenant id.' }],
+        returns: 'the re-enabled record.',
+      },
+      {
+        signature: 'async disable(id: string): Promise<Tenant>',
+        description: 'Disable a tenant; its requests are refused by `resolve` until re-enabled.',
+        parameters: [{ name: 'id', description: 'the tenant id.' }],
+        returns: 'the disabled record.',
+      },
+      {
+        signature: 'async remove(id: string, purge: boolean): Promise<{ removed: true }>',
+        description: 'Remove a tenant record; `purge` also drops the partition and archives the host directories instead of deleting them.',
+        parameters: [{ name: 'id', description: 'the tenant id.' }, { name: 'purge', description: 'when true, drop the partition and archive the directories.' }],
+        returns: 'a fixed acknowledgement.',
+      },
+      {
+        signature: 'membersList(id: string): string[]',
+        description: 'List one tenant\'s admitted subjects.',
+        parameters: [{ name: 'id', description: 'the tenant id.' }],
+        returns: 'the admitted subjects (never mutated by callers).',
+      },
+      {
+        signature: 'async membersAdd(id: string, subject: string): Promise<string[]>',
+        description: 'Admit one subject, bootstrapping its `/global` tier directories.',
+        parameters: [{ name: 'id', description: 'the tenant id.' }, { name: 'subject', description: 'the JWT `sub` to admit.' }],
+        returns: 'the tenant\'s members after the change.',
+      },
+      {
+        signature: 'async membersRemove(id: string, subject: string): Promise<string[]>',
+        description: 'Remove one subject\'s admission (its data and directories are untouched).',
+        parameters: [{ name: 'id', description: 'the tenant id.' }, { name: 'subject', description: 'the JWT `sub` to remove.' }],
+        returns: 'the tenant\'s members after the change.',
+      },
+      {
+        signature: 'async usersEnsure(subject: string): Promise<{ root: string }>',
+        description: 'Pre-create one subject\'s `/global` tier directories.',
+        parameters: [{ name: 'subject', description: 'the JWT `sub` to prepare.' }],
+        returns: 'the host directory that now holds the subject\'s tiers.',
+      },
+    ],
+  },
+  {
     key: 'tenantAuth',
     summary: 'Abstract tenant authenticator (`ctx.tenantAuth`).',
     description: 'Abstract tenant authenticator (`ctx.tenantAuth`). Subclass, implement authenticate, and load the subclass as a plugin.',
@@ -1902,6 +1975,29 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'tenantRecordStore',
+    summary: 'Durable source of the deployment\'s tenant records.',
+    description: 'Durable source of the deployment\'s tenant records.',
+    methods: [
+      {
+        signature: 'load(): Promise<readonly Tenant[]>',
+        description: 'Read every persisted record, in registration order.',
+        parameters: [],
+        returns: 'the records, or an empty array when none are persisted.',
+      },
+      {
+        signature: 'upsert(tenant: Tenant): Promise<void>',
+        description: 'Persist one record, inserting or replacing by id.',
+        parameters: [{ name: 'tenant', description: 'the record to persist.' }],
+      },
+      {
+        signature: 'delete(id: TenantId): Promise<void>',
+        description: 'Remove one record by id.',
+        parameters: [{ name: 'id', description: 'the tenant id to remove.' }],
+      },
+    ],
+  },
+  {
     key: 'tenants',
     summary: 'Tenant record registry (`ctx.tenants`).',
     description: 'Tenant record registry (`ctx.tenants`). Records are registered by the deployment assembly — from cordis.yml through Config.tenants, or by calling register directly — and authentication resolves an authenticated id through resolve, which rejects absent or disabled tenants fail-closed.',
@@ -1912,6 +2008,20 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [{ name: 'tenant', description: 'the tenant record.' }],
         returns: 'the disposer.',
         throws: ['`TenantError` code `DUPLICATE_TENANT` when the id exists.'],
+      },
+      {
+        signature: 'update(tenant: Tenant): () => void',
+        description: 'Replace one registered record\'s metadata in place. The id is immutable: a patch names the record it updates but cannot re-brand it. Returns the exact disposer that restores the previous record.',
+        parameters: [{ name: 'tenant', description: 'the replacement record, with the same id as the current one.' }],
+        returns: 'the disposer restoring the previous record.',
+        throws: ['`TenantError` code `TENANT_UNKNOWN` when the id is unregistered.'],
+      },
+      {
+        signature: 'remove(id: TenantId): () => void',
+        description: 'Remove one registered record. Returns the exact disposer that re-registers the removed record.',
+        parameters: [{ name: 'id', description: 'the tenant id to remove.' }],
+        returns: 'the disposer re-registering the removed record.',
+        throws: ['`TenantError` code `TENANT_UNKNOWN` when the id is unregistered.'],
       },
       {
         signature: 'get(id: TenantId): Tenant | undefined',
@@ -1938,6 +2048,23 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'All registered records in registration order.',
         parameters: [],
         returns: 'a fresh array.',
+      },
+    ],
+  },
+  {
+    key: 'tenantSchemaLifecycle',
+    summary: 'Storage-partition lifecycle for one tenant.',
+    description: 'Storage-partition lifecycle for one tenant.',
+    methods: [
+      {
+        signature: 'provision(id: TenantId): Promise<void>',
+        description: 'Create the tenant\'s storage partition (for Postgres: `CREATE SCHEMA IF NOT EXISTS` for its tenantPartitionName). Idempotent.',
+        parameters: [{ name: 'id', description: 'the tenant id whose partition is provisioned.' }],
+      },
+      {
+        signature: 'purge(id: TenantId): Promise<void>',
+        description: 'Drop the tenant\'s whole storage partition, cascading every provider table inside it. Only called on a deliberate hard remove.',
+        parameters: [{ name: 'id', description: 'the tenant id whose partition is purged.' }],
       },
     ],
   },
@@ -3129,6 +3256,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'CreateTeamTaskRequest',
     declaration: 'export interface CreateTeamTaskRequest {\n    readonly subject: string;\n    readonly description: string;\n    readonly blockedBy?: readonly TeamTaskId[];\n    readonly writeScopes?: readonly string[];\n}',
+  },
+  {
+    name: 'CreateTenantRequest',
+    declaration: 'export interface CreateTenantRequest {\n    readonly id: string;\n    readonly name: string;\n    readonly dataRoot: string;\n    readonly workspaceRoot: string;\n    readonly toolsRoot?: string;\n    readonly network?: \'none\' | \'internal\';\n    readonly members?: readonly string[];\n}',
   },
   {
     name: 'CredentialInfo',
@@ -4829,6 +4960,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'UpdateTeamTaskRequest',
     declaration: 'export interface UpdateTeamTaskRequest {\n    readonly taskId: TeamTaskId;\n    readonly expectedRevision: number;\n    readonly action: TeamTaskAction;\n    readonly subject?: string;\n    readonly description?: string;\n    readonly blockedBy?: readonly TeamTaskId[];\n    readonly writeScopes?: readonly string[];\n    readonly owner?: string;\n}',
+  },
+  {
+    name: 'UpdateTenantRequest',
+    declaration: 'export interface UpdateTenantRequest {\n    readonly name?: string;\n    readonly workspaceRoot?: string;\n    readonly toolsRoot?: string;\n    readonly network?: \'none\' | \'internal\';\n}',
   },
   {
     name: 'UserId',

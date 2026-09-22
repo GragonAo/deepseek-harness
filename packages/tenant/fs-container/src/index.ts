@@ -197,6 +197,13 @@ export class ContainerFileSystem extends FileSystem {
     const script = `find ${quoteShell(String(target.targetKey))} -mindepth 1 -maxdepth 1 -printf '%f\\t%y\\t%s\\n'`
     const result = await this.runtime.exec('sh', ['-c', script], signalOpts(signal))
     if (result.exitCode !== 0) {
+      // A missing directory is absent state, not an I/O failure: `find` reports
+      // it on stderr with a non-zero exit, so classify it before the fallback
+      // the same way `readError` and `stat` do. Callers that treat an absent
+      // root as empty (skill and tool discovery) rely on `FS_NOT_FOUND`.
+      if (result.stderr.includes('No such file')) {
+        throw new FsError(`directory not found: ${target.displayPath}`, 'FS_NOT_FOUND')
+      }
       if (result.stderr.includes('Not a directory')) {
         throw new FsError(`not a directory: ${target.displayPath}`, 'FS_NOT_DIRECTORY')
       }

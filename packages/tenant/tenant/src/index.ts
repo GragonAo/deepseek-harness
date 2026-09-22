@@ -57,6 +57,14 @@ export function UserId(id: string): UserId {
 const MAX_PARTITION_LENGTH = 63
 
 /**
+ * Default OIDC scope that admits the tenant-administration surface. The
+ * carrier and the `tenantAdmin` service share this default so a deployment
+ * that does not override it gets a consistent administrative boundary; one
+ * that does override it must set the same value on both.
+ */
+export const DEFAULT_TENANT_ADMIN_SCOPE = 'dsh:tenant-admin'
+
+/**
  * Derive the tenant's deterministic, storage-partition name. The multi-tenant
  * Postgres backends use this as a per-tenant schema name so a dropped
  * `tenant_id` predicate still cannot address another tenant's tuples. The name
@@ -149,6 +157,7 @@ export type TenantErrorCode =
   | 'TENANT_UNKNOWN'
   | 'TENANT_DISABLED'
   | 'NOT_A_MEMBER'
+  | 'MISSING_SCOPE'
 
 /**
  * Structured error for tenant resolution and scoping failures.
@@ -245,6 +254,48 @@ export function requireUser(): UserId {
 }
 
 /**
+ * The one module-scoped authority store carrying the authenticated token's
+ * OIDC scopes. Layered inside `runWithTenant`/`runWithUser` by the carrier;
+ * the management surface reads `requireScope()` to admit administrative
+ * requests that cross tenant boundaries.
+ */
+const scopesStorage = new AsyncLocalStorage<readonly string[] | undefined>()
+
+/**
+ * Enter the authenticated token's OIDC scopes for one execution tree. Nested
+ * runs shadow the outer scopes and restore them on unwind.
+ * @param scopes - the token scopes, or `undefined` when the credential carried none.
+ * @param fn - work whose synchronous and asynchronous children read these scopes.
+ * @returns `fn`'s result (possibly a promise).
+ */
+export function runWithScopes<T>(scopes: readonly string[] | undefined, fn: () => T): T {
+  return scopesStorage.run(scopes, fn)
+}
+
+/**
+ * The ambient token scopes, or `undefined` when none are in scope.
+ * @returns the current scopes.
+ */
+export function currentScopes(): readonly string[] | undefined {
+  return scopesStorage.getStore()
+}
+
+/**
+ * Fail closed when the ambient token lacks one required scope. Administrative
+ * surfaces call this before any cross-tenant operation.
+ * @param scope - the scope the ambient token must carry.
+ * @returns the ambient scopes when the scope is present.
+ * @throws `TenantError` with code `MISSING_SCOPE` when absent.
+ */
+export function requireScope(scope: string): readonly string[] {
+  const scopes = scopesStorage.getStore()
+  if (!scopes?.includes(scope)) {
+    throw new TenantError('MISSING_SCOPE', `this operation requires scope '${scope}'`)
+  }
+  return scopes
+}
+
+/**
  * Whether a subject may act in the tenant. A tenant without a `members` list
  * (absent or empty) is open to any authenticated subject; one with a list
  * admits only the listed subjects.
@@ -319,6 +370,49 @@ export class TenantRegistry extends Service {
       if (!active) return
       active = false
       this.records.delete(tenant.id)
+    }
+  }
+
+  /**
+   * Replace one registered record's metadata in place. The id is immutable: a
+   * patch names the record it updates but cannot re-brand it. Returns the
+   * exact disposer that restores the previous record.
+   * @param tenant - the replacement record, with the same id as the current one.
+   * @returns the disposer restoring the previous record.
+   * @throws `TenantError` code `TENANT_UNKNOWN` when the id is unregistered.
+   */
+  update(tenant: Tenant): () => void {
+    const previous = this.records.get(tenant.id)
+    if (previous === undefined) {
+      throw new TenantError('TENANT_UNKNOWN', `tenant '${tenant.id}' is not registered`)
+    }
+    this.records.set(tenant.id, tenant)
+    let active = true
+    return () => {
+      if (!active) return
+      active = false
+      this.records.set(tenant.id, previous)
+    }
+  }
+
+  /**
+   * Remove one registered record. Returns the exact disposer that re-registers
+   * the removed record.
+   * @param id - the tenant id to remove.
+   * @returns the disposer re-registering the removed record.
+   * @throws `TenantError` code `TENANT_UNKNOWN` when the id is unregistered.
+   */
+  remove(id: TenantId): () => void {
+    const previous = this.records.get(id)
+    if (previous === undefined) {
+      throw new TenantError('TENANT_UNKNOWN', `tenant '${id}' is not registered`)
+    }
+    this.records.delete(id)
+    let active = true
+    return () => {
+      if (!active) return
+      active = false
+      this.records.set(id, previous)
     }
   }
 

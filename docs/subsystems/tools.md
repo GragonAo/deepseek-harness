@@ -499,7 +499,8 @@ presentAs(mode: ToolPresentationMode): () => void
  * Register globally or in the calling agent scope. Scoped tools shadow
  * globals; duplicates within one rank and the reserved `run_code` name fail.
  * @param definition - tool schema, execution, and optional finalization/presentation callbacks.
- * @param rank - optional precedence rank: a lower rank shadows a same-named higher-rank registration, and any rank shadows an unranked native tool. Reserved for the ambient tier manifest loader; ordinary tools omit it.
+ * @param rank - optional precedence rank: a lower rank shadows a same-named higher-rank registration, and
+ *   any rank shadows an unranked native tool. Reserved for the ambient tier manifest loader; ordinary tools omit it.
  * @returns the exact disposer that unregisters the tool.
  */
 register(definition: ToolDefinition, rank?: number): () => void

@@ -65,6 +65,19 @@ import {
 } from '../api/credentials.schema.ts'
 import { llmDiscoverModelsRequestSchema, llmModelsRequestSchema, llmProvidersRequestSchema } from '../api/llm.schema.ts'
 import {
+  tenantAdminCreateRequestSchema,
+  tenantAdminDisableRequestSchema,
+  tenantAdminEnableRequestSchema,
+  tenantAdminGetRequestSchema,
+  tenantAdminListRequestSchema,
+  tenantAdminMembersAddRequestSchema,
+  tenantAdminMembersListRequestSchema,
+  tenantAdminMembersRemoveRequestSchema,
+  tenantAdminRemoveRequestSchema,
+  tenantAdminUpdateRequestSchema,
+  tenantAdminUsersEnsureRequestSchema,
+} from '../api/tenant-admin.schema.ts'
+import {
   subagentHistoryRequestSchema,
   subagentInterruptRequestSchema,
   subagentListRequestSchema,
@@ -80,14 +93,15 @@ import {
  * Every invoke receives the carrier Request's signal; routes whose contract
  * declares a signal parameter forward it, and the rest ignore it.
  */
-type UnaryRoutes = {
+export type UnaryRoutes = {
   [K in keyof RpcMethodMap]: {
     schema: z.ZodType<Wire<RequestPayload<K>>>
     invoke(api: ApiProxy, request: RpcRequest<RequestPayload<K>>, signal: AbortSignal): Promise<RpcResponse<ResponseValue<K>>>
   }
 }
 
-const UNARY_ROUTES: UnaryRoutes = {
+/** The server-side dispatch table: each unary method's request schema and its invoke. */
+export const UNARY_ROUTES: UnaryRoutes = {
   'session.list': { schema: sessionListRequestSchema, invoke: (api, r) => api.sessions.list(r) },
   'session.search': { schema: sessionSearchRequestSchema, invoke: (api, r, signal) => api.sessions.search(r, signal) },
   'session.create': { schema: sessionCreateRequestSchema, invoke: (api, r) => api.sessions.create(r) },
@@ -140,6 +154,17 @@ const UNARY_ROUTES: UnaryRoutes = {
   'llm.providers': { schema: llmProvidersRequestSchema, invoke: (api, r) => api.llm.providers(r) },
   'llm.models': { schema: llmModelsRequestSchema, invoke: (api, r) => api.llm.models(r) },
   'llm.discoverModels': { schema: llmDiscoverModelsRequestSchema, invoke: (api, r, signal) => api.llm.discoverModels(r, signal) },
+  'tenant.admin.list': { schema: tenantAdminListRequestSchema, invoke: (api, r) => api.tenantAdmin.list(r) },
+  'tenant.admin.get': { schema: tenantAdminGetRequestSchema, invoke: (api, r) => api.tenantAdmin.get(r) },
+  'tenant.admin.create': { schema: tenantAdminCreateRequestSchema, invoke: (api, r) => api.tenantAdmin.create(r) },
+  'tenant.admin.update': { schema: tenantAdminUpdateRequestSchema, invoke: (api, r) => api.tenantAdmin.update(r) },
+  'tenant.admin.enable': { schema: tenantAdminEnableRequestSchema, invoke: (api, r) => api.tenantAdmin.enable(r) },
+  'tenant.admin.disable': { schema: tenantAdminDisableRequestSchema, invoke: (api, r) => api.tenantAdmin.disable(r) },
+  'tenant.admin.remove': { schema: tenantAdminRemoveRequestSchema, invoke: (api, r) => api.tenantAdmin.remove(r) },
+  'tenant.admin.members.list': { schema: tenantAdminMembersListRequestSchema, invoke: (api, r) => api.tenantAdmin.membersList(r) },
+  'tenant.admin.members.add': { schema: tenantAdminMembersAddRequestSchema, invoke: (api, r) => api.tenantAdmin.membersAdd(r) },
+  'tenant.admin.members.remove': { schema: tenantAdminMembersRemoveRequestSchema, invoke: (api, r) => api.tenantAdmin.membersRemove(r) },
+  'tenant.admin.users.ensure': { schema: tenantAdminUsersEnsureRequestSchema, invoke: (api, r) => api.tenantAdmin.usersEnsure(r) },
 }
 
 /** Route lookup that narrows an arbitrary path segment to a map key (single cast point for the string→key refinement). */
@@ -174,7 +199,6 @@ function fullResponse(narrow: RpcResponse<unknown>): Response {
  */
 // K appears once in the signature but ties the UNARY_ROUTES[K] row lookup to its own
 // schema/invoke pairing; a union parameter degrades the row to an uninvokable intersection.
-// oxlint-disable-next-line typescript/no-unnecessary-type-parameters
 async function handleUnary<K extends keyof RpcMethodMap>(
   api: ApiProxy, method: K, message: ClientRequest, signal: AbortSignal,
 ): Promise<Response> {

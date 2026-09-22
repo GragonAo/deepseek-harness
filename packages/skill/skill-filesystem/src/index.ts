@@ -115,6 +115,12 @@ interface ParsedSkill {
 interface LocalLocator {
   path: string
   directory: string
+  /**
+   * Read `path` with host I/O instead of the agent's filesystem service. A root
+   * outside that service's view (the bundled directory, or a carrier-provided
+   * ambient tier) sets it at discovery so the load re-reads the same way.
+   */
+  trustedHost: boolean
 }
 
 interface ResolvedWatchConfig {
@@ -175,9 +181,16 @@ export class FileSystemSkillProvider implements SkillProvider {
 
   /**
    * Discover local skill summaries for a cwd-sensitive workspace.
+   *
+   * A failing root costs only its own candidates: the observation is reported
+   * incomplete so the catalog is neither cached nor published as authoritative,
+   * and every other root still contributes. A root's failure must not reach the
+   * registry, which drops a throwing provider along with the candidates it had
+   * already discovered.
    * @param options - lookup options; `cwd` selects the project roots to scan.
    * @returns local provider candidates with stable root ranks; watcher startup
-   *   failure returns readable candidates as an incomplete observation.
+   *   failure or a failed root returns readable candidates as an incomplete
+   *   observation.
    */
   async list(options: SkillLookupOptions): Promise<SkillCandidate[] | SkillProviderObservation> {
     const roots = await this.roots(options.cwd)
@@ -190,8 +203,14 @@ export class FileSystemSkillProvider implements SkillProvider {
     }
     const candidates: SkillCandidate[] = []
     for (const root of roots) {
-      for (const skill of await discoverRoot(root, this.ctx, this.name)) {
-        candidates.push(skill)
+      try {
+        for (const skill of await discoverRoot(root, this.ctx, this.name)) {
+          candidates.push(skill)
+        }
+      } catch (error) {
+        if (this.disposal !== undefined) throw error
+        complete = false
+        this.ctx.logger.warn(`skill-filesystem: root ${root.path} skipped: ${errorMessage(error)}`)
       }
     }
     return complete ? candidates : { candidates, complete }
@@ -199,13 +218,17 @@ export class FileSystemSkillProvider implements SkillProvider {
 
   /**
    * Load a complete local skill body from the candidate's file locator.
+   *
+   * The locator, not the candidate's source, decides how the file is read: a
+   * root discovered through host I/O re-reads through host I/O, so a skill whose
+   * directory lies outside the agent's filesystem service still loads.
    * @param candidate - the winning candidate returned by this provider.
    * @param options - lookup options whose signal cancels filesystem reads.
    * @returns the full local skill, or `undefined` if the file disappeared.
    */
   async get(candidate: SkillCandidate, options: SkillLookupOptions): Promise<SkillDefinition | undefined> {
     const locator = candidate.locator as LocalLocator
-    const parsed = await parseSkillFile(locator.path, this.ctx, options.signal, candidate.source === 'bundled')
+    const parsed = await parseSkillFile(locator.path, this.ctx, options.signal, locator.trustedHost)
     if (parsed === undefined) return undefined
     return {
       name: parsed.name,
@@ -725,13 +748,14 @@ async function discoverRoot(root: SkillRoot, ctx: Context, provider: string): Pr
   const entries = await listSkillRootEntries(root, ctx)
   for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
     if (root.skipSystem && entry.name === '.system') continue
+    const trustedHost = root.trustedHost === true
     const locator = entry.type === 'directory'
-      ? { path: join(entry.path, 'SKILL.md'), directory: entry.path }
+      ? { path: join(entry.path, 'SKILL.md'), directory: entry.path, trustedHost }
       : entry.type === 'file' && entry.name.endsWith('.md')
-        ? { path: entry.path, directory: root.path }
+        ? { path: entry.path, directory: root.path, trustedHost }
         : undefined
     if (locator === undefined) continue
-    const parsed = await parseSkillFile(locator.path, ctx, undefined, root.trustedHost === true)
+    const parsed = await parseSkillFile(locator.path, ctx, undefined, trustedHost)
     if (parsed === undefined) continue
     skills.push({
       name: parsed.name,

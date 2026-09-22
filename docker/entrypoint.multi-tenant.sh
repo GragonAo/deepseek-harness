@@ -8,7 +8,7 @@
 # a host on the wrong configuration.
 set -euo pipefail
 
-: "${DSH_REPO:=/root/work/deepseek-harness}"
+: "${DSH_REPO:=/opt/work/deepseek-harness}"
 : "${DSH_DEPLOY_DIR:=/opt/dsh-deploy}"
 
 if [ -x "$DSH_DEPLOY_DIR/apply-patches.sh" ]; then

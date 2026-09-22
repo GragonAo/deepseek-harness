@@ -27,6 +27,8 @@ import { ContainerFileSystem } from '@deepseek-ai/dsh-fs-container'
 import { ContainerSubprocessRuntime } from '@deepseek-ai/dsh-subprocess-container'
 import { TenantId, TenantRegistry } from '@deepseek-ai/dsh-tenant'
 import { JwtTenantAuthenticator } from '@deepseek-ai/dsh-tenant-auth-jwt'
+import { TenantAdmin } from '@deepseek-ai/dsh-tenant-admin'
+import { PostgresTenantRecordStore, PostgresTenantSchemaLifecycle } from '@deepseek-ai/dsh-tenant-admin-postgres'
 // Empty type imports carry the Context merges the assertions read through ctx.get.
 import type {} from '@deepseek-ai/dsh-host-webserver'
 
@@ -109,6 +111,25 @@ describe('multi-tenant bundle boot', () => {
       {
         id: 'session-persistence-postgres',
         config: { connectionString: 'postgres://unused@127.0.0.1:5432/dsh' },
+      },
+      // The storage backend and the tenant-administration provider share the
+      // same Postgres URI; both connect lazily, so boot never touches a database.
+      {
+        id: 'storage-postgres',
+        config: { connectionString: 'postgres://unused@127.0.0.1:5432/dsh' },
+      },
+      {
+        id: 'tenant-admin-postgres',
+        config: { connectionString: 'postgres://unused@127.0.0.1:5432/dsh' },
+      },
+      // The administration surface needs per-member tier roots plus a purge
+      // archive root; both stay under the throwaway world directory.
+      {
+        id: 'tenant-admin',
+        config: {
+          usersRoot: join(world, 'users'),
+          archiveRoot: join(world, 'archive'),
+        },
       },
       { id: 'tenant-auth-jwt', config: { issuer: 'mt-test', secret: 'mt-test-secret' } },
       {
@@ -203,6 +224,12 @@ describe('multi-tenant bundle boot', () => {
     expect(ctx.get('tenants')?.get(TenantId('acme'))?.id).toBe('acme')
     expect(ctx.get('agentHttp')).not.toBeUndefined()
     expect(ctx.get('apiProxy')).not.toBeUndefined()
+  })
+
+  it('mounts the tenant-administration surface and its durable seams', () => {
+    expect(ctx.get('tenantAdmin')?.constructor?.name).toBe(TenantAdmin.name)
+    expect(ctx.get('tenantRecordStore')?.constructor?.name).toBe(PostgresTenantRecordStore.name)
+    expect(ctx.get('tenantSchemaLifecycle')?.constructor?.name).toBe(PostgresTenantSchemaLifecycle.name)
   })
 
   it('binds the HTTP server for the tenant API', () => {

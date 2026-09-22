@@ -1,0 +1,113 @@
+# 多租户部署：宿主（dsh-multi-tenant:latest）+ 按 (tenant,user) 分区的 Postgres 后端。
+#
+# 前置：先在宿主机上把两个镜像构建好，compose 自己不构建镜像。
+#
+#   cd /root/work/deepseek-harness && bash docker/build-images.sh
+#   docker compose -f docker/docker-compose.multi-tenant.yml up -d
+#
+# 两个硬约束，改错就是起不来、或者租户沙箱连不上：
+#
+# 1. network_mode: host —— container-docker 把沙箱的工具执行端口发布到【宿主】loopback
+#    （`-p 127.0.0.1::8642`），并且硬编码 POST 到 http://127.0.0.1:<port>/exec
+#    （packages/tenant/container-docker/src/index.ts）。bridge 网络里容器自己的
+#    127.0.0.1 是它本身，够不到宿主 loopback，沙箱会一直起不来。
+#
+# 2. 挂载路径宿主/容器必须完全一致 —— 租户记录里的 dataRoot / workspaceRoot / toolsRoot
+#    和 DSH_USERS_ROOT 都会被原样交给 `docker -v`，由宿主 daemon 解析；同一路径又必须在
+#    这个容器里可见（bootstrapTenantDirs、skill/settings/tools tier 都直接读它）。
+#    所以下面每一行都是 /x:/x，不是随便配的。
+#
+# 环境变量：放在 compose 文件同目录的 .env（compose 默认读该目录），或 export 后 up，
+# 或 docker compose --env-file <file> -f <this> up -d。
+
+# 固定项目名：这份文件被复制到哪，卷名和容器名都不跟着目录名变。
+name: dsh-multi-tenant
+
+services:
+  dsh:
+    image: dsh-multi-tenant:latest
+    container_name: dsh-multi-tenant
+    # 硬约束 1，见文件头。
+    network_mode: host
+    restart: unless-stopped
+    # 若复用已有 Postgres，删掉这个 depends_on 和下面的 postgres 服务。
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DSH_HOME: /root/.dsh
+      DSH_REPO: /root/work/deepseek-harness
+      DSH_DEPLOY_DIR: /opt/dsh-deploy
+      # 会被原样交给 `docker -v .../users/<sub>:/global`：宿主绝对路径，
+      # 且在这个容器里必须能按同一路径读到（默认落在挂载进来的 $DSH_HOME 里）。
+      DSH_USERS_ROOT: ${DSH_USERS_ROOT:-/root/.dsh/users}
+      # purge 租户时的归档根；留空则退回 <dataRoot>/.archived。
+      DSH_ARCHIVE_ROOT: ${DSH_ARCHIVE_ROOT:-/root/work/tenants/.archive}
+      DSH_POSTGRES_URL: ${DSH_POSTGRES_URL:-postgres://dsh:${POSTGRES_PASSWORD:-dsh-local}@127.0.0.1:${POSTGRES_PORT:-5432}/dsh}
+      # tenant-auth-jwt 走 HS256 共享密钥：issuer + secret 两个都要，
+      # 只给一个（或都不给）会在加载时直接失败。
+      DSH_OIDC_ISSUER: ${DSH_OIDC_ISSUER:?需要设置 DSH_OIDC_ISSUER}
+      DSH_OIDC_SECRET: ${DSH_OIDC_SECRET:?需要设置 DSH_OIDC_SECRET}
+      # 部署级兜底 key。凭据解析顺序是「继承环境 > 按 (tenant,user) 的 PG 存储 > .env」，
+      # 空值等同于未设置，所以留空不会挡住运营在 /console 里按租户配 key。
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      # 可选：native | code | both；不设时 multi-tenant 补丁层默认 both。
+      # DSH_TOOLS_MODE: both
+    volumes:
+      # 宿主用 docker CLI 为每个 (tenant,user) 拉起沙箱容器，需要 daemon socket。
+      - /var/run/docker.sock:/var/run/docker.sock
+      # $DSH_HOME：profiles/multi-tenant/{package.json,cordis.patch.yml} 与
+      # profiles/node_modules 扁平软链。宿主侧必须同为 /root/.dsh ——
+      # DSH_USERS_ROOT 默认就在它里面，路径必须两侧一致（硬约束 2）。
+      - /root/.dsh:/root/.dsh
+      # 部署目录：entrypoint 每次启动 replay 其中的 patches/，有一个打不上就拒绝启动。
+      # 如果 apply-patches.sh 会往这个目录里写东西，去掉 :ro。
+      - ${DSH_DEPLOY_HOST_DIR:-/root/work/dsh-deploy}:/opt/dsh-deploy:ro
+      # 租户数据根（硬约束 2）。用 /console 的租户页 create 时填：
+      #   dataRoot      = /root/work/tenants/<id>/data
+      #   workspaceRoot = /root/work/tenants/<id>/workspace
+      # 每个用户的 /workspace 是 <workspaceRoot>/users/<sub>，case 共享目录是
+      # <workspaceRoot>/shared，都在这棵树里，所以这一行覆盖了租户的全部持久化数据。
+      - /root/work/tenants:/root/work/tenants
+    # 默认只绑 127.0.0.1:8787（宿主 loopback，配合宿主网络即宿主本机）。
+    # 要从局域网访问 /console、/swagger、/api，二选一：
+    #   a) ssh -L 8787:127.0.0.1:8787 root@<server>，然后开 http://127.0.0.1:8787/console
+    #   b) 在 $DSH_HOME/profiles/multi-tenant/cordis.patch.yml 里显式绑全网卡：
+    #        - id: webserver
+    #          config:
+    #            host: 0.0.0.0
+    #            port: !!js ctx.webStartup.port ?? 8787
+    #      注意 b) 等于把带 RCE 能力的 API 暴露到网络——CLI 的 --host 0.0.0.0
+    #      是被刻意拒绝的（packages/bundle/web-app/src/startup.ts），要走 b 就自担风险。
+    command:
+      - --profile
+      - multi-tenant
+      # 端口与镜像里的 HEALTHCHECK 对齐（Dockerfile.multi-tenant 探 8787/openapi.json）。
+      - --port
+      - "8787"
+      # 容器里没有浏览器；不传的话 web-runtime 会尝试拉起一个。
+      - --no-open
+
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    container_name: dsh-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dsh
+      # 默认值是本地联调用的，只发到 127.0.0.1；正式部署请显式设置 POSTGRES_PASSWORD。
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dsh-local}
+      POSTGRES_DB: dsh
+    # 只发到宿主 loopback：dsh 用宿主网络，127.0.0.1:5432 直接可达，
+    # 也避免把库暴露到局域网。宿主 5432 已被占用时改 POSTGRES_PORT。
+    ports:
+      - 127.0.0.1:${POSTGRES_PORT:-5432}:5432
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U dsh -d dsh']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  postgres-data:

@@ -3056,6 +3056,21 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         models: fixtureModelGroups().flatMap(group => group.models.map(model => ({ id: model.id, name: model.name }))),
       }),
     },
+    // Satisfies the ApiProxy contract type only: fixture mode runs single-tenant
+    // and never reaches the administrative surface through its dispatch.
+    tenantAdmin: {
+      list: request => ok(request, { items: [] }),
+      get: request => err(request, { code: 'tenant-not-found', message: 'fixture has no tenants', details: { id: request.payload.id } }),
+      create: request => err(request, { code: 'tenant-forbidden', message: 'fixture has no tenant administration', details: { scope: 'dsh:tenant-admin' } }),
+      update: request => err(request, { code: 'tenant-not-found', message: 'fixture has no tenants', details: { id: request.payload.id } }),
+      enable: request => err(request, { code: 'tenant-not-found', message: 'fixture has no tenants', details: { id: request.payload.id } }),
+      disable: request => err(request, { code: 'tenant-not-found', message: 'fixture has no tenants', details: { id: request.payload.id } }),
+      remove: request => err(request, { code: 'tenant-not-found', message: 'fixture has no tenants', details: { id: request.payload.id } }),
+      membersList: request => err(request, { code: 'tenant-not-found', message: 'fixture has no tenants', details: { id: request.payload.id } }),
+      membersAdd: request => err(request, { code: 'tenant-not-found', message: 'fixture has no tenants', details: { id: request.payload.id } }),
+      membersRemove: request => err(request, { code: 'tenant-not-found', message: 'fixture has no tenants', details: { id: request.payload.id } }),
+      usersEnsure: request => ok(request, { root: `/tmp/fixture/global/${request.payload.subject}` }),
+    },
     respond(message: ClientResponse): Promise<RpcReceipt> {
       // Same routing discipline as the host: rpcId first, then the payload's
       // audit correlation; a settled or unknown id is not-pending.
@@ -3227,6 +3242,17 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'llm.providers': return this.api.llm.providers(request)
       case 'llm.models': return this.api.llm.models(request)
       case 'llm.discoverModels': return this.api.llm.discoverModels(request, signal)
+      case 'tenant.admin.list': return this.api.tenantAdmin.list(request)
+      case 'tenant.admin.get': return this.api.tenantAdmin.get(request)
+      case 'tenant.admin.create': return this.api.tenantAdmin.create(request)
+      case 'tenant.admin.update': return this.api.tenantAdmin.update(request)
+      case 'tenant.admin.enable': return this.api.tenantAdmin.enable(request)
+      case 'tenant.admin.disable': return this.api.tenantAdmin.disable(request)
+      case 'tenant.admin.remove': return this.api.tenantAdmin.remove(request)
+      case 'tenant.admin.members.list': return this.api.tenantAdmin.membersList(request)
+      case 'tenant.admin.members.add': return this.api.tenantAdmin.membersAdd(request)
+      case 'tenant.admin.members.remove': return this.api.tenantAdmin.membersRemove(request)
+      case 'tenant.admin.users.ensure': return this.api.tenantAdmin.usersEnsure(request)
     }
   }
 

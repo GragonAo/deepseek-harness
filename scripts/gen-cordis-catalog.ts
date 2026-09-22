@@ -113,6 +113,9 @@ export const SERVICE_PAGE: Record<string, string> = {
   tenantAuth: 'multi-tenant.md',
   tenantHttpApi: 'multi-tenant.md',
   tenants: 'multi-tenant.md',
+  tenantAdmin: 'multi-tenant.md',
+  tenantRecordStore: 'multi-tenant.md',
+  tenantSchemaLifecycle: 'multi-tenant.md',
 }
 
 /**
@@ -613,6 +616,8 @@ export const TYPE_LINK_EXEMPTIONS: Readonly<Record<string, string>> = {
   TenantOperation: 'tenant HTTP operation contract is owned by packages/tenant/api-http/README.md',
   ContainerCommandResult: 'container command result is owned by packages/tenant/container/README.md',
   ContainerExecOptions: 'container exec options are owned by packages/tenant/container/README.md',
+  CreateTenantRequest: 'tenant-admin create contract is owned by packages/tenant/tenant-admin/README.md',
+  UpdateTenantRequest: 'tenant-admin update contract is owned by packages/tenant/tenant-admin/README.md',
 }
 
 /** Repository data policy consumed by the Cordis catalog projector. */

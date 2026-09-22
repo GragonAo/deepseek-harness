@@ -113,10 +113,16 @@ Requires: `tenantAuth` · `tenants` · `apiProxy`
 export interface Config {
   /** Maximum buffered request body bytes before the route answers 413. */
   maxRequestBodyBytes?: number
+  /** OIDC scope admitted to the administrative surface (skips tenant membership). */
+  adminScope?: string
+  /** Serve `GET /openapi.json` and the `/swagger` UI when a `webServer` is present. */
+  openapi?: boolean
+  /** Serve the `/console` operator page when a `webServer` is present. */
+  console?: boolean
 }
 ```
 
-Source: [`packages/tenant/agent-http/src/index.ts:60`](../packages/tenant/agent-http/src/index.ts)
+Source: [`packages/tenant/agent-http/src/index.ts:71`](../packages/tenant/agent-http/src/index.ts)
 
 <a id="deepseek-aidsh-agent-instructions"></a>
 
@@ -924,7 +930,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/host/apiproxy/src/index.ts:41`](../packages/host/apiproxy/src/index.ts)
+Source: [`packages/host/apiproxy/src/index.ts:43`](../packages/host/apiproxy/src/index.ts)
 
 <a id="deepseek-aidsh-host-directory-picker-browse"></a>
 
@@ -2589,7 +2595,45 @@ export interface TenantInput {
 }
 ```
 
-Source: [`packages/tenant/tenant/src/index.ts:139`](../packages/tenant/tenant/src/index.ts)
+Source: [`packages/tenant/tenant/src/index.ts:147`](../packages/tenant/tenant/src/index.ts)
+
+<a id="deepseek-aidsh-tenant-admin"></a>
+
+## `@deepseek-ai/dsh-tenant-admin`
+
+Requires: `tenants`
+
+```ts config-catalog
+/** Plugin configuration. */
+export interface Config {
+  /** OIDC scope that admits the management surface. */
+  adminScope?: string
+  /** Root holding one `<subject>/{config,skills,tools}` tree per member. */
+  usersRoot?: string
+  /** Purge archives dataRoot/workspaceRoot under this root instead of deleting them. */
+  archiveRoot?: string
+}
+```
+
+Source: [`packages/tenant/tenant-admin/src/index.ts:75`](../packages/tenant/tenant-admin/src/index.ts)
+
+<a id="deepseek-aidsh-tenant-admin-postgres"></a>
+
+## `@deepseek-ai/dsh-tenant-admin-postgres`
+
+```ts config-catalog
+/** Plugin configuration. */
+export interface Config {
+  /**
+   * PostgreSQL connection URI. The role must hold CREATE on the target
+   * database: tenant provisioning issues `CREATE SCHEMA` per tenant and the
+   * provider maintains the `tenant_record` table on first boot.
+   */
+  connectionString: string
+}
+```
+
+Source: [`packages/tenant/tenant-admin-postgres/src/index.ts:32`](../packages/tenant/tenant-admin-postgres/src/index.ts)
 
 <a id="deepseek-aidsh-tenant-auth-jwt"></a>
 

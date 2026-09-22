@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { Script } from 'node:vm'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { SignJWT } from 'jose'
 import type { JWTPayload } from 'jose'
@@ -311,6 +312,119 @@ describe('AgentHttp', () => {
         body: JSON.stringify({ type: 'client-request', rpcId: 'r2', method: 'session.list', payload: {} }),
       })
       expect(missing.status).toBe(401)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('serves the OpenAPI document and Swagger UI without auth', async () => {
+    const ctx = new Context()
+    await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
+    await ctx.plugin(JwtTenantAuthenticator, { issuer: ISSUER, secret: 'test-secret' })
+    await ctx.plugin(TenantRegistry)
+    ctx.tenants.register(tenant('acme'))
+    await ctx.plugin(SessionStore)
+    new FakeGateway(ctx)
+    await ctx.plugin(AgentHttp)
+    try {
+      const origin = `http://127.0.0.1:${String(ctx.webServer.port)}`
+
+      const doc = await fetch(`${origin}/openapi.json`)
+      expect(doc.status).toBe(200)
+      const docBody = await doc.json() as { openapi?: string; paths?: Record<string, unknown> }
+      expect(docBody.openapi).toBe('3.1.0')
+      expect(docBody.paths?.['/api/tenant.admin.create']).toBeDefined()
+
+      const ui = await fetch(`${origin}/swagger`)
+      expect(ui.status).toBe(200)
+      expect(ui.headers.get('content-type')).toContain('text/html')
+      expect(await ui.text()).toContain('SwaggerUIBundle')
+
+      const css = await fetch(`${origin}/swagger/swagger-ui.css`)
+      expect(css.status).toBe(200)
+      expect(css.headers.get('content-type')).toContain('text/css')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('omits the discovery routes when openapi is disabled', async () => {
+    const ctx = new Context()
+    await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
+    await ctx.plugin(JwtTenantAuthenticator, { issuer: ISSUER, secret: 'test-secret' })
+    await ctx.plugin(TenantRegistry)
+    ctx.tenants.register(tenant('acme'))
+    await ctx.plugin(SessionStore)
+    new FakeGateway(ctx)
+    await ctx.plugin(AgentHttp, { openapi: false })
+    try {
+      const origin = `http://127.0.0.1:${String(ctx.webServer.port)}`
+      expect((await fetch(`${origin}/openapi.json`)).status).toBe(404)
+      expect((await fetch(`${origin}/swagger`)).status).toBe(404)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('serves the operator console without auth', async () => {
+    const ctx = new Context()
+    await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
+    await ctx.plugin(JwtTenantAuthenticator, { issuer: ISSUER, secret: 'test-secret' })
+    await ctx.plugin(TenantRegistry)
+    ctx.tenants.register(tenant('acme'))
+    await ctx.plugin(SessionStore)
+    new FakeGateway(ctx)
+    await ctx.plugin(AgentHttp)
+    try {
+      const origin = `http://127.0.0.1:${String(ctx.webServer.port)}`
+      const page = await fetch(`${origin}/console`)
+      expect(page.status).toBe(200)
+      expect(page.headers.get('content-type')).toContain('text/html')
+      const html = await page.text()
+      // The page must drive the real wire contract, not a private surface.
+      expect(html).toContain("rpc('tenant.admin.list'")
+      expect(html).toContain("rpc('session.prompt'")
+      expect(html).toContain("rpc('credentials.set'")
+      expect(html).toContain("rpc('credentials.describe'")
+      expect(html).toContain("rpc('llm.discoverModels'")
+      expect(html).toContain("rpc('settings.update'")
+      expect(html).toContain("fetch('/api/events.mux'")
+      // Reads are value-free by contract: the page must never render a credential value back.
+      expect(html).toContain('type="password"')
+
+      // The page is one TypeScript template literal, so an escape written for the browser
+      // (`'\n'` inside a quoted JS string) is consumed by the template instead and emits a
+      // literal newline, breaking that string. Only parsing the emitted script catches it.
+      const script = /<script>([\s\S]*?)<\/script>/.exec(html)?.[1]
+      expect(script).toBeDefined()
+      expect(() => new Script(script ?? '')).not.toThrow()
+
+      // Every id the script looks up must exist in the markup it shipped with.
+      const lookedUp = new Set([...(script ?? '').matchAll(/\$\('([^']+)'\)/g)].map(match => match[1]))
+      const declared = new Set([...html.matchAll(/\sid="([^"]+)"/g)].map(match => match[1]))
+      expect([...lookedUp].filter(id => !declared.has(id))).toEqual([])
+
+      const rejected = await fetch(`${origin}/console`, { method: 'POST' })
+      expect(rejected.status).toBe(405)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('omits the console route when console is disabled', async () => {
+    const ctx = new Context()
+    await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
+    await ctx.plugin(JwtTenantAuthenticator, { issuer: ISSUER, secret: 'test-secret' })
+    await ctx.plugin(TenantRegistry)
+    ctx.tenants.register(tenant('acme'))
+    await ctx.plugin(SessionStore)
+    new FakeGateway(ctx)
+    await ctx.plugin(AgentHttp, { console: false })
+    try {
+      const origin = `http://127.0.0.1:${String(ctx.webServer.port)}`
+      expect((await fetch(`${origin}/console`)).status).toBe(404)
+      // The discovery surface is independent of the console switch.
+      expect((await fetch(`${origin}/openapi.json`)).status).toBe(200)
     } finally {
       await ctx.fiber.dispose()
     }

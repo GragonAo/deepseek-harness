@@ -389,6 +389,12 @@ abstract readBytes(target: FsTarget, signal: AbortSignal | undefined, maxBytes: 
 /**
  * List direct children of a directory in stable name order. Returns resolved
  * child targets plus cheap metadata only; never reads file contents.
+ *
+ * An absent directory rejects with `FS_NOT_FOUND` and a non-directory target
+ * with `FS_NOT_DIRECTORY`; every other listing failure rejects with
+ * `FS_IO_ERROR`. Callers that treat an absent root as empty state depend on
+ * that distinction, so a provider must not report an absent directory as an
+ * I/O failure.
  * @param target - the resolved directory target.
  * @param signal - aborts the listing.
  * @returns one entry per direct child, in stable name order.

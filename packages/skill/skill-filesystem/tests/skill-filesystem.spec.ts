@@ -35,8 +35,20 @@ class TestFileSystem extends FileSystem {
   statSignals: Array<AbortSignal | undefined> = []
   readTextSignals: Array<AbortSignal | undefined> = []
   readTextOverride?: (target: FsTarget, signal?: AbortSignal) => Promise<string>
+  /** Roots this service cannot see at all, standing in for a mount that excludes them. */
+  invisibleRoots = new Set<string>()
+
+  private invisible(path: string): boolean {
+    const normalized = path.replaceAll('\\', '/')
+    for (const root of this.invisibleRoots) {
+      const prefix = root.replaceAll('\\', '/')
+      if (normalized === prefix || normalized.startsWith(`${prefix}/`)) return true
+    }
+    return false
+  }
 
   override async resolve(path: string): Promise<FsTarget> {
+    if (this.invisible(path)) throw new FsError('resolve failed', 'FS_NOT_FOUND')
     if (this.failResolvePaths.has(path)) throw new FsError('resolve failed', 'FS_NOT_FOUND')
     if (this.errorResolvePaths.has(path)) throw new Error('resolve temporarily failed')
     return { targetKey: path as never, displayPath: path }
@@ -52,6 +64,7 @@ class TestFileSystem extends FileSystem {
 
   override async stat(target: FsTarget, signal?: AbortSignal): Promise<FsInfo | undefined> {
     this.statSignals.push(signal)
+    if (this.invisible(target.displayPath)) throw new FsError('stat failed', 'FS_NOT_FOUND')
     if (this.failStatPaths.has(target.displayPath)) throw new FsError('stat failed', 'FS_NOT_FOUND')
     if (this.errorStatPaths.has(target.displayPath)) throw new Error('stat temporarily failed')
     if (this.statOverrides.has(target.displayPath)) return this.statOverrides.get(target.displayPath)
@@ -206,6 +219,33 @@ describe('FileSystemSkillProvider', () => {
       await ctx.fiber.dispose()
     }
   })
+
+  it('loads a trustedHost tier skill when the filesystem service cannot see its root', async () => {
+    // A carrier-provided tier root is a host path the agent's filesystem service
+    // does not mount (the container exposes only /workspace). Discovery reads it
+    // through host I/O, so the load must re-read the same way instead of routing
+    // the path back through a service that reports it absent.
+    const caseDir = await tempDir('skill-tier-outside-fs')
+    await writeSkill(caseDir, 'host-tier', 'host tier skill', 'HOST TIER BODY')
+
+    const ctx = new Context()
+    await ctx.plugin(SkillRegistry)
+    new FixedTiers(ctx, [
+      { kind: 'case', path: caseDir, rank: CASE_SKILL_RANK, trustedHost: true },
+    ])
+    await ctx.plugin(TestFileSystem)
+    const fs = ctx.fs as TestFileSystem
+    fs.invisibleRoots.add(caseDir)
+    await ctx.plugin(SkillFileSystem, { includeDefaultRoots: false, watch: false })
+    try {
+      const listed = await ctx.skills.list()
+      expect(listed.map(skill => skill.name)).toEqual(['host-tier'])
+      expect((await ctx.skills.get('host-tier'))?.content).toBe('HOST TIER BODY')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('discovers project, custom, user, and agents skill roots in priority order', async () => {
     const home = await tempDir('skill-home')
     const project = await tempDir('skill-project')
@@ -513,6 +553,44 @@ describe('FileSystemSkillProvider', () => {
       bundledSkillDir: bundled,
     })
     expect((await bundledCtx.skills.get('bundled-host'))?.source).toBe('bundled')
+  })
+
+  it('keeps a readable root when another root fails to read', async () => {
+    // The registry drops a throwing provider together with the candidates it had
+    // already discovered, so a failing root must not escape the provider.
+    const home = await tempDir('skill-root-containment')
+    const healthy = join(home, '.agents/skills')
+    const broken = join(home, '.dsh/skills')
+    await writeSkill(healthy, 'healthy-skill', 'Healthy skill')
+    await writeSkill(broken, 'broken-skill', 'Broken skill')
+
+    const ctx = new Context()
+    await ctx.plugin(TestFileSystem)
+    const fs = ctx.fs as TestFileSystem
+    await ctx.plugin(SkillRegistry)
+    await ctx.plugin(SkillFileSystem, {
+      dshHome: join(home, '.dsh'),
+      agentsHome: join(home, '.agents'),
+      watch: false,
+    })
+
+    expect(await ctx.skills.snapshot()).toMatchObject({
+      skills: [{ name: 'broken-skill' }, { name: 'healthy-skill' }],
+      complete: true,
+    })
+
+    fs.failListDirPaths.add(broken)
+    const path = join(broken, 'broken-skill/SKILL.md')
+    ctx.emit(
+      'fs/observed',
+      { targetKey: path as never, displayPath: path },
+      { kind: 'present', version: FsVersion('root-failure') },
+      { name: 'edit' },
+    )
+    expect(await ctx.skills.snapshot()).toMatchObject({
+      skills: [{ name: 'healthy-skill' }],
+      complete: false,
+    })
   })
 
   it('reports transient root reads as incomplete without caching an empty catalog', async () => {

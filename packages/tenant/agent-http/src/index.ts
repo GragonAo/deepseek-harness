@@ -26,7 +26,10 @@
  * When a `webServer` service is present, the carrier also registers the
  * `/api` prefix route (a fetch bridge replacing the single-user
  * `client-connection` trust fence), so `dsh web` can serve the multi-tenant
- * API over HTTP without any other carrier.
+ * API over HTTP without any other carrier. The same injection contributes the
+ * unauthenticated discovery surfaces: `/openapi.json` + `/swagger` (the wire
+ * reference) and `/console` (a self-contained operator page for tenant
+ * administration and the session lifecycle).
  *
  * @module @deepseek-ai/dsh-agent-http
  */
@@ -37,7 +40,9 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import { toFetchHandler } from '@deepseek-ai/dsh-host-apiproxy'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import z from '@deepseek-ai/schemastery'
-import { currentTenant, currentUser, runWithTenant, runWithUser, TenantError, UserId } from '@deepseek-ai/dsh-tenant'
+import { swaggerRoutes } from './openapi-route.ts'
+import { consoleRoutes } from './console.ts'
+import { currentTenant, currentUser, DEFAULT_TENANT_ADMIN_SCOPE, runWithScopes, runWithTenant, runWithUser, TenantError, UserId } from '@deepseek-ai/dsh-tenant'
 import type { Tenant, TenantId } from '@deepseek-ai/dsh-tenant'
 import { TenantAuthError } from '@deepseek-ai/dsh-tenant-auth'
 
@@ -56,10 +61,22 @@ const API_PATH = '/api'
  */
 const DEFAULT_MAX_REQUEST_BODY_BYTES = 160 * 1024 * 1024
 
+/** Default for `openapi`: serve the discovery surface out of the box. */
+const DEFAULT_OPENAPI = true
+
+/** Default for `console`: serve the operator console out of the box. */
+const DEFAULT_CONSOLE = true
+
 /** Carrier configuration. */
 export interface Config {
   /** Maximum buffered request body bytes before the route answers 413. */
   maxRequestBodyBytes?: number
+  /** OIDC scope admitted to the administrative surface (skips tenant membership). */
+  adminScope?: string
+  /** Serve `GET /openapi.json` and the `/swagger` UI when a `webServer` is present. */
+  openapi?: boolean
+  /** Serve the `/console` operator page when a `webServer` is present. */
+  console?: boolean
 }
 
 /** Multi-tenant carrier registered as `ctx.agentHttp`. */
@@ -67,13 +84,18 @@ export class AgentHttp extends Service {
   static inject = ['tenantAuth', 'tenants', 'apiProxy']
   static Config: z<Config> = z.object({
     maxRequestBodyBytes: z.natural().min(1).default(DEFAULT_MAX_REQUEST_BODY_BYTES),
+    adminScope: z.string().default(DEFAULT_TENANT_ADMIN_SCOPE),
+    openapi: z.boolean().default(DEFAULT_OPENAPI),
+    console: z.boolean().default(DEFAULT_CONSOLE),
   })
 
   /** Live sessionId -> owning (tenant, user), fed by `session/created` under the ambient scope. */
   private readonly sessionScopes = new Map<string, { tenant: string; user: UserId }>()
+  private readonly adminScope: string
 
   constructor(ctx: Context, readonly config: Config) {
     super(ctx, 'agentHttp')
+    this.adminScope = config.adminScope ?? DEFAULT_TENANT_ADMIN_SCOPE
     ctx.effect(() => ctx.on('session/created', (session) => {
       const tenant = currentTenant()
       const user = currentUser()
@@ -98,6 +120,16 @@ export class AgentHttp extends Service {
         ),
       }
       webCtx.effect(() => webCtx.webServer.register(route), 'agent-http: /api carrier route')
+      if (this.config.openapi) {
+        for (const swaggerRoute of swaggerRoutes()) {
+          webCtx.effect(() => webCtx.webServer.register(swaggerRoute), `agent-http: ${swaggerRoute.path} docs route`)
+        }
+      }
+      if (this.config.console) {
+        for (const consoleRoute of consoleRoutes()) {
+          webCtx.effect(() => webCtx.webServer.register(consoleRoute), `agent-http: ${consoleRoute.path} console route`)
+        }
+      }
     })
   }
 
@@ -112,8 +144,15 @@ export class AgentHttp extends Service {
     try {
       const principal = await this.ctx.tenantAuth.authenticate(request.headers.get('authorization') ?? '')
       const subject = UserId(principal.subject)
-      const tenant = this.ctx.tenants.resolveMember(principal.tenantId, subject)
-      return await runWithTenant(tenant, () => runWithUser(subject, () => this.delegate(request, tenant, subject)))
+      // An administrative token still authenticates against its own enabled
+      // tenant, but is not held to that tenant's membership list: the
+      // `tenantAdmin` surface re-checks the scope before any cross-tenant work.
+      const isAdmin = (principal.scopes ?? []).includes(this.adminScope)
+      const tenant = isAdmin
+        ? this.ctx.tenants.resolve(principal.tenantId)
+        : this.ctx.tenants.resolveMember(principal.tenantId, subject)
+      return await runWithScopes(principal.scopes, () =>
+        runWithTenant(tenant, () => runWithUser(subject, () => this.delegate(request, tenant, subject))))
     } catch (error: unknown) {
       if (error instanceof TenantAuthError) {
         return jsonError(401, error.code, error.message, { 'www-authenticate': 'Bearer' })

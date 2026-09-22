@@ -93,6 +93,12 @@
       "path": "../directory-picker"
     },
     {
+      "path": "../../tenant/tenant"
+    },
+    {
+      "path": "../../tenant/tenant-admin"
+    },
+    {
       "path": "../../extensions/cordis-host-runner"
     },
     {

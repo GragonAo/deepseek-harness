@@ -53,6 +53,10 @@ allowBuilds:
   # The Python runtime deploy includes the reviewed workspace postinstall that
   # restores the executable bit on node-pty's macOS spawn helper.
   '@deepseek-ai/dsh-subprocess-local@file:packages/subprocess/subprocess-local': true
+  # Optional telemetry dependency of swagger-ui-dist (the Swagger UI static
+  # bundle); its lifecycle script only reports install analytics and is not
+  # needed to serve the assets, so it is denied.
+  '@scarf/scarf': false
 
 minimumReleaseAgeExclude:
   # Fresh pi-ai releases carry the model catalog updates that are the whole

@@ -18,6 +18,16 @@
 - id: storage-json
   disabled: true
 
+# These single-user consumers bootstrap by preloading their storage domain at
+# init; the tenant-keyed PostgreSQL backend has no ambient tenant at boot, so
+# that preload would throw. They stay per-request surfaces in a multi-tenant
+# backend (re-enabled once a tenant-scoped preload exists).
+- id: message-feedback
+  disabled: true
+
+- id: session-projection-cache
+  disabled: true
+
 - id: storage-domain
   config:
     backend: postgres
@@ -166,6 +176,11 @@
       config:
         connectionString: !!js process.env.DSH_POSTGRES_URL
 
+    - id: tenant-admin-postgres
+      name: '@deepseek-ai/dsh-tenant-admin-postgres'
+      config:
+        connectionString: !!js process.env.DSH_POSTGRES_URL
+
     - id: settings-postgres
       name: '@deepseek-ai/dsh-settings-postgres'
 
@@ -176,6 +191,13 @@
 
     - id: tenant
       name: '@deepseek-ai/dsh-tenant'
+
+    - id: tenant-admin
+      name: '@deepseek-ai/dsh-tenant-admin'
+      config:
+        adminScope: dsh:tenant-admin
+        usersRoot: !!js process.env.DSH_USERS_ROOT
+        archiveRoot: !!js process.env.DSH_ARCHIVE_ROOT
 
     - id: tenant-auth-jwt
       name: '@deepseek-ai/dsh-tenant-auth-jwt'

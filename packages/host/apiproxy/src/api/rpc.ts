@@ -92,6 +92,16 @@ export interface RpcErrorDetailsMap {
   'subagent-not-resumable': { childSessionId: SessionId }
   'subagent-unauthorized': { childSessionId: SessionId }
   'subagent-delivery-unavailable': { childSessionId: SessionId }
+  /** A tenant-admin request carried no administrative OIDC scope. */
+  'tenant-forbidden': { scope: string }
+  /** A tenant-admin call named a tenant id that is not registered. */
+  'tenant-not-found': { id: string }
+  /** A tenant-admin create clashed with an existing tenant id. */
+  'tenant-conflict': { id: string }
+  /** A tenant-admin call carried an invalid id, subject, or field. */
+  'tenant-invalid': { reason: string }
+  /** A tenant-admin partition/directory provision or persistence step failed. */
+  'tenant-provision-failed': { reason: string }
   'internal': {}
 }
 

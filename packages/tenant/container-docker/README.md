@@ -13,6 +13,8 @@ Local Docker/Podman provider for the [`dsh-container`](../container) seam. It st
     network: 'bridge'               # used unless the tenant sets network: 'none'
     toolExecImage: 'dsh-tool-exec:latest'  # in-container /exec server image
     toolExecPort: 8642              # container port that server binds
+      publishHost: '127.0.0.1'        # host address that port is published on
+      connectHost: '127.0.0.1'        # host address the harness dials for it
     usersRoot: '/root/.dsh/users'   # host root of per-subject /global dirs; omit to skip /global
     # idleTimeoutMs: 300000         # optional: reap a container this long after its last exec
     # memoryLimit: '2g'             # optional: hard memory ceiling; swap is capped at the same value
@@ -26,7 +28,7 @@ On a subject's first tool call inside a (tenant, user) scope the provider starts
 ```
 docker rm -f dsh-<tenantPartition>-<userPartition>
 docker run -d --name dsh-<tenantPartition>-<userPartition> \
-  --network <network|none> -p 127.0.0.1::<toolExecPort> \
+  --network <network|none> -p <publishHost>::<toolExecPort> \
   [--memory <memoryLimit> --memory-swap <memoryLimit>] [--cpus <cpuLimit>] \
   -v <workspaceRoot>/users/<sub>:/workspace \
   -v <workspaceRoot>/shared:/shared \
@@ -34,7 +36,9 @@ docker run -d --name dsh-<tenantPartition>-<userPartition> \
   <toolExecImage>
 ```
 
-It then reads the published host port (`docker port`), waits for the container's `/exec` server to answer (bounded, so no exec races the in-container Node bind), and posts each exec to `http://127.0.0.1:<port>/exec` — the agent plane never runs `docker exec`. Concurrent first calls for the same scope join one in-flight start, so each (tenant, user) pays the cold-start at most once per process. The runtime image is `toolExecImage`; a tenant record carries no image. When `idleTimeoutMs` is set, an idle container is `docker rm -f`'d and lazily restarted on the next exec. `memoryLimit` and `cpuLimit` are ceilings, not reservations: an idle container costs only what its own process uses, and only a subject that exceeds its ceiling is stopped — memory over the limit OOM-kills the process inside its own container (exit 137), and CPU is capped as a share of a core, so idle subjects never hold a core back from others.
+It then reads the published host port (`docker port`), waits for the container's `/exec` server to answer (bounded, so no exec races the in-container Node bind), and posts each exec to `http://<connectHost>:<port>/exec` — the agent plane never runs `docker exec`. Concurrent first calls for the same scope join one in-flight start, so each (tenant, user) pays the cold-start at most once per process. The runtime image is `toolExecImage`; a tenant record carries no image. When `idleTimeoutMs` is set, an idle container is `docker rm -f`'d and lazily restarted on the next exec. `memoryLimit` and `cpuLimit` are ceilings, not reservations: an idle container costs only what its own process uses, and only a subject that exceeds its ceiling is stopped — memory over the limit OOM-kills the process inside its own container (exit 137), and CPU is capped as a share of a core, so idle subjects never hold a core back from others.
+
+`publishHost` and `connectHost` default to the host loopback, which assumes the harness shares the host's network namespace. A harness running in its own container reaches the published port over the Docker gateway instead: set `connectHost: host.docker.internal` and widen `publishHost` to the bridge gateway address (e.g. `172.17.0.1`). Prefer that gateway address over `0.0.0.0` — the `/exec` server authenticates nothing, so an all-interfaces publication exposes unauthenticated command execution to the surrounding network.
 
 The tool-exec image ships the zero-dependency `/exec` server (`src/tool-exec.ts`) on Debian-slim + Node so the filesystem adapter's `stat`/`find`/`base64`/`test`/`command -v` coreutils semantics hold. Build it from the repository root:
 

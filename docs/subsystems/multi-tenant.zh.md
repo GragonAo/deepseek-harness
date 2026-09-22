@@ -49,7 +49,7 @@ Multi-tenant carrier registered as `ctx.agentHttp`.
 async fetch(request: Request): Promise<Response>
 ```
 
-Source: [`packages/tenant/agent-http/src/index.ts:66`](../../packages/tenant/agent-http/src/index.ts)
+Source: [`packages/tenant/agent-http/src/index.ts:83`](../../packages/tenant/agent-http/src/index.ts)
 
 <a id="ctxcontainerruntime--containerruntime-abstract-seam"></a>
 
@@ -70,6 +70,98 @@ abstract exec( command: string, args: readonly string[], opts?: ContainerExecOpt
 ```
 
 Source: [`packages/tenant/container/src/index.ts:45`](../../packages/tenant/container/src/index.ts)
+
+<a id="ctxtenantadmin--tenantadmin"></a>
+
+### `ctx.tenantAdmin` — `TenantAdmin`
+
+Tenant administration service. Load with a tenant registry always present; persistence and partition lifecycle are optional providers read by key so a test assembly can run the surface ephemeral.
+
+```ts cordis-catalog
+/**
+ * List every registered tenant, in registration order.
+ * @returns the records, enabled and disabled.
+ */
+list(): Tenant[]
+
+/**
+ * Resolve one tenant, including disabled records.
+ * @param id - the tenant id.
+ * @returns the record.
+ */
+get(id: string): Tenant
+
+/**
+ * Provision a tenant: create its storage partition and host directories,
+ * register it, and persist the record.
+ * @param request - the create fields.
+ * @returns the created record.
+ */
+async create(request: CreateTenantRequest): Promise<Tenant>
+
+/**
+ * Change recoverable metadata; `id` and `dataRoot` are immutable.
+ * @param id - the tenant id.
+ * @param patch - the fields to change (absent fields are left unchanged).
+ * @returns the updated record.
+ */
+async update(id: string, patch: UpdateTenantRequest): Promise<Tenant>
+
+/**
+ * Re-enable a disabled tenant.
+ * @param id - the tenant id.
+ * @returns the re-enabled record.
+ */
+async enable(id: string): Promise<Tenant>
+
+/**
+ * Disable a tenant; its requests are refused by `resolve` until re-enabled.
+ * @param id - the tenant id.
+ * @returns the disabled record.
+ */
+async disable(id: string): Promise<Tenant>
+
+/**
+ * Remove a tenant record; `purge` also drops the partition and archives the
+ * host directories instead of deleting them.
+ * @param id - the tenant id.
+ * @param purge - when true, drop the partition and archive the directories.
+ * @returns a fixed acknowledgement.
+ */
+async remove(id: string, purge: boolean): Promise<{ removed: true }>
+
+/**
+ * List one tenant's admitted subjects.
+ * @param id - the tenant id.
+ * @returns the admitted subjects (never mutated by callers).
+ */
+membersList(id: string): string[]
+
+/**
+ * Admit one subject, bootstrapping its `/global` tier directories.
+ * @param id - the tenant id.
+ * @param subject - the JWT `sub` to admit.
+ * @returns the tenant's members after the change.
+ */
+async membersAdd(id: string, subject: string): Promise<string[]>
+
+/**
+ * Remove one subject's admission (its data and directories are untouched).
+ * @param id - the tenant id.
+ * @param subject - the JWT `sub` to remove.
+ * @returns the tenant's members after the change.
+ */
+async membersRemove(id: string, subject: string): Promise<string[]>
+
+/**
+ * Pre-create one subject's `/global` tier directories.
+ * @param subject - the JWT `sub` to prepare.
+ * @returns the host directory that now holds the subject's tiers.
+ */
+async usersEnsure(subject: string): Promise<{ root: string }>
+```
+
+Source: [`packages/tenant/tenant-admin/src/index.ts:109`](../../packages/tenant/tenant-admin/src/index.ts)
 
 <a id="ctxtenantauth--tenantauthenticator-abstract-seam"></a>
 
@@ -109,6 +201,34 @@ register(operation: TenantOperation): () => void
 
 Source: [`packages/tenant/api-http/src/index.ts:73`](../../packages/tenant/api-http/src/index.ts)
 
+<a id="ctxtenantrecordstore--tenantrecordstore"></a>
+
+### `ctx.tenantRecordStore` — `TenantRecordStore`
+
+Durable source of the deployment's tenant records.
+
+```ts cordis-catalog
+/**
+ * Read every persisted record, in registration order.
+ * @returns the records, or an empty array when none are persisted.
+ */
+load(): Promise<readonly Tenant[]>
+
+/**
+ * Persist one record, inserting or replacing by id.
+ * @param tenant - the record to persist.
+ */
+upsert(tenant: Tenant): Promise<void>
+
+/**
+ * Remove one record by id.
+ * @param id - the tenant id to remove.
+ */
+delete(id: TenantId): Promise<void>
+```
+
+Source: [`packages/tenant/tenant-admin/src/store.ts:13`](../../packages/tenant/tenant-admin/src/store.ts)
+
 <a id="ctxtenants--tenantregistry"></a>
 
 ### `ctx.tenants` — `TenantRegistry`
@@ -123,6 +243,25 @@ Tenant record registry (`ctx.tenants`). Records are registered by the deployment
  * @throws `TenantError` code `DUPLICATE_TENANT` when the id exists.
  */
 register(tenant: Tenant): () => void
+
+/**
+ * Replace one registered record's metadata in place. The id is immutable: a
+ * patch names the record it updates but cannot re-brand it. Returns the
+ * exact disposer that restores the previous record.
+ * @param tenant - the replacement record, with the same id as the current one.
+ * @returns the disposer restoring the previous record.
+ * @throws `TenantError` code `TENANT_UNKNOWN` when the id is unregistered.
+ */
+update(tenant: Tenant): () => void
+
+/**
+ * Remove one registered record. Returns the exact disposer that re-registers
+ * the removed record.
+ * @param id - the tenant id to remove.
+ * @returns the disposer re-registering the removed record.
+ * @throws `TenantError` code `TENANT_UNKNOWN` when the id is unregistered.
+ */
+remove(id: TenantId): () => void
 
 /**
  * Look up a registered record without failing on its absence.
@@ -159,5 +298,29 @@ resolveMember(id: TenantId, subject: UserId): Tenant
 list(): Tenant[]
 ```
 
-Source: [`packages/tenant/tenant/src/index.ts:273`](../../packages/tenant/tenant/src/index.ts)
+Source: [`packages/tenant/tenant/src/index.ts:324`](../../packages/tenant/tenant/src/index.ts)
+
+<a id="ctxtenantschemalifecycle--tenantschemalifecycle"></a>
+
+### `ctx.tenantSchemaLifecycle` — `TenantSchemaLifecycle`
+
+Storage-partition lifecycle for one tenant.
+
+```ts cordis-catalog
+/**
+ * Create the tenant's storage partition (for Postgres: `CREATE SCHEMA IF NOT
+ * EXISTS` for its {@link tenantPartitionName}). Idempotent.
+ * @param id - the tenant id whose partition is provisioned.
+ */
+provision(id: TenantId): Promise<void>
+
+/**
+ * Drop the tenant's whole storage partition, cascading every provider table
+ * inside it. Only called on a deliberate hard remove.
+ * @param id - the tenant id whose partition is purged.
+ */
+purge(id: TenantId): Promise<void>
+```
+
+Source: [`packages/tenant/tenant-admin/src/schema.ts:12`](../../packages/tenant/tenant-admin/src/schema.ts)
 <!-- END GENERATED cordis-surface -->

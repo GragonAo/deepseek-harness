@@ -28,6 +28,7 @@ function scriptedApi(overrides: {
   settings?: Partial<ApiProxy['settings']>
   credentials?: Partial<ApiProxy['credentials']>
   llm?: Partial<ApiProxy['llm']>
+  tenantAdmin?: Partial<ApiProxy['tenantAdmin']>
   respond?: ApiProxy['respond']
 } = {}): ApiProxy {
   async function *empty<F>(): AsyncGenerator<RpcRequest<F>> { /* no frames */ }
@@ -127,6 +128,20 @@ function scriptedApi(overrides: {
       models: r => ok(r, { groups: [], failures: [] }),
       discoverModels: err,
       ...overrides.llm,
+    },
+    tenantAdmin: {
+      list: r => ok(r, { items: [] }),
+      get: err,
+      create: err,
+      update: err,
+      enable: err,
+      disable: err,
+      remove: err,
+      membersList: r => ok(r, { members: [] }),
+      membersAdd: err,
+      membersRemove: err,
+      usersEnsure: err,
+      ...overrides.tenantAdmin,
     },
     events: { mux: () => empty<MuxFrame>(), host: () => empty<HostFrame>(), ...overrides.events },
     respond: overrides.respond ?? (() => Promise.resolve({ accepted: false as const, reason: 'not-pending' as const })),

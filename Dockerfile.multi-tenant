@@ -10,6 +10,7 @@
 # frontend image from Docker Hub, which unreachable build networks reject):
 #   docker build -f Dockerfile.multi-tenant -t dsh-multi-tenant:latest .
 # Or build every image this deployment runs at once: \`docker/build-images.sh\`.
+# Start the deployment with \`docker/docker-compose.multi-tenant.yml\`.
 #
 # The image carries source and build output only. Deployment differences — the
 # profile under \`$DSH_HOME\`, tenant workspaces, credentials, and the deploy patches
@@ -49,13 +50,13 @@ FROM ${NODE_IMAGE}
 # resolves its plugins through $DSH_HOME/profiles/node_modules, whose entries point at
 # <checkout>/apps/cli/node_modules; keeping the same path inside the image lets one
 # $DSH_HOME serve both this container and a bare source run.
-WORKDIR /root/work/deepseek-harness
-COPY --from=build /src /root/work/deepseek-harness
+WORKDIR /opt/work/deepseek-harness
+COPY --from=build /src /opt/work/deepseek-harness
 COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker
 COPY docker/entrypoint.multi-tenant.sh /usr/local/bin/dsh-entrypoint
 RUN chmod +x /usr/local/bin/dsh-entrypoint
-ENV DSH_HOME=/root/.dsh \
-    DSH_REPO=/root/work/deepseek-harness \
+ENV DSH_HOME=/opt/.dsh \
+    DSH_REPO=/opt/work/deepseek-harness \
     DSH_DEPLOY_DIR=/opt/dsh-deploy \
     NODE_ENV=production
 EXPOSE 8787

@@ -14,6 +14,7 @@ import type { SettingsApi } from './settings.ts'
 import type { CredentialsApi } from './credentials.ts'
 import type { LlmApi } from './llm.ts'
 import type { SubagentsApi } from './subagents.ts'
+import type { TenantAdminApi } from './tenant-admin.ts'
 import type { RpcResponse } from './rpc.ts'
 
 /**
@@ -74,6 +75,17 @@ export interface RpcMethodMap {
   'llm.providers': LlmApi['providers']
   'llm.models': LlmApi['models']
   'llm.discoverModels': LlmApi['discoverModels']
+  'tenant.admin.list': TenantAdminApi['list']
+  'tenant.admin.get': TenantAdminApi['get']
+  'tenant.admin.create': TenantAdminApi['create']
+  'tenant.admin.update': TenantAdminApi['update']
+  'tenant.admin.enable': TenantAdminApi['enable']
+  'tenant.admin.disable': TenantAdminApi['disable']
+  'tenant.admin.remove': TenantAdminApi['remove']
+  'tenant.admin.members.list': TenantAdminApi['membersList']
+  'tenant.admin.members.add': TenantAdminApi['membersAdd']
+  'tenant.admin.members.remove': TenantAdminApi['membersRemove']
+  'tenant.admin.users.ensure': TenantAdminApi['usersEnsure']
 }
 
 /** Business request payload of method K (reaches through the RpcRequest narrow form to payload). */

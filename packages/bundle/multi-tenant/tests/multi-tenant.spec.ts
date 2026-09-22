@@ -2,7 +2,7 @@
  * The multi-tenant bundle's substance is its patch file. This test post-composes
  * it over dsh-base + dsh-web-app (the same `applyEntryPatches` call the boot
  * include makes) and asserts the provider swap leaves no skipped or mismatched
- * patch: the eleven single-user rows are disabled, the seventeen tenant rows
+ * patch: the thirteen single-user rows are disabled, the nineteen tenant rows
  * mount with the names their packages export, the tenant Postgres KV backend
  * replaces the single-user JSON medium and the file settings/credentials
  * providers, code and workflow execution swap the host worker-threads for the
@@ -81,9 +81,9 @@ describe('dsh-multi-tenant bundle', () => {
     expect(warns).toEqual([])
   })
 
-  it('disables the eleven single-user rows it replaces', () => {
+  it('disables the thirteen single-user rows it replaces', () => {
     const { rows } = compose()
-    for (const id of ['session-persistence-jsonl', 'storage-json', 'settings', 'credentials', 'code-runtime', 'subprocess', 'fs-sandbox', 'bash-sandbox', 'sandbox', 'permission', 'connection']) {
+    for (const id of ['session-persistence-jsonl', 'storage-json', 'settings', 'credentials', 'code-runtime', 'subprocess', 'fs-sandbox', 'bash-sandbox', 'sandbox', 'permission', 'connection', 'message-feedback', 'session-projection-cache']) {
       expect(rows.get(id)?.disabled, `${id} disabled`).toBe(true)
     }
   })
@@ -99,9 +99,11 @@ describe('dsh-multi-tenant bundle', () => {
       ['workflow-container', '@deepseek-ai/dsh-workflow-container'],
       ['session-persistence-postgres', '@deepseek-ai/dsh-session-persistence-postgres'],
       ['storage-postgres', '@deepseek-ai/dsh-storage-postgres'],
+      ['tenant-admin-postgres', '@deepseek-ai/dsh-tenant-admin-postgres'],
       ['settings-postgres', '@deepseek-ai/dsh-settings-postgres'],
       ['credentials-postgres', '@deepseek-ai/dsh-credentials-postgres'],
       ['tenant', '@deepseek-ai/dsh-tenant'],
+      ['tenant-admin', '@deepseek-ai/dsh-tenant-admin'],
       ['tenant-auth-jwt', '@deepseek-ai/dsh-tenant-auth-jwt'],
       ['skill-tier', '@deepseek-ai/dsh-skill-tier'],
       ['tools-tier', '@deepseek-ai/dsh-tools-tier'],
@@ -133,6 +135,14 @@ describe('dsh-multi-tenant bundle', () => {
     })
     expect(rows.get('storage-postgres')?.config).toEqual({
       connectionString: { __jsExpr: 'process.env.DSH_POSTGRES_URL' },
+    })
+    expect(rows.get('tenant-admin-postgres')?.config).toEqual({
+      connectionString: { __jsExpr: 'process.env.DSH_POSTGRES_URL' },
+    })
+    expect(rows.get('tenant-admin')?.config).toEqual({
+      adminScope: 'dsh:tenant-admin',
+      usersRoot: { __jsExpr: 'process.env.DSH_USERS_ROOT' },
+      archiveRoot: { __jsExpr: 'process.env.DSH_ARCHIVE_ROOT' },
     })
     expect(rows.get('tenant')?.config).toBeUndefined()
     expect(rows.get('skill-tier')?.config).toEqual({

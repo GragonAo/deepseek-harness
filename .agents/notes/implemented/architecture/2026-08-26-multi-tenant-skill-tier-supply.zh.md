@@ -13,7 +13,7 @@ Status: implemented
 新增一个环境层级服务，让文件系统提供方在每次发现时读取，并在每次调用时从权威作用域解析其三个根。
 
 - **`@deepseek-ai/dsh-skill`** 新增 `CASE_SKILL_RANK` `30`、`USER_GLOBAL_SKILL_RANK` `40`、`SYSTEM_SKILL_RANK` `50`（低于所有 `100`+ 的静态提供方 rank）、`SkillTierKind`/`SkillTierRoot`/`SkillTierProvider` 类型，以及可选的 `ctx.skillTiers` Context 声明合并。
-- **`@deepseek-ai/dsh-skill-filesystem`** 在其静态根之前追加 `this.ctx.get('skillTiers')?.roots() ?? []`。可选服务必须经 `ctx.get` 读取（可选服务惯用法的严格存储读取），而非拓扑敏感的属性代理；不存在时跳过。
+- **`@deepseek-ai/dsh-skill-filesystem`** 在其静态根之前追加 `this.ctx.get('skillTiers')?.roots() ?? []`。可选服务必须经 `ctx.get` 读取（可选服务惯用法的严格存储读取），而非拓扑敏感的属性代理；不存在时跳过。已发现候选的 `LocalLocator` 携带其所属根的 `trustedHost`，`get` 以 `locator.trustedHost` 重读文件；若改为从 `candidate.source` 推断该标志，则只覆盖 bundled 根，于是层级 skill 能被列出却无法加载。
 - **`@deepseek-ai/dsh-skill-tier`**（新包）把 `ctx.skillTiers` 注册为无状态的 `Service`：`roots()` 读取 `currentTenant()`/`currentUser()`，返回案件根 `<tenant.workspaceRoot>/shared/skills`、用户全局根 `<usersRoot>/<sub>/skills` 与系统根（`systemSkillsDir`，默认 `$DSH_HOME/system/skills`），全部 `trustedHost: true`，因为它们是租户容器外的宿主机路径。
 - **bundle** —— `multi-tenant/cordis.patch.yml` 挂载 `skill-tier`（`dsh-skill-tier`），其 `usersRoot` 取自 `DSH_USERS_ROOT`，与消费同一值的 `container-runtime` 并排。
 
@@ -27,10 +27,10 @@ Status: implemented
 
 ## 后果
 
-**所得：** case > user-global > system 优先级（在文件系统提供方的单层内以较低 rank 胜出）加异名并集；层级目录从请求自身的权威解析；三个根都经 `trustedHost` 绕过容器作用域的文件服务。单用户安装从不注册 `ctx.skillTiers`，行为不变。
+**所得：** case > user-global > system 优先级（在文件系统提供方的单层内以较低 rank 胜出）加异名并集；层级目录从请求自身的权威解析；三个根都经 `trustedHost` 绕过容器作用域的文件服务，在发现时如此，在加载已发现 skill 时同样如此。单用户安装从不注册 `ctx.skillTiers`，行为不变。
 
 **成本与暂缓工作：** 这只是 skill 层；四层配置供应是仍待交付的剩余切片（三层工具供应已于 [2026-08-26](2026-08-26-multi-tenant-tool-manifest-loader.md) 交付）。系统层是约定只读而非强制 —— 创建并保持该目录只读由部署方负责。已部署的 `192.168.138.130` 上经真实 Loader + Docker + Postgres 的闭环回合仍是服务器步骤。
 
 ### 验证
 
-对 skill、skill-filesystem、skill-tier 与 bundle 包执行 `tsc -b` 通过。四个 `skill-tier` 单元测试覆盖根解析、作用域内与外层级、以及系统根的 `$DSH_HOME` 默认值。一个 `skill-filesystem` 集成测试启动注册表 + 固定层级服务，断言同名 skill 的 `case > user-global > system` 与异名的并集。`bundle/multi-tenant` 测试断言 `skill-tier` 挂载与其 `DSH_USERS_ROOT` 钉值。`verify-cordis-config`、`verify-export-jsdoc`、`verify-package-invariants`、`verify-translation-pairing` 与 README 的 Model-Experience/limitations 门禁均通过。
+对 skill、skill-filesystem、skill-tier 与 bundle 包执行 `tsc -b` 通过。四个 `skill-tier` 单元测试覆盖根解析、作用域内与外层级、以及系统根的 `$DSH_HOME` 默认值。两个 `skill-filesystem` 集成测试启动注册表 + 固定层级服务：一个断言同名 skill 的 `case > user-global > system` 与异名的并集，另一个注册一个视野不含层级根的文件系统服务，断言该层级 skill 仍能加载其正文 —— 只要加载改为从 `candidate.source` 推断宿主信任，该断言即失败。`bundle/multi-tenant` 测试断言 `skill-tier` 挂载与其 `DSH_USERS_ROOT` 钉值。`verify-cordis-config`、`verify-export-jsdoc`、`verify-package-invariants`、`verify-translation-pairing` 与 README 的 Model-Experience/limitations 门禁均通过。

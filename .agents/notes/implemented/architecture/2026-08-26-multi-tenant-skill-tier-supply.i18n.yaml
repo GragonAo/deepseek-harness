@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-26-multi-tenant-skill-tier-supply.md
-2026-08-26-multi-tenant-skill-tier-supply.md: b9ce4ca9edf4c8df636ea0d9cd41150bec1aa1e1
-2026-08-26-multi-tenant-skill-tier-supply.zh.md: 74e9eb244b724110f46d71dbce673e96a160dfa6
+2026-08-26-multi-tenant-skill-tier-supply.md: 499dc20fcb2b7699d3f2f8f33bb7326758b69589
+2026-08-26-multi-tenant-skill-tier-supply.zh.md: d5a686946d3da2aebb43dc7a254a9764936a5914

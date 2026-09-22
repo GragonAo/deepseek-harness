@@ -75,6 +75,8 @@
     "@deepseek-ai/dsh-subprocess": "workspace:^",
     "@deepseek-ai/dsh-subprocess-container": "workspace:^",
     "@deepseek-ai/dsh-tenant": "workspace:^",
+    "@deepseek-ai/dsh-tenant-admin": "workspace:^",
+    "@deepseek-ai/dsh-tenant-admin-postgres": "workspace:^",
     "@deepseek-ai/dsh-tenant-auth-jwt": "workspace:^",
     "@deepseek-ai/dsh-api-http": "workspace:^",
     "@deepseek-ai/dsh-tool-bash": "workspace:^",
