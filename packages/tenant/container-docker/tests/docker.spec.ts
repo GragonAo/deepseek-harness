@@ -89,6 +89,27 @@ describe('DockerContainerRuntime', () => {
     ])
   })
 
+  it('caps memory (with swap) and CPU when ceilings are configured, and passes neither otherwise', async () => {
+    const capped = new FakeRunner()
+    await scoped(tenant('acme'), 'user-1', () =>
+      mount(capped, new FakeClient(), { runtime: 'docker', memoryLimit: '2g', cpuLimit: 2 })
+        .exec('echo', ['hi']))
+    const cappedRun = capped.calls.find(c => c[0] === 'run')
+    expect(cappedRun).toContain('--memory')
+    expect(cappedRun).toContain('2g')
+    // Swap capped at the memory limit, so exceeding it dies in place instead of swapping the host.
+    expect(cappedRun).toContain('--memory-swap')
+    expect(cappedRun?.[cappedRun.indexOf('--memory-swap') + 1]).toBe('2g')
+    expect(cappedRun).toContain('--cpus')
+    expect(cappedRun?.[cappedRun.indexOf('--cpus') + 1]).toBe('2')
+
+    const uncapped = new FakeRunner()
+    await scoped(tenant('acme'), 'user-1', () => mount(uncapped, new FakeClient()).exec('echo', ['hi']))
+    const plainRun = uncapped.calls.find(c => c[0] === 'run')
+    expect(plainRun).not.toContain('--memory')
+    expect(plainRun).not.toContain('--cpus')
+  })
+
   it('omits the /global mount when no usersRoot is configured', async () => {
     const runner = new FakeRunner()
     const runtime = mount(runner, new FakeClient())

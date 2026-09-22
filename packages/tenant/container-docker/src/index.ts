@@ -70,6 +70,15 @@ export interface Config {
   usersRoot?: string
   /** Milliseconds of exec idleness before the container is reaped. Omit to keep. */
   idleTimeoutMs?: number
+  /**
+   * Memory ceiling in Docker's size syntax (e.g. `2g`), applied with
+   * `--memory-swap` at the same value so an over-limit subject is OOM-killed
+   * inside its own container instead of pushing the host into swap. Omit for no
+   * ceiling.
+   */
+  memoryLimit?: string
+  /** CPU ceiling in whole cores. Omit for no ceiling. */
+  cpuLimit?: number
 }
 
 const PUBLISHED_PORT = /(?:\d+\.\d+\.\d+\.\d+|\[?::\]?):(\d+)/
@@ -92,6 +101,8 @@ export class DockerContainerRuntime extends ContainerRuntime {
     toolExecPort: z.natural().min(1).default(8642),
     usersRoot: z.string(),
     idleTimeoutMs: z.natural().min(1),
+    memoryLimit: z.string(),
+    cpuLimit: z.natural().min(1),
   })
 
   private readonly runner: DockerRunner
@@ -101,6 +112,8 @@ export class DockerContainerRuntime extends ContainerRuntime {
   private readonly toolExecPort: number
   private readonly usersRoot: string | undefined
   private readonly idleTimeoutMs: number | undefined
+  private readonly memoryLimit: string | undefined
+  private readonly cpuLimit: number | undefined
   private readonly tenants = new Map<string, TenantRuntime>()
   private readonly starting = new Map<string, Promise<TenantRuntime>>()
   private readonly idleTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -114,6 +127,8 @@ export class DockerContainerRuntime extends ContainerRuntime {
     this.toolExecPort = config.toolExecPort ?? 8642
     this.usersRoot = config.usersRoot
     this.idleTimeoutMs = config.idleTimeoutMs
+    this.memoryLimit = config.memoryLimit
+    this.cpuLimit = config.cpuLimit
     ctx.effect(() => async () => {
       for (const timer of this.idleTimers.values()) clearTimeout(timer)
       this.idleTimers.clear()
@@ -185,9 +200,19 @@ export class DockerContainerRuntime extends ContainerRuntime {
       // host-side bindings back over the loopback HTTP surface it publishes.
       '--add-host', 'host.docker.internal:host-gateway',
       '-p', `127.0.0.1::${String(this.toolExecPort)}`,
+    ]
+    if (this.memoryLimit !== undefined) {
+      // Without the matching --memory-swap Docker defaults it to twice the memory
+      // limit, letting an over-limit subject swap the host instead of dying in place.
+      args.push('--memory', this.memoryLimit, '--memory-swap', this.memoryLimit)
+    }
+    if (this.cpuLimit !== undefined) {
+      args.push('--cpus', String(this.cpuLimit))
+    }
+    args.push(
       '-v', `${tenant.workspaceRoot}/users/${user}:/workspace`,
       '-v', `${tenant.workspaceRoot}/shared:/shared`,
-    ]
+    )
     if (this.usersRoot !== undefined) {
       args.push('-v', `${this.usersRoot}/${user}:/global`)
     }
