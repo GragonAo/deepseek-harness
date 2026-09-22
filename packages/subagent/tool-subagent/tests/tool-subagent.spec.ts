@@ -1366,4 +1366,15 @@ describe('depth budget configuration', () => {
     expect(requests[0]?.maxDepth).toBeUndefined()
     expect(requests[0]?.toolFilter).toBeUndefined()
   })
+  it('declares the configured foreground deadline on the tool definition', async () => {
+    const ctx = await setup({ provider: 'mock', foregroundTimeoutMs: 1_234 })
+    // `guard/timeout-policy` installs TOOL_TIMEOUT only for a declared budget, so
+    // the definition is what makes a stalled delegation visible to the model.
+    expect(ctx.tools.get('subagent')?.timeoutMs).toBe(1_234)
+  })
+
+  it('declares no foreground deadline when none is configured', async () => {
+    const ctx = await setup({ provider: 'mock' })
+    expect(ctx.tools.get('subagent')?.timeoutMs).toBeUndefined()
+  })
 })

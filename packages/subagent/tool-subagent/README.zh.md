@@ -26,6 +26,7 @@
 | `persona` | 每个子 agent 独立的 persona；要求提供方具备 `persona` 能力。 |
 | `toolFilter` | 每个子 agent 独立的全局工具限制；要求提供方具备 `toolFilter` 能力。 |
 | `maxDepth` | 绝对委派深度上限，默认 `3`（`0` 禁止委派）；数值上限要求 `depthLimit` 能力，缺失时挂载失败。对于预算由子 harness 拥有的进程外提供方，`'provider-managed'` 不发送上限。工具在达到上限时仍然可见；每次尝试启动都会检查调用 agent 的当前深度，被拒绝时返回出错的工具结果。 |
+| `foregroundTimeoutMs` | 单次前台调用的期限。声明它才会让 [`guard/timeout-policy`](../../guard/timeout-policy) 为该工具装上超时；省略则意味着模型等待的这次调用自身没有任何上界。后台运行不受影响——模型从不在后台运行上等待。 |
 
 ## 并发
 

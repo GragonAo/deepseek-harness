@@ -8,11 +8,17 @@
  * composes and drives them directly, so this driver owns exactly one turn with
  * one result.
  *
+ * The run's result always settles: `settleTimeoutMs` bounds the wait for the
+ * child's quiescence and cancels a child that stopped making progress, so neither
+ * `result` nor the `dispose()` awaiting it can stay pending forever.
+ *
  * @module @deepseek-ai/dsh-subagent-in-process-driver
  */
 
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
+import { deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import { foldConsumedWork } from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import { SessionId, type SessionEvent, type TurnEndReason } from '@deepseek-ai/dsh-session'
@@ -64,8 +70,33 @@ function toStopReason(reason: TurnEndReason | undefined): SubagentStopReason {
   }
 }
 
+/** Default for {@link Config.settleTimeoutMs}. */
+const DEFAULT_SETTLE_TIMEOUT_MS = 3_600_000
+
+/** Deadline code this driver stamps on its own expiry. */
+const SETTLE_TIMEOUT = 'SUBAGENT_SETTLE_TIMEOUT'
+
+/**
+ * Config: the shared driver's deployment-varying bound. The provider plugins that
+ * call {@link startInProcessRun} expose this field on their own config.
+ */
+export interface Config {
+  /**
+   * Milliseconds a published child may run before the driver stops waiting for
+   * it, cancels it, and settles the run with a diagnostic. Defaults to 3600000 —
+   * longer than any tool-level deadline, because this bound only has to fire for
+   * a child that stopped responding to cancellation entirely.
+   */
+  settleTimeoutMs?: number
+}
+
+/** Validated schema for {@link Config}; the driver applies its own default. */
+export const Config: z<Config> = z.object({
+  settleTimeoutMs: z.natural().min(1).default(DEFAULT_SETTLE_TIMEOUT_MS),
+})
+
 /** Extra inputs the spawn and fork providers supply to the shared driver. */
-export interface InProcessRunOptions {
+export interface InProcessRunOptions extends Config {
   /** Completed-turn seed for fork, or undefined for a fresh spawn. */
   readonly seed?: SessionEvent[]
 }
@@ -144,6 +175,7 @@ export async function startInProcessRun(
     childId,
     activationBoundary,
     structured,
+    options.settleTimeoutMs ?? DEFAULT_SETTLE_TIMEOUT_MS,
   )
 }
 
@@ -158,6 +190,7 @@ function drivePublishedRun(
   childId: SessionId,
   boundary: number,
   structured: StructuredAttachment | undefined,
+  settleTimeoutMs: number,
 ): SubagentRun {
   const child = handle.agent
   const flags = { cancelled: false }
@@ -172,17 +205,28 @@ function drivePublishedRun(
   if (signal.aborted) onAbort()
 
   const result: Promise<SubagentResult> = (async () => {
+    // The deadline carries no upstream: caller cancellation already reaches the
+    // child through `onAbort`, which cancels it and so ends the same wait. Only
+    // this driver's own expiry means the child stopped responding.
+    using d = deadline(undefined, settleTimeoutMs, SETTLE_TIMEOUT)
     try {
       if (!flags.cancelled) {
         child.followup(createUserMessage({ content: prompt, source: { kind: 'user' } }))
-        await child.whenIdle()
+        await awaitQuiescence(child, d.signal)
       }
-      return readResult(
-        child,
-        boundary,
-        flags.cancelled,
-        structured ? { captured: structured.captured() } : undefined,
-      )
+      const captured = structured ? { captured: structured.captured() } : undefined
+      if (timeoutOf(d.signal, SETTLE_TIMEOUT) === undefined) {
+        return readResult(child, boundary, flags.cancelled, captured)
+      }
+      // The child outlived the deadline: cancel it so its loop stops, and report
+      // why this run stopped waiting instead of leaving the parent with no result
+      // at all.
+      flags.cancelled = true
+      child.cancel({ kind: 'parent' })
+      return {
+        ...readResult(child, boundary, true, captured),
+        diagnostic: `subagent run did not settle within ${settleTimeoutMs}ms`,
+      }
     } finally {
       signal.removeEventListener('abort', onAbort)
     }
@@ -202,6 +246,25 @@ function drivePublishedRun(
       if (disposal.status === 'rejected') throw disposal.reason
     },
   }
+}
+
+/**
+ * Await a published child's quiescence, ending the wait when `signal` aborts.
+ *
+ * `whenIdle()` is not cancellable: the signal ends this await, and the caller
+ * cancels the child so its own loop stops.
+ *
+ * @param child - the published child whose quiescence is awaited.
+ * @param signal - the settle deadline.
+ * @returns fulfillment once the child is quiescent, or once `signal` aborts.
+ */
+async function awaitQuiescence(child: Agent, signal: AbortSignal): Promise<void> {
+  await Promise.race([
+    child.whenIdle(),
+    new Promise<void>((resolve) => {
+      signal.addEventListener('abort', () => { resolve() }, { once: true })
+    }),
+  ])
 }
 
 /** Read one settled child's result from events after its activation boundary. */

@@ -15,20 +15,22 @@ import type {
   SubagentProvider,
 } from '@deepseek-ai/dsh-subagent'
 import { startInProcessRun } from '@deepseek-ai/dsh-subagent-in-process-driver'
+import type { Config as DriverConfig } from '@deepseek-ai/dsh-subagent-in-process-driver'
 
 export const name = 'subagent-spawn-in-process'
 // `tools` is deliberately not injected: the child factory already provides it during setup,
 // and adding it here would unnecessarily change this provider's apply timing.
 export const inject = ['subagents']
 
-/** Config: the registry name to register the provider under. */
-export interface Config {
+/** Config: the registry name to register the provider under, plus the shared driver's bound. */
+export interface Config extends DriverConfig {
   /** Provider name on `ctx.subagents` (default `spawn`). */
   providerName: string
 }
 
 export const Config: z<Config> = z.object({
   providerName: z.string().default('spawn'),
+  settleTimeoutMs: z.natural().min(1),
 })
 
 /**
@@ -43,13 +45,16 @@ class SpawnInProcessProvider implements SubagentProvider {
   // Context contract: a spawned child starts fresh — it never sees the parent conversation.
   readonly inheritsParentContext = false
 
-  constructor(readonly name: string) {}
+  constructor(readonly name: string, private readonly settleTimeoutMs: number | undefined) {}
 
   start(request: ResolvedSubagentStartRequest) {
     // Fresh child: no seed. The shared driver mints ids, stamps cwd/lineage/
     // depth, drives the one-shot (including the structured capture when the
-    // request carries an outputSchema), and maps the result.
-    return startInProcessRun(request, {})
+    // request carries an outputSchema), and maps the result. An unset
+    // `settleTimeoutMs` leaves the driver's own default in force.
+    return startInProcessRun(request, {
+      ...this.settleTimeoutMs !== undefined ? { settleTimeoutMs: this.settleTimeoutMs } : {},
+    })
   }
 
   prepareContinuable(): Promise<ContinuableCreateSpec> {
@@ -60,5 +65,5 @@ class SpawnInProcessProvider implements SubagentProvider {
 }
 
 export function apply(ctx: Context, config: Config): void {
-  ctx.subagents.registerProvider(new SpawnInProcessProvider(config.providerName))
+  ctx.subagents.registerProvider(new SpawnInProcessProvider(config.providerName, config.settleTimeoutMs))
 }

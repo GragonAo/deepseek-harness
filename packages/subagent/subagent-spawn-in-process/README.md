@@ -19,6 +19,7 @@ Spawn advertises `{ outputSchema: true, depthLimit: true, toolFilter: true, pers
 | Key | Meaning |
 |---|---|
 | `providerName` | Registry name on `ctx.subagents` (default `spawn`). |
+| `settleTimeoutMs` | Bound on the wait for the child's quiescence, passed to the [shared driver](../subagent-in-process-driver/README.md#spawn-and-fork-inputs); omitted, the driver's own default applies. |
 
 ## Model Experience
 

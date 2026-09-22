@@ -20,6 +20,11 @@ systemRoot: '/root/.dsh/system' # host system skill tree; mounted read-only at t
     # idleTimeoutMs: 300000         # optional: reap a container this long after its last exec
     # memoryLimit: '2g'             # optional: hard memory ceiling; swap is capped at the same value
     # cpuLimit: 2                   # optional: CPU ceiling in whole cores
+    # cliTimeoutMs: 60000           # optional: bound on one docker/podman invocation
+    # startTimeoutMs: 180000        # optional: bound on one whole cold start
+    # transportTimeoutMs: 600000    # optional: bound on one tool-exec round trip
+    # readyTimeoutMs: 10000         # optional: bound on the wait for /exec to answer
+    # readyPollMs: 30               # optional: interval between readiness probes
 ```
 
 ## Container model
@@ -44,6 +49,8 @@ It then reads the published host port (`docker port`), waits for the container's
 `systemRoot` is mounted at its own absolute path, not at a fixed in-container location: a skill's instructions cite companion files (templates, methodology, verification scripts) relative to the directory the skill was discovered in, so the path the host resolved must be the path the sandbox sees. It is read-only, and omitting it leaves the system skill tree host-only — skill bodies still reach the model through the host-side skill provider, but the files they cite are unreadable inside the sandbox. The per-subject tree needs no such setting: it is already mounted at `/global`. The case-shared tree is mounted at `/shared`, but its `skills` directory is additionally mounted read-only at its own host path, because the case-shared skill tier reports that path as a skill's base directory — a skill discovered there cites its companion files by a host path the sandbox must resolve.
 
 A sandbox has no guaranteed lifetime — the host may restart, an operator may remove the container, the subject may be OOM-killed — so a cached address can go dead under a live session. When `exec` rejects (a command's own exit status travels in the result, so a rejection means transport or protocol failure), the runtime discards that sandbox, starts a replacement, and runs the same request once against it; only a second failure reaches the caller. Both execution and the `/workspace` filesystem provider go through this one path, so a replaced sandbox restores both. An exec the caller aborted is never retried.
+
+Every step of that path is bounded, because none of it can be cancelled once issued: `cliTimeoutMs` bounds one container-CLI invocation (`run -d` includes an image pull on a host that lacks the image), `startTimeoutMs` bounds one whole cold start, and `transportTimeoutMs` bounds one tool-exec round trip — sized for the command's own execution inside the container, where a long build spends its time. A start that exceeds its bound is discarded **and its cache entry cleared**: the next call then starts a fresh container instead of joining a start that never finishes, which would otherwise leave that (tenant, user) unable to run any tool call for the life of the host process. A caller that carries its own bound (the shell deadline, the tool-timeout policy) passes it in, so an expired or aborted call stops waiting on a start in flight; the start itself continues for whoever else shares the key. A tool-exec round trip that exceeds its bound is never retried — the replacement rule above assumes a rejection means the command never ran, which a timeout cannot promise. A start that fails after `docker run -d` leaves a container under the stable name until the next start clears it.
 
 `publishHost` and `connectHost` default to the host loopback, which assumes the harness shares the host's network namespace. A harness running in its own container reaches the published port over the Docker gateway instead: set `connectHost: host.docker.internal` and widen `publishHost` to the bridge gateway address (e.g. `172.17.0.1`). Prefer that gateway address over `0.0.0.0` — the `/exec` server authenticates nothing, so an all-interfaces publication exposes unauthenticated command execution to the surrounding network.
 

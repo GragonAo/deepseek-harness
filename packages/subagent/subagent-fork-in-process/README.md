@@ -23,6 +23,7 @@ Fork advertises `{ outputSchema: true, depthLimit: true, toolFilter: true, perso
 | Key | Meaning |
 |---|---|
 | `providerName` | Registry name on `ctx.subagents` (default `fork`). |
+| `settleTimeoutMs` | Bound on the wait for the child's quiescence, passed to the [shared driver](../subagent-in-process-driver/README.md#spawn-and-fork-inputs); omitted, the driver's own default applies. |
 See [`dsh-subagent-spawn-in-process`](../subagent-spawn-in-process/README.md) for the run lifecycle, model inheritance, and depth tracking — all shared.
 
 ## Model Experience

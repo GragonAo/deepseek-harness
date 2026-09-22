@@ -23,6 +23,7 @@ fork 声明 `{ outputSchema: true, depthLimit: true, toolFilter: true, persona: 
 | 键 | 含义 |
 |---|---|
 | `providerName` | `ctx.subagents` 上的注册表名称（默认 `fork`）。 |
+| `settleTimeoutMs` | 等待子 agent 静止的上界，传给[共享驱动](../subagent-in-process-driver/README.md#spawn-and-fork-inputs)；省略时套用驱动自身的默认值。 |
 运行生命周期、模型继承与深度跟踪均为共享行为，见 [`dsh-subagent-spawn-in-process`](../subagent-spawn-in-process/README.md)。
 
 ## 模型体验

@@ -183,12 +183,19 @@
     - id: tool-subagent-list-agents
       name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
 
+    # A foreground delegation the model waits on has no other bound: a child
+    # whose run never settles would hold the tool call, and so the whole turn,
+    # open with nothing to report. Declaring the budget is what makes
+    # `guard/timeout-policy` end the call with a TOOL_TIMEOUT result the model
+    # can read and act on. Background runs are unaffected — the model never
+    # waits on them.
     - id: tool-subagent
       name: '@deepseek-ai/dsh-tool-subagent'
       config:
         provider: spawn
         toolName: subagent
         backgroundMode: continuable
+        foregroundTimeoutMs: 1800000
 
     - id: tool-subagent-fork
       name: '@deepseek-ai/dsh-tool-subagent'
@@ -196,6 +203,7 @@
         provider: fork
         toolName: subagent_fork
         backgroundMode: continuable
+        foregroundTimeoutMs: 1800000
 
     # Production dsh does not install these optional providers. Install the
     # matching Bundle in this Profile and restart the Host, then copy this

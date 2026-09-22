@@ -76,6 +76,13 @@ export interface Config {
    * budget belongs to the child runtime or its own deployment.
    */
   maxDepth?: number | 'provider-managed'
+  /**
+   * Milliseconds a foreground delegation may run before the tool call ends with
+   * a `TOOL_TIMEOUT` result the model can read. Omit for no tool-level deadline:
+   * the timeout policy installs no timer at all without a declared budget, so a
+   * run that never settles would leave the call pending with nothing to report.
+   */
+  foregroundTimeoutMs?: number
 }
 
 export const Config: z<Config> = z.object({
@@ -96,6 +103,7 @@ export const Config: z<Config> = z.object({
     deny: z.array(z.string()).default(undefined as unknown as string[]),
   }).default(undefined as unknown as { allow: string[]; deny: string[] }),
   maxDepth: z.union([z.natural().max(Number.MAX_SAFE_INTEGER), z.const('provider-managed' as const)]).default(3),
+  foregroundTimeoutMs: z.natural().min(1),
 })
 
 /** Render text blocks from the canonical JSON block array without trusting arbitrary values. */
@@ -372,6 +380,10 @@ export function apply(ctx: Context, config: Config): void {
               : outputValueText(value.output),
         }],
       },
+      // Declaring the budget is what makes `guard/timeout-policy` install
+      // TOOL_TIMEOUT for this call; without it a run that never settles is a
+      // tool call the model never hears about.
+      ...config.foregroundTimeoutMs !== undefined ? { timeoutMs: config.foregroundTimeoutMs } : {},
       // Children never mutate the parent session; the one parent-owned write
       // (tasks.start) is a synchronous commutative insertion.
       isConcurrencySafe: () => true,

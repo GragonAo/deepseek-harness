@@ -607,17 +607,75 @@ export interface Config {
   /** Container port the tool-exec server binds (published to a random host port). */
   toolExecPort?: number
   /**
+   * Host address the tool-exec port is published on. Defaults to the host
+   * loopback, which only a harness on the same host network namespace can
+   * reach. The server itself authenticates nothing, so widen this to the
+   * container bridge gateway (e.g. `172.17.0.1`) rather than to
+   * `0.0.0.0` when the harness runs in a container: that keeps an
+   * unauthenticated command surface off the surrounding network.
+   */
+  publishHost?: string
+  /**
+   * Host address the harness dials to reach that published port. Defaults to
+   * the host loopback. A harness running in its own container reaches the host
+   * by the gateway name instead (e.g. `host.docker.internal`).
+   */
+  connectHost?: string
+  /**
    * Host root holding one sub-directory per subject (their cross-case global
    * directory), bind-mounted read-write at `/global`. When omitted the `/global`
    * mount is skipped (single-user deployments without a cross-case directory).
    */
   usersRoot?: string
+  /**
+   * Host directory holding the system-wide skill tree, bind-mounted read-only at
+   * the same absolute path. A skill's instructions reference companion files
+   * (templates, methodology, verification scripts) relative to the directory the
+   * skill was discovered in, so the sandbox must see that directory at the path
+   * the host resolved it to; mounting it elsewhere would break every reference.
+   * When omitted the system skill tree stays host-only and only skill bodies
+   * reach the model.
+   */
+  systemRoot?: string
   /** Milliseconds of exec idleness before the container is reaped. Omit to keep. */
   idleTimeoutMs?: number
+  /**
+   * Milliseconds allowed for one `docker`/`podman` invocation — the same-name
+   * clear, `run`, `port`, and removal all pass through it. The CLI blocks for as
+   * long as the daemon does and the runner kills its child only when it is handed
+   * a signal, so this is what bounds a wedged daemon. Defaults to 60000.
+   */
+  cliTimeoutMs?: number
+  /**
+   * Milliseconds allowed for one cold start: its CLI calls and the tool-exec
+   * readiness wait together. Exceeding it fails the start and clears everything
+   * cached for the subject, so the next exec begins a fresh start instead of
+   * joining a promise that never settles. Defaults to 180000.
+   */
+  startTimeoutMs?: number
+  /**
+   * Milliseconds allowed for one tool-exec HTTP round trip. This covers the
+   * command's own execution inside the container, not only the connection, so it
+   * is the largest of these deadlines. Defaults to 600000.
+   */
+  transportTimeoutMs?: number
+  /** Milliseconds to wait for a cold container's tool-exec server to answer. Defaults to 10000. */
+  readyTimeoutMs?: number
+  /** Milliseconds between tool-exec readiness polls. Defaults to 30. */
+  readyPollMs?: number
+  /**
+   * Memory ceiling in Docker's size syntax (e.g. `2g`), applied with
+   * `--memory-swap` at the same value so an over-limit subject is OOM-killed
+   * inside its own container instead of pushing the host into swap. Omit for no
+   * ceiling.
+   */
+  memoryLimit?: string
+  /** CPU ceiling in whole cores. Omit for no ceiling. */
+  cpuLimit?: number
 }
 ```
 
-Source: [`packages/tenant/container-docker/src/index.ts:56`](../packages/tenant/container-docker/src/index.ts)
+Source: [`packages/tenant/container-docker/src/index.ts:62`](../packages/tenant/container-docker/src/index.ts)
 
 <a id="deepseek-aidsh-cordis-host-runner"></a>
 
@@ -2492,14 +2550,16 @@ Source: [`packages/subagent/subagent-dsh-sdk/src/index.ts:29`](../packages/subag
 Requires: `subagents`
 
 ```ts config-catalog
-/** Config: the registry name to register the provider under. */
-export interface Config {
+/** Config: the registry name to register the provider under, plus the shared driver's bound. */
+export interface Config extends DriverConfig {
   /** Provider name on `ctx.subagents` (default `fork`). */
   providerName: string
 }
 ```
 
-Source: [`packages/subagent/subagent-fork-in-process/src/index.ts:31`](../packages/subagent/subagent-fork-in-process/src/index.ts)
+Depends on: [`DriverConfig`](../packages/subagent/subagent-in-process-driver/src/index.ts)
+
+Source: [`packages/subagent/subagent-fork-in-process/src/index.ts:32`](../packages/subagent/subagent-fork-in-process/src/index.ts)
 
 <a id="deepseek-aidsh-subagent-spawn-in-process"></a>
 
@@ -2508,14 +2568,16 @@ Source: [`packages/subagent/subagent-fork-in-process/src/index.ts:31`](../packag
 Requires: `subagents`
 
 ```ts config-catalog
-/** Config: the registry name to register the provider under. */
-export interface Config {
+/** Config: the registry name to register the provider under, plus the shared driver's bound. */
+export interface Config extends DriverConfig {
   /** Provider name on `ctx.subagents` (default `spawn`). */
   providerName: string
 }
 ```
 
-Source: [`packages/subagent/subagent-spawn-in-process/src/index.ts:25`](../packages/subagent/subagent-spawn-in-process/src/index.ts)
+Depends on: [`DriverConfig`](../packages/subagent/subagent-in-process-driver/src/index.ts)
+
+Source: [`packages/subagent/subagent-spawn-in-process/src/index.ts:26`](../packages/subagent/subagent-spawn-in-process/src/index.ts)
 
 <a id="deepseek-aidsh-subprocess-e2b"></a>
 
@@ -2753,6 +2815,36 @@ export type TokenMeterConfig = Record<string, never>
 ```
 
 Source: [`packages/llm/token-meter/src/types.ts:12`](../packages/llm/token-meter/src/types.ts)
+
+<a id="deepseek-aidsh-tool-artifact"></a>
+
+## `@deepseek-ai/dsh-tool-artifact`
+
+Requires: `tools`
+
+```ts config-catalog
+/** Artifact delivery configuration. */
+export interface Config {
+  /** Absolute host directory the deployment's web front end serves as static files. */
+  mediaRoot: string
+  /**
+   * The web front end's origin (scheme, host, and port — no path), used only to build the absolute
+   * `url` for callers that need one (logs, curl, a non-browser client). The delivery tag never
+   * carries it.
+   */
+  publicOrigin?: string
+  /** Same-origin path prefix the front end serves {@link Config.mediaRoot} under. */
+  urlPrefix: string
+  /** Host root of the per-subject directories mounted at `/global`; omit when that mount is absent. */
+  usersRoot?: string
+  /** File published artifacts into a per-kind subdirectory instead of the case directory itself. */
+  groupByKind: boolean
+  /** Largest file this tool publishes, in bytes. */
+  maxBytes: number
+}
+```
+
+Source: [`packages/tenant/tool-artifact/src/index.ts:42`](../packages/tenant/tool-artifact/src/index.ts)
 
 <a id="deepseek-aidsh-tool-bash"></a>
 
@@ -3089,6 +3181,13 @@ export interface Config {
    * budget belongs to the child runtime or its own deployment.
    */
   maxDepth?: number | 'provider-managed'
+  /**
+   * Milliseconds a foreground delegation may run before the tool call ends with
+   * a `TOOL_TIMEOUT` result the model can read. Omit for no tool-level deadline:
+   * the timeout policy installs no timer at all without a declared budget, so a
+   * run that never settles would leave the call pending with nothing to report.
+   */
+  foregroundTimeoutMs?: number
 }
 ```
 
@@ -3322,6 +3421,26 @@ export type ApprovalPolicy = 'ask' | 'never'
 ```
 
 Source: [`packages/interaction/user-approval/src/index.ts:177`](../packages/interaction/user-approval/src/index.ts)
+
+<a id="deepseek-aidsh-user-questions"></a>
+
+## `@deepseek-ai/dsh-user-questions`
+
+```ts config-catalog
+/**
+ * Service configuration.
+ *
+ * The answer deadline is deployment-varying rather than fixed: an interactive UI
+ * whose human may step away needs minutes, while a headless API deployment that
+ * has no reachable answerer at all should fail fast and let the agent proceed.
+ */
+export interface Config {
+  /** Milliseconds an unanswered question may stay pending before `ask()` rejects. */
+  answerTimeoutMs?: number
+}
+```
+
+Source: [`packages/interaction/user-questions/src/index.ts:50`](../packages/interaction/user-questions/src/index.ts)
 
 <a id="deepseek-aidsh-web"></a>
 
@@ -3609,7 +3728,6 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 - `@deepseek-ai/dsh-tool-call-timeout-policy` — requires `tools` ([`packages/guard/timeout-policy/src/index.ts`](../packages/guard/timeout-policy/src/index.ts))
 - `@deepseek-ai/dsh-tool-cordis` — requires `tools` · `systemPrompt` · `dynamicCordisRunner` · `cordisInspect` ([`packages/extensions/tool-cordis/src/index.ts`](../packages/extensions/tool-cordis/src/index.ts))
 - `@deepseek-ai/dsh-tool-subagent-control` — requires `tools` · `subagents` ([`packages/subagent/tool-subagent-control/src/index.ts`](../packages/subagent/tool-subagent-control/src/index.ts))
-- `@deepseek-ai/dsh-user-questions` ([`packages/interaction/user-questions/src/index.ts`](../packages/interaction/user-questions/src/index.ts))
 - `@deepseek-ai/dsh-workspace` — requires `storageDomain` · `sessionPersistence` ([`packages/workspace/workspace/src/index.ts`](../packages/workspace/workspace/src/index.ts))
 
 ## Seam packages (not directly loadable)

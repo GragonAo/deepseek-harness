@@ -13,7 +13,7 @@ The driver follows this sequence:
 1. Validate the parent depth and optional absolute `maxDepth`, then derive child depth as parent depth plus one and persist it in the child session header.
 2. Call `parent.ctx.agents.create` directly, passing the required request signal into the factory's creation transaction.
 3. During that transaction's unpublished setup window, install the requested persona, tool restriction, and structured-output runtime.
-4. Publish the child, retain the returned `AgentHandle`, and drive one task with `child.followup(prompt)` followed by `child.whenIdle()`.
+4. Publish the child, retain the returned `AgentHandle`, and drive one task with `child.followup(prompt)` followed by `child.whenIdle()`, bounded by `settleTimeoutMs`.
 5. Read the child's own output — its last non-empty assistant message (an empty-content message that records usage is skipped), or its accumulated assistant text when no such message exists — and the final durable turn reason from the complete owned child run, excluding any fork seed.
 
 The child gets the parent's working-directory/session lineage and inherits the parent provider, model, and output-token cap unless `request.agentOptions` overrides them. It gets a fresh flat registration scope: parent ownership does not import parent tool restrictions or establish an authority subset.
@@ -30,7 +30,9 @@ After fulfillment, the caller owns the run. Provider-plugin unload does not revo
 
 ## Spawn and fork inputs
 
-`InProcessRunOptions` is `{ seed?: SessionEvent[] }`. Spawn omits it. Fork supplies a balanced completed-turn prefix and records its length so the result reader never mistakes a seeded parent message for child output.
+`InProcessRunOptions` is `{ seed?: SessionEvent[], settleTimeoutMs?: number }`. Spawn omits `seed`. Fork supplies a balanced completed-turn prefix and records its length so the result reader never mistakes a seeded parent message for child output.
+
+`settleTimeoutMs` (default `3600000`) bounds the wait for that quiescence. `whenIdle()` is not cancellable, so a child that stops making progress would otherwise leave both `result` and the `dispose()` awaiting it pending forever. On expiry the driver cancels the child and settles the run as `aborted` with a diagnostic naming the bound. The deadline carries no upstream signal: caller cancellation already reaches the child through the run's own abort listener, so only this driver's expiry means the child stopped responding. Both providers expose the field on their own config.
 
 Depth enforcement is internal to `startInProcessRun`: it reads the parent depth via `delegationDepthOf` (the persisted `SessionHeader.delegationDepth` is authoritative; runtime `AgentOptions.subagentDepth` may deepen but never lower it, so a resumed child keeps its budget), treats absence as top-level depth zero, rejects malformed stored values, and reports an attempted child depth above `maxDepth`. An unrepresentable depth above the safe-integer domain is a `RangeError`. The child depth is written to the child header, so it survives persistence and resume.
 

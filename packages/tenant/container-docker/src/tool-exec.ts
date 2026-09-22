@@ -159,7 +159,8 @@ export function listenToolExecServer(port = 0, host = '0.0.0.0'): Promise<Listen
  * POST one command to a running tool-exec server and return its result.
  * @param baseUrl - the server's loopback address, e.g. `http://127.0.0.1:54321`.
  * @param req - the argument vector and optional stdin/env/cwd.
- * @param signal - optional cancellation forwarded to the HTTP request.
+ * @param signal - the caller's fused deadline and cancellation, forwarded to the
+ *   HTTP request; omit only when the caller has no bound of its own.
  * @returns the exit code and captured stdout/stderr.
  */
 export async function execToolCommand(baseUrl: string, req: ToolExecRequest, signal?: AbortSignal): Promise<ToolExecResult> {
@@ -167,7 +168,9 @@ export async function execToolCommand(baseUrl: string, req: ToolExecRequest, sig
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(req),
-    signal: signal ?? null,
+    // The field is omitted, not set to null: a request with no signal has no
+    // deadline at all, which is what a server that stopped answering hangs on.
+    ...signal !== undefined ? { signal } : {},
   })
   if (!response.ok) {
     let message = 'unknown error'

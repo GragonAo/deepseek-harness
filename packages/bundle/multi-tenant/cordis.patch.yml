@@ -112,10 +112,20 @@
 # ── tenant container execution world ────────────────────────────────────────
 
 - insert:
+    # Every bound below ends a call that would otherwise stay pending: the
+    # container CLI blocks for as long as a wedged daemon does, and a pending
+    # start is what stops one subject's tool calls until the host restarts.
+    # The CLI bound also has to cover `docker run -d` when the tool-exec image
+    # is not yet local on this host (a pull runs inside that same call).
     - id: container-runtime
       name: '@deepseek-ai/dsh-container-docker'
       config:
         usersRoot: !!js process.env.DSH_USERS_ROOT
+        cliTimeoutMs: 60000
+        startTimeoutMs: 180000
+        transportTimeoutMs: 600000
+        readyTimeoutMs: 10000
+        readyPollMs: 30
 
     # Ambient case / user-global / system skill directories: the filesystem
     # skill provider reads `ctx.skillTiers` (registered here) to append the

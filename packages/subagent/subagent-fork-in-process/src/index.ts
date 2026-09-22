@@ -19,6 +19,7 @@ import type {
   SubagentProvider,
 } from '@deepseek-ai/dsh-subagent'
 import { startInProcessRun } from '@deepseek-ai/dsh-subagent-in-process-driver'
+import type { Config as DriverConfig } from '@deepseek-ai/dsh-subagent-in-process-driver'
 
 export const name = 'subagent-fork-in-process'
 // `tools` is deliberately NOT injected — same rationale as subagent-spawn-in-process: the
@@ -27,14 +28,15 @@ export const name = 'subagent-fork-in-process'
 // in the model-visible tool list) is unchanged by structured output.
 export const inject = ['subagents']
 
-/** Config: the registry name to register the provider under. */
-export interface Config {
+/** Config: the registry name to register the provider under, plus the shared driver's bound. */
+export interface Config extends DriverConfig {
   /** Provider name on `ctx.subagents` (default `fork`). */
   providerName: string
 }
 
 export const Config: z<Config> = z.object({
   providerName: z.string().default('fork'),
+  settleTimeoutMs: z.natural().min(1),
 })
 
 /**
@@ -63,7 +65,7 @@ class ForkInProcessProvider implements SubagentProvider {
   // Context contract: a forked child IS seeded with the parent's completed-turn prefix.
   readonly inheritsParentContext = true
 
-  constructor(readonly name: string) {}
+  constructor(readonly name: string, private readonly settleTimeoutMs: number | undefined) {}
 
   start(request: ResolvedSubagentStartRequest) {
     const seed = completedTurnPrefix(request.parent)
@@ -71,6 +73,8 @@ class ForkInProcessProvider implements SubagentProvider {
       // Only pass a seed when there's a completed turn to inherit; an empty seed
       // is equivalent to a fresh child, so omit it to keep the session unseeded.
       ...seed.length > 0 ? { seed } : {},
+      // An unset `settleTimeoutMs` leaves the driver's own default in force.
+      ...this.settleTimeoutMs !== undefined ? { settleTimeoutMs: this.settleTimeoutMs } : {},
     })
   }
 
@@ -90,5 +94,5 @@ class ForkInProcessProvider implements SubagentProvider {
 }
 
 export function apply(ctx: Context, config: Config): void {
-  ctx.subagents.registerProvider(new ForkInProcessProvider(config.providerName))
+  ctx.subagents.registerProvider(new ForkInProcessProvider(config.providerName, config.settleTimeoutMs))
 }

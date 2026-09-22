@@ -19,6 +19,7 @@ spawn 声明 `{ outputSchema: true, depthLimit: true, toolFilter: true, persona:
 | 键 | 含义 |
 |---|---|
 | `providerName` | `ctx.subagents` 上的注册表名称（默认 `spawn`）。 |
+| `settleTimeoutMs` | 等待子 agent 静止的上界，传给[共享驱动](../subagent-in-process-driver/README.md#spawn-and-fork-inputs)；省略时套用驱动自身的默认值。 |
 
 ## 模型体验
 

@@ -11,12 +11,17 @@
  * cannot orphan an older execution world (the next start clears the same-name
  * container first). Idle containers are reaped after `idleTimeoutMs`, and the
  * execution world itself is stateless: everything a tenant and user own lives
- * on its mounts, never in the container.
+ * on its mounts, never in the container. Every container CLI invocation, the
+ * cold start as a whole, and each tool-exec round trip carry their own deadline,
+ * so a wedged daemon or a tool-exec server that stopped answering fails the call
+ * instead of leaving it pending — a pending start would otherwise stop every
+ * later tool call for that subject until the host process restarts.
  * @module @deepseek-ai/dsh-container-docker
  */
 
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import { deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import { ContainerRuntime } from '@deepseek-ai/dsh-container'
 import type { ContainerCommandResult, ContainerExecOptions } from '@deepseek-ai/dsh-container'
 import { requireTenant, requireUser, tenantPartitionName, userPartitionName } from '@deepseek-ai/dsh-tenant'
@@ -40,7 +45,8 @@ export interface ToolExecClient {
    * POST one command to the tenant's tool-exec server.
    * @param baseUrl - the server's loopback address with port.
    * @param req - the argument vector and optional stdin/env/cwd.
-   * @param signal - optional cancellation forwarded to the HTTP request.
+   * @param signal - the caller's fused deadline and cancellation, forwarded to the
+   *   HTTP request; omit only when the caller has no bound of its own.
    * @returns the exit code and captured stdout/stderr.
    */
   exec(baseUrl: string, req: ToolExecRequest, signal?: AbortSignal): Promise<ToolExecResult>
@@ -96,6 +102,30 @@ export interface Config {
   /** Milliseconds of exec idleness before the container is reaped. Omit to keep. */
   idleTimeoutMs?: number
   /**
+   * Milliseconds allowed for one `docker`/`podman` invocation — the same-name
+   * clear, `run`, `port`, and removal all pass through it. The CLI blocks for as
+   * long as the daemon does and the runner kills its child only when it is handed
+   * a signal, so this is what bounds a wedged daemon. Defaults to 60000.
+   */
+  cliTimeoutMs?: number
+  /**
+   * Milliseconds allowed for one cold start: its CLI calls and the tool-exec
+   * readiness wait together. Exceeding it fails the start and clears everything
+   * cached for the subject, so the next exec begins a fresh start instead of
+   * joining a promise that never settles. Defaults to 180000.
+   */
+  startTimeoutMs?: number
+  /**
+   * Milliseconds allowed for one tool-exec HTTP round trip. This covers the
+   * command's own execution inside the container, not only the connection, so it
+   * is the largest of these deadlines. Defaults to 600000.
+   */
+  transportTimeoutMs?: number
+  /** Milliseconds to wait for a cold container's tool-exec server to answer. Defaults to 10000. */
+  readyTimeoutMs?: number
+  /** Milliseconds between tool-exec readiness polls. Defaults to 30. */
+  readyPollMs?: number
+  /**
    * Memory ceiling in Docker's size syntax (e.g. `2g`), applied with
    * `--memory-swap` at the same value so an over-limit subject is OOM-killed
    * inside its own container instead of pushing the host into swap. Omit for no
@@ -107,14 +137,62 @@ export interface Config {
 }
 
 const PUBLISHED_PORT = /(?:\d+\.\d+\.\d+\.\d+|\[?::\]?):(\d+)/
-/** Longest a cold container may take before its tool-exec server answers. */
-const TOOL_EXEC_READY_TIMEOUT_MS = 10_000
-/** Sleep between tool-exec readiness polls. */
-const TOOL_EXEC_READY_POLL_MS = 30
+/**
+ * Deadline codes this provider stamps on its own expiries. `timeoutOf` reads
+ * them back off the fused signal, which is the only way to tell this provider's
+ * expiry apart from the caller's cancellation: both abort the same signal.
+ */
+const CLI_TIMEOUT = 'CONTAINER_CLI_TIMEOUT'
+const START_TIMEOUT = 'CONTAINER_START_TIMEOUT'
+const READY_TIMEOUT = 'CONTAINER_READY_TIMEOUT'
+const TRANSPORT_TIMEOUT = 'CONTAINER_TRANSPORT_TIMEOUT'
+/** Default for {@link Config.cliTimeoutMs}. */
+const DEFAULT_CLI_TIMEOUT_MS = 60_000
+/** Default for {@link Config.startTimeoutMs}. */
+const DEFAULT_START_TIMEOUT_MS = 180_000
+/** Default for {@link Config.transportTimeoutMs}. */
+const DEFAULT_TRANSPORT_TIMEOUT_MS = 600_000
+/** Default for {@link Config.readyTimeoutMs}. */
+const DEFAULT_READY_TIMEOUT_MS = 10_000
+/** Default for {@link Config.readyPollMs}. */
+const DEFAULT_READY_POLL_MS = 30
 
 function parsePublishedPort(stdout: string): number | undefined {
   const match = PUBLISHED_PORT.exec(stdout)
   return match?.[1] === undefined ? undefined : Number(match[1])
+}
+
+/**
+ * Await one operation, ending the wait as soon as `signal` aborts.
+ *
+ * The operation keeps running: a promise cannot be interrupted, and a start
+ * cached for a (tenant, user) is shared with callers that did not cancel, so the
+ * signal detaches this caller instead of cancelling their work. The same signal
+ * reaches the operation's own cancellation path, so the abandoned work settles
+ * promptly rather than leaving a CLI child behind.
+ *
+ * @param work - the operation to await.
+ * @param signal - the deadline or cancellation that ends the wait.
+ * @returns the operation's value, or a rejection carrying `signal`'s reason.
+ */
+function raceAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      const reason: unknown = signal.reason
+      reject(reason instanceof Error ? reason : new Error(String(reason ?? 'container-docker: the call was aborted')))
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    work.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(value)
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort)
+        reject(error)
+      },
+    )
+  })
 }
 
 /** Local Docker/Podman container runtime registered as `ctx.containerRuntime`. */
@@ -129,12 +207,18 @@ export class DockerContainerRuntime extends ContainerRuntime {
     usersRoot: z.string(),
     systemRoot: z.string(),
     idleTimeoutMs: z.natural().min(1),
+    cliTimeoutMs: z.natural().min(1).default(DEFAULT_CLI_TIMEOUT_MS),
+    startTimeoutMs: z.natural().min(1).default(DEFAULT_START_TIMEOUT_MS),
+    transportTimeoutMs: z.natural().min(1).default(DEFAULT_TRANSPORT_TIMEOUT_MS),
+    readyTimeoutMs: z.natural().min(1).default(DEFAULT_READY_TIMEOUT_MS),
+    readyPollMs: z.natural().min(1).default(DEFAULT_READY_POLL_MS),
     memoryLimit: z.string(),
     cpuLimit: z.natural().min(1),
   })
 
   private readonly runner: DockerRunner
   private readonly client: ToolExecClient
+  private readonly runtimeName: string
   private readonly network: string
   private readonly toolExecImage: string
   private readonly toolExecPort: number
@@ -143,6 +227,11 @@ export class DockerContainerRuntime extends ContainerRuntime {
   private readonly usersRoot: string | undefined
   private readonly systemRoot: string | undefined
   private readonly idleTimeoutMs: number | undefined
+  private readonly cliTimeoutMs: number
+  private readonly startTimeoutMs: number
+  private readonly transportTimeoutMs: number
+  private readonly readyTimeoutMs: number
+  private readonly readyPollMs: number
   private readonly memoryLimit: string | undefined
   private readonly cpuLimit: number | undefined
   private readonly tenants = new Map<string, TenantRuntime>()
@@ -151,7 +240,8 @@ export class DockerContainerRuntime extends ContainerRuntime {
 
   constructor(ctx: Context, config: Config, runner?: DockerRunner, client?: ToolExecClient) {
     super(ctx)
-    this.runner = runner ?? cliRunner(config.runtime ?? 'docker')
+    this.runtimeName = config.runtime ?? 'docker'
+    this.runner = runner ?? cliRunner(this.runtimeName)
     this.client = client ?? { exec: execToolCommand }
     this.network = config.network ?? 'bridge'
     this.toolExecImage = config.toolExecImage ?? 'dsh-tool-exec:latest'
@@ -161,6 +251,11 @@ export class DockerContainerRuntime extends ContainerRuntime {
     this.usersRoot = config.usersRoot
     this.systemRoot = config.systemRoot
     this.idleTimeoutMs = config.idleTimeoutMs
+    this.cliTimeoutMs = config.cliTimeoutMs ?? DEFAULT_CLI_TIMEOUT_MS
+    this.startTimeoutMs = config.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS
+    this.transportTimeoutMs = config.transportTimeoutMs ?? DEFAULT_TRANSPORT_TIMEOUT_MS
+    this.readyTimeoutMs = config.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS
+    this.readyPollMs = config.readyPollMs ?? DEFAULT_READY_POLL_MS
     this.memoryLimit = config.memoryLimit
     this.cpuLimit = config.cpuLimit
     ctx.effect(() => async () => {
@@ -171,7 +266,7 @@ export class DockerContainerRuntime extends ContainerRuntime {
       for (const result of settled) {
         if (result.status === 'fulfilled') names.add(result.value.name)
       }
-      await Promise.allSettled([...names].map(name => this.runner.run(['rm', '-f', name])))
+      await Promise.allSettled([...names].map(name => this.runCli(['rm', '-f', name])))
     }, 'container-docker teardown')
   }
 
@@ -183,14 +278,21 @@ export class DockerContainerRuntime extends ContainerRuntime {
     const tenant = requireTenant()
     const user = requireUser()
     const key = this.scopeKey(tenant.id, user)
-    const runtime = await this.ensure(key, tenant, user)
+    // The start blocks in the container CLI, so the caller's cancellation is
+    // honored here as well: a cancelled call must not wait out a start it no
+    // longer wants.
+    const runtime = await this.awaitStart(key, tenant, user, opts?.signal)
     this.resetIdle(key)
     const req: ToolExecRequest = { argv: [command, ...args] }
     if (opts?.cwd !== undefined) req.cwd = opts.cwd
     if (opts?.env !== undefined) req.env = { ...opts.env }
     if (opts?.stdin !== undefined) req.stdin = opts.stdin
+    // Caller cancellation and this round trip's own deadline are fused: the
+    // tool-exec server can stop answering, and a request with no deadline never
+    // settles.
+    using transport = deadline(opts?.signal, this.transportTimeoutMs, TRANSPORT_TIMEOUT)
     try {
-      return await this.client.exec(this.toolExecBaseUrl(runtime.port), req, opts?.signal)
+      return await this.client.exec(this.toolExecBaseUrl(runtime.port), req, transport.signal)
     } catch (error: unknown) {
       // A sandbox has no guaranteed lifetime: the host may restart, an operator may
       // remove the container, the subject may be OOM-killed. The cached address is
@@ -201,10 +303,46 @@ export class DockerContainerRuntime extends ContainerRuntime {
       // instead of surfacing an unreachable-container error to the subject.
       if (opts?.signal?.aborted === true) throw error
       this.discard(key)
+      if (timeoutOf(transport.signal, TRANSPORT_TIMEOUT) !== undefined) {
+        // An expired deadline is not a transport failure: the command may still
+        // be running inside the container, so repeating it here would repeat its
+        // side effects. The discard above still leaves the next call on a fresh
+        // sandbox.
+        throw new Error(
+          `container-docker: the tool-exec server of '${runtime.name}' did not answer within ${this.transportTimeoutMs}ms`,
+        )
+      }
       const fresh = await this.ensure(key, tenant, user)
       this.resetIdle(key)
-      return await this.client.exec(this.toolExecBaseUrl(fresh.port), req, opts?.signal)
+      return await this.client.exec(this.toolExecBaseUrl(fresh.port), req, transport.signal)
     }
+  }
+
+  /**
+   * Await the subject's sandbox, honoring the caller's cancellation.
+   *
+   * `ensure`'s promise is shared with every other caller for the same subject, so
+   * cancellation detaches this caller instead of cancelling a start they are
+   * waiting on.
+   *
+   * @param key - the (tenant, user) scope key.
+   * @param tenant - the ambient tenant.
+   * @param user - the ambient user.
+   * @param signal - the caller's cancellation, if any.
+   * @returns the subject's live sandbox.
+   * @throws the caller's abort reason when `signal` is already aborted or aborts first.
+   */
+  private async awaitStart(
+    key: string,
+    tenant: Tenant,
+    user: UserId,
+    signal: AbortSignal | undefined,
+  ): Promise<TenantRuntime> {
+    // An already-cancelled call must not start a container nobody will use.
+    signal?.throwIfAborted()
+    const start = this.ensure(key, tenant, user)
+    if (signal === undefined) return await start
+    return await raceAbort(start, signal)
   }
 
   /** The tool-exec server's address as the harness reaches it. */
@@ -221,12 +359,25 @@ export class DockerContainerRuntime extends ContainerRuntime {
     return `${tenantId}\u0000${user}`
   }
 
+  /**
+   * Resolve the subject's sandbox, starting one on first use.
+   *
+   * The returned promise always settles: `startTimeoutMs` bounds the start and
+   * both settlement paths clear the `starting` entry. A pending entry left behind
+   * would hand every later exec on this (tenant, user) the same unsettled
+   * promise.
+   *
+   * @param key - the (tenant, user) scope key.
+   * @param tenant - the ambient tenant.
+   * @param user - the ambient user.
+   * @returns the subject's live sandbox.
+   */
   private ensure(key: string, tenant: Tenant, user: UserId): Promise<TenantRuntime> {
     const existing = this.tenants.get(key)
     if (existing !== undefined) return Promise.resolve(existing)
     const pending = this.starting.get(key)
     if (pending !== undefined) return pending
-    const start = this.startContainer(tenant, user)
+    const start = this.startWithinDeadline(key, tenant, user)
     this.starting.set(key, start)
     start.then(
       (runtime) => {
@@ -240,13 +391,50 @@ export class DockerContainerRuntime extends ContainerRuntime {
     return start
   }
 
-  private async startContainer(tenant: Tenant, user: UserId): Promise<TenantRuntime> {
+  /**
+   * Start one sandbox under `startTimeoutMs`, leaving nothing cached on failure.
+   *
+   * @param key - the (tenant, user) scope key.
+   * @param tenant - the ambient tenant.
+   * @param user - the ambient user.
+   * @returns the started sandbox.
+   * @throws when the start outlives `startTimeoutMs`, or with the start's own failure.
+   */
+  private async startWithinDeadline(key: string, tenant: Tenant, user: UserId): Promise<TenantRuntime> {
+    using d = deadline(undefined, this.startTimeoutMs, START_TIMEOUT)
+    try {
+      return await raceAbort(this.startContainer(tenant, user, d.signal), d.signal)
+    } catch (error: unknown) {
+      // A start that never finished must leave nothing cached for this subject:
+      // the `starting` entry would hand every later exec the same unsettled
+      // promise, and `discard` drops the cached sandbox and its idle timer.
+      this.starting.delete(key)
+      this.discard(key)
+      const timeout = timeoutOf(d.signal, START_TIMEOUT)
+      if (timeout === undefined) throw error
+      // The abandoned `startContainer` keeps running: the aborted signal makes
+      // each of its remaining CLI calls fail immediately, so it settles with no
+      // caller instead of leaving a live start behind.
+      throw new Error(
+        `container-docker: starting '${this.containerName(tenant, user)}' did not finish within ${timeout.timeoutMs}ms`,
+      )
+    }
+  }
+
+  /**
+   * Start one subject's tool-exec container.
+   * @param tenant - the ambient tenant.
+   * @param user - the ambient user.
+   * @param signal - the enclosing start deadline, carried into every CLI call.
+   * @returns the running container's name and published host port.
+   */
+  private async startContainer(tenant: Tenant, user: UserId, signal: AbortSignal): Promise<TenantRuntime> {
     // One stable, (tenant, user)-partitioned name, so at most one execution
     // world exists per subject in a tenant at a time: clear any same-name
     // container a non-graceful host shutdown left behind before starting
     // (docker rm -f is a no-op when absent).
-    const name = `dsh-${tenantPartitionName(tenant.id)}-${userPartitionName(user)}`
-    await this.runner.run(['rm', '-f', name])
+    const name = this.containerName(tenant, user)
+    await this.runCli(['rm', '-f', name], signal)
     const args = [
       'run', '-d', '--name', name, '--network', this.networkFor(tenant),
       // The host gateway is reachable from the container at this name, so a
@@ -286,18 +474,23 @@ export class DockerContainerRuntime extends ContainerRuntime {
       args.push('-v', `${tenant.toolsRoot}:/tools:ro`)
     }
     args.push(this.toolExecImage)
-    const result = await this.runner.run(args)
+    const result = await this.runCli(args, signal)
     if (result.exitCode !== 0) {
       throw new Error(`container-docker: '${name}' failed to start (exit ${result.exitCode}): ${result.stderr}`)
     }
-    const port = await this.readPublishedPort(name)
+    const port = await this.readPublishedPort(name, signal)
     const runtime = { name, port }
-    await this.waitReady(runtime)
+    await this.waitReady(runtime, signal)
     return runtime
   }
 
-  private async readPublishedPort(name: string): Promise<number> {
-    const result = await this.runner.run(['port', name, String(this.toolExecPort)])
+  /** The stable, (tenant, user)-partitioned name of one subject's container. */
+  private containerName(tenant: Tenant, user: UserId): string {
+    return `dsh-${tenantPartitionName(tenant.id)}-${userPartitionName(user)}`
+  }
+
+  private async readPublishedPort(name: string, signal: AbortSignal): Promise<number> {
+    const result = await this.runCli(['port', name, String(this.toolExecPort)], signal)
     if (result.exitCode !== 0) {
       throw new Error(`container-docker: cannot read '${name}' host port (exit ${result.exitCode}): ${result.stderr}`)
     }
@@ -314,20 +507,26 @@ export class DockerContainerRuntime extends ContainerRuntime {
    * before its in-container Node server has bound the published port, so the
    * first exec after a cold start would otherwise race the bind.
    * @param runtime - the running container's name and published host port.
-   * @throws when the server stays unreachable past the readiness timeout.
+   * @param signal - the enclosing start deadline, fused with the readiness budget.
+   * @throws when the server stays unreachable past `readyTimeoutMs`.
    */
-  private async waitReady(runtime: TenantRuntime): Promise<void> {
+  private async waitReady(runtime: TenantRuntime, signal: AbortSignal): Promise<void> {
     const baseUrl = this.toolExecBaseUrl(runtime.port)
-    const deadline = Date.now() + TOOL_EXEC_READY_TIMEOUT_MS
+    using d = deadline(signal, this.readyTimeoutMs, READY_TIMEOUT)
     let lastError: unknown
-    while (Date.now() < deadline) {
+    while (!d.signal.aborted) {
       try {
-        await this.client.exec(baseUrl, { argv: ['sh', '-c', 'true'] })
+        await this.client.exec(baseUrl, { argv: ['sh', '-c', 'true'] }, d.signal)
         return
       } catch (error: unknown) {
         lastError = error
-        await new Promise<void>(resolve => setTimeout(resolve, TOOL_EXEC_READY_POLL_MS))
+        await new Promise<void>(resolve => setTimeout(resolve, this.readyPollMs))
       }
+    }
+    // An enclosing deadline that expired first is the start's own failure, not a
+    // readiness one; naming it here would report two causes for one expiry.
+    if (timeoutOf(d.signal, READY_TIMEOUT) === undefined) {
+      throw new Error(`container-docker: starting '${runtime.name}' stopped before its tool-exec server answered`)
     }
     throw new Error(`container-docker: tool-exec server '${runtime.name}' never answered: ${String(lastError)}`)
   }
@@ -355,7 +554,57 @@ export class DockerContainerRuntime extends ContainerRuntime {
     const runtime = this.tenants.get(key)
     if (runtime === undefined) return
     this.tenants.delete(key)
-    void this.runner.run(['rm', '-f', runtime.name])
+    this.removeContainer(runtime.name)
+  }
+
+  /**
+   * Remove one container by name, bounded by `cliTimeoutMs`. The caller is not
+   * waiting on this: the next start clears the same name before it runs.
+   * @param name - the container's stable name.
+   */
+  private removeContainer(name: string): void {
+    void this.runCli(['rm', '-f', name]).catch(() => {
+      // The container is already gone or unreachable; the next start's clear
+      // covers both, and nothing else can act on this failure.
+    })
+  }
+
+  /**
+   * Run one container CLI command under `cliTimeoutMs`.
+   *
+   * Every CLI call goes through here: `docker`/`podman` block for as long as the
+   * daemon does, and the runner kills its child only when it is handed a signal,
+   * so an unbounded call is an unbounded await.
+   *
+   * @param args - the docker/podman subcommand and arguments.
+   * @param signal - the enclosing start deadline, fused with this call's own.
+   * @returns the command's exit code and captured streams.
+   * @throws when the call outlives `cliTimeoutMs`, or when the enclosing deadline already expired.
+   */
+  private async runCli(args: readonly string[], signal?: AbortSignal): Promise<ContainerCommandResult> {
+    if (signal?.aborted === true) {
+      throw new Error(`container-docker: '${this.runtimeName} ${args.join(' ')}' was not run: its deadline already expired`)
+    }
+    using d = deadline(signal, this.cliTimeoutMs, CLI_TIMEOUT)
+    let result: ContainerCommandResult
+    try {
+      result = await this.runner.run(args, { signal: d.signal })
+    } catch (error: unknown) {
+      if (timeoutOf(d.signal, CLI_TIMEOUT) === undefined) throw error
+      throw this.cliTimeoutError(args)
+    }
+    // The runner reports a killed child as exit code 0 — a signalled process has
+    // no exit code of its own — so a fired deadline is the only evidence that
+    // this call did not finish.
+    if (timeoutOf(d.signal, CLI_TIMEOUT) !== undefined) throw this.cliTimeoutError(args)
+    return result
+  }
+
+  /** The error for one CLI call that outlived its deadline. */
+  private cliTimeoutError(args: readonly string[]): Error {
+    return new Error(
+      `container-docker: '${this.runtimeName} ${args.join(' ')}' did not finish within ${this.cliTimeoutMs}ms`,
+    )
   }
 }
 

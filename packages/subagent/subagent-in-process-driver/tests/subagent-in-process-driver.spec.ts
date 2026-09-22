@@ -378,4 +378,15 @@ describe('startInProcessRun', () => {
     expect(ctx.agents.list()).toHaveLength(beforeAgents)
     expect(ctx.sessions.list()).toHaveLength(beforeSessions)
   })
+  it('settles a run whose child never reaches quiescence, and disposes it', async () => {
+    const { ctx, parent } = await setup(['hang'])
+    const run = await startInProcessRun(request(parent), { settleTimeoutMs: 50 })
+    // The child never finishes on its own, so only the settle deadline can end
+    // this run; without it both the result and dispose() would stay pending.
+    const result = await run.result
+    expect(result.stopReason).toBe('aborted')
+    expect(result.diagnostic).toContain('did not settle within 50ms')
+    await run.dispose()
+    expect(ctx.agents.get(run.id)).toBeUndefined()
+  })
 })

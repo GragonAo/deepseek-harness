@@ -45,8 +45,28 @@ class FakeClient implements ToolExecClient {
   }
 }
 
-function mount(runner: FakeRunner, client: ToolExecClient, config: Config = { runtime: 'docker' }): DockerContainerRuntime {
+function mount(runner: DockerRunner, client: ToolExecClient, config: Config = { runtime: 'docker' }): DockerContainerRuntime {
   return new DockerContainerRuntime(new Context(), config, runner, client)
+}
+
+/**
+ * A runner whose CLI calls never return while `wedged`, modelling a container
+ * daemon that accepted the request and stopped answering. It ignores the signal
+ * a real `docker` child would be killed by, so only the provider's own deadline
+ * can end the wait.
+ */
+class WedgedRunner implements DockerRunner {
+  private readonly inner = new FakeRunner()
+  wedged = true
+  calls = 0
+  starts = 0
+
+  async run(args: readonly string[], opts?: { stdin?: string; signal?: AbortSignal }): Promise<ContainerCommandResult> {
+    this.calls += 1
+    if (this.wedged) return await new Promise<ContainerCommandResult>(() => {})
+    if (args[0] === 'run') this.starts += 1
+    return await this.inner.run(args, opts)
+  }
 }
 
 describe('DockerContainerRuntime', () => {
@@ -253,5 +273,67 @@ describe('DockerContainerRuntime', () => {
     await scoped(tenant('acme'), 'user-1', () => runtime.exec('b', []))
     expect(runner.calls.filter(c => c[0] === 'run')).toHaveLength(2)
     expect(runner.calls.filter(c => c[0] === 'rm' && c[1] === '-f')).toHaveLength(3)
+  })
+  it('bounds one container CLI call that never returns', async () => {
+    const runner: DockerRunner = {
+      // Models the production runner: the deadline kills the CLI child, so the
+      // await settles with the kill instead of hanging.
+      run: (_args, opts) => new Promise((_resolve, reject) => {
+        opts?.signal?.addEventListener('abort', () => { reject(new Error('killed')) }, { once: true })
+      }),
+    }
+    const runtime = mount(runner, new FakeClient(), { runtime: 'docker', cliTimeoutMs: 20, startTimeoutMs: 5_000 })
+    await expect(scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi'])))
+      .rejects.toThrow('did not finish within 20ms')
+  })
+
+  it('fails a start whose CLI never returns, and starts fresh on the next exec', async () => {
+    const runner = new WedgedRunner()
+    const runtime = mount(runner, new FakeClient(), { runtime: 'docker', cliTimeoutMs: 20, startTimeoutMs: 60 })
+    await expect(scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi'])))
+      .rejects.toThrow('did not finish within 60ms')
+    expect(runner.starts).toBe(0)
+    // The failed start left no cached promise: the next exec runs the CLI again
+    // instead of joining the same unsettled start for the rest of the host's life.
+    runner.wedged = false
+    const result = await scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi']))
+    expect(result.exitCode).toBe(0)
+    expect(runner.starts).toBe(1)
+  })
+
+  it('bounds a tool-exec round trip that never answers', async () => {
+    const client: ToolExecClient = {
+      exec: (_baseUrl, req, signal) => req.argv[0] === 'sh'
+        ? Promise.resolve({ exitCode: 0, stdout: '', stderr: '' })
+        // Models `fetch` against a server that took the request and stopped
+        // answering: the request settles only when its signal aborts.
+        : new Promise((_resolve, reject) => {
+          signal?.addEventListener('abort', () => { reject(new Error('The operation was aborted')) }, { once: true })
+        }),
+    }
+    const runtime = mount(new FakeRunner(), client, { runtime: 'docker', transportTimeoutMs: 20 })
+    await expect(scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi'])))
+      .rejects.toThrow('did not answer within 20ms')
+  })
+
+  it('fails an already-aborted call before it starts a container', async () => {
+    const runner = new WedgedRunner()
+    const runtime = mount(runner, new FakeClient(), { runtime: 'docker', startTimeoutMs: 5_000 })
+    const controller = new AbortController()
+    controller.abort()
+    await expect(scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi'], { signal: controller.signal })))
+      .rejects.toThrow('aborted')
+    expect(runner.calls).toBe(0)
+  })
+
+  it('escapes a start that is still pending when the caller aborts', async () => {
+    const runner = new WedgedRunner()
+    const runtime = mount(runner, new FakeClient(), { runtime: 'docker', startTimeoutMs: 5_000 })
+    const controller = new AbortController()
+    const pending = scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi'], { signal: controller.signal }))
+    controller.abort()
+    // The shared start outlives this caller, but the caller does not wait for it.
+    await expect(pending).rejects.toThrow('aborted')
+    expect(runner.starts).toBe(0)
   })
 })

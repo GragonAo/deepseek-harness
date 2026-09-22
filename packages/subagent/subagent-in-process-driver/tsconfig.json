@@ -15,6 +15,9 @@
       "path": "../../../vendor/cordis"
     },
     {
+      "path": "../../../vendor/schemastery"
+    },
+    {
       "path": "../../core/agent"
     },
     {
@@ -31,6 +34,9 @@
     },
     {
       "path": "../../core/tools"
+    },
+    {
+      "path": "../../util/timeout"
     },
     {
       "path": "../../runtime-diagnostics/invariants"

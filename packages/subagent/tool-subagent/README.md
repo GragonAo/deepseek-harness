@@ -26,6 +26,7 @@ A foreground call passes the execution signal through startup and execution, awa
 | `persona` | Per-child persona; requires provider `persona` capability. |
 | `toolFilter` | Per-child global-tool restriction; requires `toolFilter` capability. |
 | `maxDepth` | Absolute delegation-depth cap, default `3` (`0` forbids delegation); a numeric cap requires the `depthLimit` capability and fails the mount without it. `'provider-managed'` sends no cap for an out-of-process provider whose budget belongs to the child harness. The tool stays visible at the cap; each attempted start checks the calling agent's current depth and returns an errored tool result when rejected. |
+| `foregroundTimeoutMs` | Deadline on one foreground call. Declaring it is what makes [`guard/timeout-policy`](../../guard/timeout-policy) install a tool timeout; omitting it leaves a call the model waits on with no bound of its own. Background runs are unaffected — the model never waits on them. |
 
 ## Concurrency
 
