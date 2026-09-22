@@ -138,6 +138,43 @@ describe('DockerContainerRuntime', () => {
     expect(runCall).not.toContain('/global')
   })
 
+  it('replaces a sandbox whose exec fails and retries the request once', async () => {
+    const runner = new FakeRunner()
+    let failed = false
+    const client: ToolExecClient = {
+      async exec(_baseUrl: string, req: ToolExecRequest): Promise<ToolExecResult> {
+        if (req.argv[0] === 'echo' && !failed) {
+          failed = true
+          throw new TypeError('fetch failed')
+        }
+        return { exitCode: 0, stdout: 'ok', stderr: '' }
+      },
+    }
+    const runtime = mount(runner, client)
+    const result = await scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi']))
+    expect(result.stdout).toBe('ok')
+    expect(runner.calls.filter(c => c[0] === 'run')).toHaveLength(2)
+    expect(runner.calls.some(c => c[0] === 'rm' && c[1] === '-f')).toBe(true)
+  })
+
+  it('does not replace the sandbox when the caller aborted the exec', async () => {
+    const runner = new FakeRunner()
+    const controller = new AbortController()
+    const client: ToolExecClient = {
+      async exec(_baseUrl: string, req: ToolExecRequest): Promise<ToolExecResult> {
+        if (req.argv[0] === 'echo') {
+          controller.abort()
+          throw new TypeError('fetch failed')
+        }
+        return { exitCode: 0, stdout: 'ok', stderr: '' }
+      },
+    }
+    const runtime = mount(runner, client)
+    await expect(scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi'], { signal: controller.signal })))
+      .rejects.toThrow('fetch failed')
+    expect(runner.calls.filter(c => c[0] === 'run')).toHaveLength(1)
+  })
+
   it('omits the system skill mount when no systemRoot is configured', async () => {
     const runner = new FakeRunner()
     const runtime = mount(runner, new FakeClient())

@@ -189,7 +189,22 @@ export class DockerContainerRuntime extends ContainerRuntime {
     if (opts?.cwd !== undefined) req.cwd = opts.cwd
     if (opts?.env !== undefined) req.env = { ...opts.env }
     if (opts?.stdin !== undefined) req.stdin = opts.stdin
-    return this.client.exec(this.toolExecBaseUrl(runtime.port), req, opts?.signal)
+    try {
+      return await this.client.exec(this.toolExecBaseUrl(runtime.port), req, opts?.signal)
+    } catch (error: unknown) {
+      // A sandbox has no guaranteed lifetime: the host may restart, an operator may
+      // remove the container, the subject may be OOM-killed. The cached address is
+      // then dead and every later call fails the same way until the host restarts.
+      // `client.exec` rejects only on a transport or protocol failure — a command's
+      // own exit status travels in the result — so a rejection means the sandbox may
+      // be gone. Discard it and run the same request once against a fresh sandbox
+      // instead of surfacing an unreachable-container error to the subject.
+      if (opts?.signal?.aborted === true) throw error
+      this.discard(key)
+      const fresh = await this.ensure(key, tenant, user)
+      this.resetIdle(key)
+      return await this.client.exec(this.toolExecBaseUrl(fresh.port), req, opts?.signal)
+    }
   }
 
   /** The tool-exec server's address as the harness reaches it. */
@@ -316,11 +331,17 @@ export class DockerContainerRuntime extends ContainerRuntime {
     if (this.idleTimeoutMs === undefined) return
     const previous = this.idleTimers.get(key)
     if (previous !== undefined) clearTimeout(previous)
-    const timer = setTimeout(() => { this.reap(key) }, this.idleTimeoutMs)
+    const timer = setTimeout(() => { this.discard(key) }, this.idleTimeoutMs)
     this.idleTimers.set(key, timer)
   }
 
-  private reap(key: string): void {
+  /**
+   * Drop the cached sandbox for a subject and remove its container. Idleness and a
+   * failed exec both reach here: the next `ensure` starts a replacement.
+   *
+   * @param key - the (tenant, user) scope key whose sandbox is being discarded.
+   */
+  private discard(key: string): void {
     const timer = this.idleTimers.get(key)
     if (timer !== undefined) {
       clearTimeout(timer)
