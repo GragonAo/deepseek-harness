@@ -77,6 +77,9 @@ describe('DockerContainerRuntime', () => {
     expect(runCall).toContain('/users/user-1:/global')
     expect(runCall).toContain('/tools/acme:/tools:ro')
     expect(runCall).toContain('/opt/.dsh/system:/opt/.dsh/system:ro')
+    // The case-shared skill tier's own directory must resolve in the sandbox: a skill
+    // body resolves relative paths against that base directory.
+    expect(runCall).toContain('/workspace/acme/shared/skills:/workspace/acme/shared/skills:ro')
     expect(runCall).toContain('dsh-tool-exec:latest')
     expect(runCall).not.toContain('tail')
     const name = runCall?.[runCall?.indexOf('--name') + 1]

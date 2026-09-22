@@ -266,6 +266,12 @@ export class DockerContainerRuntime extends ContainerRuntime {
     args.push(
       '-v', `${tenant.workspaceRoot}/users/${user}:/workspace`,
       '-v', `${tenant.workspaceRoot}/shared:/shared`,
+      // The case-shared skill tier reports its own host directory as a skill's base
+      // directory, and a skill body tells the model to resolve relative paths against
+      // it. That path must therefore resolve inside the sandbox too. The same tree is
+      // already writable at /shared, so this read-only view adds reachability without
+      // adding authority.
+      '-v', `${tenant.workspaceRoot}/shared/skills:${tenant.workspaceRoot}/shared/skills:ro`,
     )
     if (this.usersRoot !== undefined) {
       args.push('-v', `${this.usersRoot}/${user}:/global`)
@@ -273,8 +279,7 @@ export class DockerContainerRuntime extends ContainerRuntime {
     if (this.systemRoot !== undefined) {
       // Read-only at its own absolute path: skill bodies reach the model through the
       // host-side skill provider, but the companion files they cite are readable only
-      // through the sandbox, which mounts nothing of the host beyond /workspace,
-      // /shared and /global.
+      // through the sandbox.
       args.push('-v', `${this.systemRoot}:${this.systemRoot}:ro`)
     }
     if (tenant.toolsRoot !== undefined) {
