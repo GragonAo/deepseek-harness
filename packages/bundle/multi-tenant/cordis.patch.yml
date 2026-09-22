@@ -207,3 +207,10 @@
 
     - id: agent-http
       name: '@deepseek-ai/dsh-agent-http'
+# --- 提问必须有上界：本 profile 构造上没有交互客户端（纯 API、无浏览器） ---
+# 没有回答者时 ask() 会一直挂着，回合永不闭合；进程一旦退出日志被撕开，
+# 下次冷加载被恢复成静默的 interrupted 回合，用户的工作全部丢失且没有任何提示。
+# 钉一个有界期限，让它变成工具返回失败结果、agent 带着假设继续走。
+- id: user-questions
+  config:
+    answerTimeoutMs: 120000

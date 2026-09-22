@@ -36,7 +36,26 @@ describe('UserQuestionService', () => {
     const result = await ctx.userQuestions.ask({ questions: [{ id: 'confirm', question: 'Proceed?' }] })
 
     expect(result).toEqual({ answers: [{ id: 'confirm', selected: ['yes'] }] })
-    expect(p.seen).toEqual([{ questions: [{ id: 'confirm', question: 'Proceed?' }] }])
+    expect(p.seen).toHaveLength(1)
+    expect(p.seen[0]?.questions).toEqual([{ id: 'confirm', question: 'Proceed?' }])
+    expect(p.seen[0]?.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('rejects with NO_ANSWER when the provider never answers, releasing it through its signal', async () => {
+    const ctx = new Context()
+    await ctx.plugin(UserQuestionService, { answerTimeoutMs: 20 })
+    const seen: AskUserQuestionRequest[] = []
+    ctx.userQuestions.registerProvider({
+      async ask(request) {
+        seen.push(request)
+        return await new Promise<never>(() => {})
+      },
+    })
+
+    await expect(ctx.userQuestions.ask({ questions: [{ id: 'confirm', question: 'Proceed?' }] }))
+      .rejects.toMatchObject({ code: 'NO_ANSWER' })
+    expect(seen).toHaveLength(1)
+    expect(seen[0]?.signal?.aborted).toBe(true)
   })
 
   it('rejects ask requests when no provider is registered', async () => {

@@ -195,7 +195,7 @@ describe('ask_user_question tool', () => {
     }])
   })
 
-  it('passes the tool abort signal to the user-questions request', async () => {
+  it('forwards the tool abort to the signal the provider observes', async () => {
     const ctx = await setup()
     const seen: AskUserQuestionRequest[] = []
     ctx.userQuestions.registerProvider({
@@ -213,7 +213,9 @@ describe('ask_user_question tool', () => {
       signal: controller.signal,
     })
 
-    expect(seen[0]?.signal).toBe(controller.signal)
+    expect(seen[0]?.signal?.aborted).toBe(false)
+    controller.abort()
+    expect(seen[0]?.signal?.aborted).toBe(true)
   })
 
   it('passes optional header and a resumed runtime root through to the user-questions request', async () => {

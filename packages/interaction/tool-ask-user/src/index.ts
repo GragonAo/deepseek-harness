@@ -8,13 +8,37 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import '@deepseek-ai/dsh-user-questions'
+import { UserQuestionError } from '@deepseek-ai/dsh-user-questions'
 
 export const name = 'tool-ask-user'
 export const inject = ['tools', 'userQuestions']
 
 const description = 'Ask the user a concise question when you need confirmation, a choice, or missing information before proceeding. '
   + 'Send one or more questions, each with a stable id that will be echoed in the answer.'
+
+/**
+ * Rewrite an unanswerable question into guidance the agent can act on.
+ *
+ * The bare seam errors name plumbing — "no user-questions provider is
+ * registered", "no answer arrived within 120000ms" — which tells a model nothing
+ * about what to do next and invites it to retry a call that cannot succeed. Both
+ * cases mean the same thing to the caller: nobody can answer here, so the agent
+ * must decide and say what it assumed. Caller cancellations pass through
+ * untouched: an abort is a deliberate stop, not an unavailable answerer.
+ *
+ * @param error - the error raised by the user-questions seam.
+ * @returns The error to surface, unchanged unless the answerer was unavailable.
+ */
+function answererUnavailable(error: unknown): unknown {
+  if (!(error instanceof UserQuestionError)) return error
+  if (error.code !== 'NO_PROVIDER' && error.code !== 'NO_ANSWER') return error
+  return new UserQuestionError(
+    'Nobody can answer a question in this session. Do not call ask_user_question again: proceed with your '
+    + 'best judgement, state the assumption you made explicitly in your reply, and name the decision the '
+    + 'user should confirm.',
+    error.code,
+    { cause: error })
+}
 
 export function apply(ctx: Context): void {
   ctx.tools.register(defineTool({
@@ -88,7 +112,7 @@ export function apply(ctx: Context): void {
         })),
         ...exec.agent !== undefined ? { agent: exec.agent } : {},
         signal: exec.signal,
-      })
+      }).catch((error: unknown) => { throw answererUnavailable(error) })
       return {
         answers: result.answers.map(answer => ({
           id: answer.id,

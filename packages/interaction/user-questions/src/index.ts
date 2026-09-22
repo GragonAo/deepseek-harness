@@ -8,6 +8,7 @@
  */
 
 import { Context, Service } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
 
@@ -39,6 +40,20 @@ export interface UserQuestionProvider {
   ask(request: AskUserQuestionRequest): Promise<AskUserQuestionAnswer>
 }
 
+/**
+ * Service configuration.
+ *
+ * The answer deadline is deployment-varying rather than fixed: an interactive UI
+ * whose human may step away needs minutes, while a headless API deployment that
+ * has no reachable answerer at all should fail fast and let the agent proceed.
+ */
+export interface Config {
+  /** Milliseconds an unanswered question may stay pending before `ask()` rejects. */
+  answerTimeoutMs?: number
+}
+
+const DEFAULT_ANSWER_TIMEOUT_MS = 600_000
+
 /** Stable error taxonomy for user-questions failures. */
 export class UserQuestionError extends HarnessError {
   constructor(message: string, code: string, options?: ErrorOptions) {
@@ -49,10 +64,16 @@ export class UserQuestionError extends HarnessError {
 
 /** `ctx.userQuestions`: one active UI provider plus an `ask()` API. */
 export class UserQuestionService extends Service {
-  private provider: UserQuestionProvider | undefined
+  static Config: z<Config> = z.object({
+    answerTimeoutMs: z.natural().min(1).default(DEFAULT_ANSWER_TIMEOUT_MS),
+  })
 
-  constructor(ctx: Context) {
+  private provider: UserQuestionProvider | undefined
+  private readonly answerTimeoutMs: number
+
+  constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'userQuestions')
+    this.answerTimeoutMs = config.answerTimeoutMs ?? DEFAULT_ANSWER_TIMEOUT_MS
   }
 
   /**
@@ -136,7 +157,51 @@ export class UserQuestionService extends Service {
     if (this.provider === undefined) {
       throw new UserQuestionError('no user-questions provider is registered', 'NO_PROVIDER')
     }
-    return this.provider.ask(request)
+    return await this.askBounded(this.provider, request)
+  }
+
+  /**
+   * Ask the provider under the configured deadline.
+   *
+   * A provider whose answerer never arrives — no connected client, an unreachable
+   * UI — would otherwise leave the call pending forever, holding the tool call and
+   * with it the whole turn open. Nothing then closes that turn: the loop writes no
+   * `turn/end`, so a later process exit tears the log and the persistence layer
+   * repairs it into a silent `interrupted` turn, discarding the work and telling
+   * nobody why. Reaching the deadline releases the provider through its own abort
+   * signal and rejects `NO_ANSWER`, which the tool turns into a failure result the
+   * agent can act on.
+   *
+   * @param provider - the registered provider to ask.
+   * @param request - the caller's questions, agent, and signal.
+   * @returns The answer chosen or typed by the human.
+   * @throws {UserQuestionError} code `NO_ANSWER` when the deadline passes first.
+   */
+  private async askBounded(
+    provider: UserQuestionProvider,
+    request: AskUserQuestionRequest,
+  ): Promise<AskUserQuestionAnswer> {
+    const controller = new AbortController()
+    const timer = setTimeout(() => { controller.abort() }, this.answerTimeoutMs)
+    timer.unref?.()
+    const signal = request.signal === undefined
+      ? controller.signal
+      : AbortSignal.any([request.signal, controller.signal])
+    try {
+      const pending = provider.ask({ ...request, signal })
+      // The race settles on whichever comes first; the losing promise may still
+      // reject afterwards, and an unobserved rejection would crash the process.
+      void pending.catch(() => {})
+      const expired = new Promise<never>((_resolve, reject) => {
+        controller.signal.addEventListener('abort', () => {
+          reject(new UserQuestionError(
+            `no answer arrived within ${String(this.answerTimeoutMs)}ms`, 'NO_ANSWER'))
+        }, { once: true })
+      })
+      return await Promise.race([pending, expired])
+    } finally {
+      clearTimeout(timer)
+    }
   }
 }
 
