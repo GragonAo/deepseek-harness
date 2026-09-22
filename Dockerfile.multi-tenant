@@ -1,0 +1,65 @@
+# Multi-tenant host image: Node 22 plus the repository build output (\`pnpm run build\`
+# emits \`lib/types\` through tsc and bundles the runtime through tsdown).
+#
+# Everything resolves at build time — base images, the pnpm store, the build itself,
+# and the docker CLI the container-runtime plugin shells out to for tenant sandboxes.
+# The running container downloads nothing: compose starts this image and bind-mounts
+# the deployment directory.
+#
+# Build from the repository root (no `# syntax=` directive: it would pull the
+# frontend image from Docker Hub, which unreachable build networks reject):
+#   docker build -f Dockerfile.multi-tenant -t dsh-multi-tenant:latest .
+# Or build every image this deployment runs at once: \`docker/build-images.sh\`.
+#
+# The image carries source and build output only. Deployment differences — the
+# profile under \`$DSH_HOME\`, tenant workspaces, credentials, and the deploy patches
+# under \`/opt/dsh-deploy\` — stay outside it: compose mounts them and the entrypoint
+# replays the patches on every start. Rebuilding the image is the upgrade step after
+# an upstream sync.
+
+ARG NODE_IMAGE=node:22-bookworm
+ARG DOCKER_CLI_IMAGE=docker:27-cli
+
+# The container-runtime plugin spawns \`docker\` for every tenant sandbox, so the CLI
+# belongs in the image; the socket arrives as a bind mount at run time.
+FROM ${DOCKER_CLI_IMAGE} AS dockercli
+
+# The full \`node:22-bookworm\` (not \`-slim\`) already ships bash, python3, git and the
+# C++ toolchain that install and build need, and needs no apt — which matters where
+# the Debian mirrors are unreachable from a build.
+FROM ${NODE_IMAGE} AS build
+ARG NPM_REGISTRY=https://registry.npmjs.org
+# `pnpm run build` records the source commit through git; the context excludes .git,
+# so the build script passes the checkout's HEAD here instead (the supported
+# non-Git build environment input). The image then still records its real source.
+ARG DSH_COMMIT=0000000
+ENV COREPACK_NPM_REGISTRY=$NPM_REGISTRY
+ENV DSH_CLIENT_COMMIT_HASH=$DSH_COMMIT
+ENV PNPM_HOME=/pnpm
+ENV PATH=/pnpm:$PATH
+RUN corepack enable
+WORKDIR /src
+COPY . .
+RUN pnpm config set registry "$NPM_REGISTRY" \
+ && pnpm install --frozen-lockfile
+RUN pnpm run build
+
+FROM ${NODE_IMAGE}
+# The tree sits at the deployment's own checkout path. A profile under $DSH_HOME
+# resolves its plugins through $DSH_HOME/profiles/node_modules, whose entries point at
+# <checkout>/apps/cli/node_modules; keeping the same path inside the image lets one
+# $DSH_HOME serve both this container and a bare source run.
+WORKDIR /root/work/deepseek-harness
+COPY --from=build /src /root/work/deepseek-harness
+COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker
+COPY docker/entrypoint.multi-tenant.sh /usr/local/bin/dsh-entrypoint
+RUN chmod +x /usr/local/bin/dsh-entrypoint
+ENV DSH_HOME=/root/.dsh \
+    DSH_REPO=/root/work/deepseek-harness \
+    DSH_DEPLOY_DIR=/opt/dsh-deploy \
+    NODE_ENV=production
+EXPOSE 8787
+HEALTHCHECK --interval=15s --timeout=5s --start-period=120s --retries=10 \
+  CMD node -e "fetch('http://127.0.0.1:8787/openapi.json').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+ENTRYPOINT ["/usr/local/bin/dsh-entrypoint"]
+CMD ["--profile", "multi-tenant"]

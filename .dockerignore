@@ -1,0 +1,16 @@
+# Shared build context root for Dockerfile.multi-tenant and the tool-exec image
+# (packages/tenant/container-docker/docker/Dockerfile).
+#
+# Every workspace member (vendor/, packages/, native/, apps/, website, examples/)
+# stays in: pnpm install --frozen-lockfile resolves each one, so excluding any of
+# them breaks the install. Only VCS metadata, installed dependencies, build
+# output, and documentation leave the context.
+.git
+**/node_modules
+**/lib
+**/dist
+**/coverage
+**/*.log
+.agents
+docs
+.DS_Store
