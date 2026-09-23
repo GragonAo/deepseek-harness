@@ -25,3 +25,39 @@ None directly; each inserted row's package owns its effect.
 - **The two carriers are mutually exclusive** — a profile must not also mount `dsh-client-connection`, or `agent-http` and `connection` both register the `/api` prefix and fail the load on a duplicate route.
 - **Message feedback and the session-projection cache are disabled** — both bootstrap by preloading their storage domain at init, but the tenant-keyed Postgres backend has no ambient tenant outside a request, so that preload throws `NO_TENANT_IN_SCOPE`. Re-enabling either needs a tenant-scoped (per-request) preload.
 - **Tenant provisioning stays in the deployment layer** — the `tenant` row boots with zero records; the profile's patch must supply `Config.tenants`.
+
+## Adding a mounted extension
+
+Business integration is not a harness capability. A plugin that speaks one deployment's case platform, ticketing system, or internal API belongs to that deployment, so it does not ship in `packages/`; it ships as a **mounted extension** — a directory the deployment owns — and changing it is a file replacement rather than an image rebuild. The only harness capability it leans on is the Loader's ordinary path resolution.
+
+Four steps, each verified against this deployment:
+
+1. **Put the directory inside the profile.** `$DSH_HOME/profiles/multi-tenant/plugins/<name>/`, holding the entry file, a `package.json`, and whatever else it needs. The location is load-bearing: a mounted plugin that imports harness packages resolves them through Node's upward `node_modules` walk, and the launcher maintains `$DSH_HOME/profiles/node_modules` as the flat fallback. Measured on this host: an entry under `$DSH_HOME/profiles/multi-tenant/plugins/` resolves `@deepseek-ai/dsh-tools`; the same file under `$DSH_HOME/plugins/` fails with `ERR_MODULE_NOT_FOUND`.
+
+2. **Register it with a path specifier relative to the profile directory**, inside an `insert:` block in the profile's `cordis.patch.yml`:
+
+```yaml
+- insert:
+    - id: tool-sync-file
+      name: './plugins/tool-sync-file/index.mjs'
+      config:
+        serverUrl: http://127.0.0.1:18081
+```
+
+The Loader's `baseUrl` is the profile directory, so a `.`-prefixed specifier resolves against it. The `insert:` wrapper is required: a top-level `- id:` entry in a patch layer *patches an existing row*, so a new plugin written that way is not mounted and the boot prints `patch: entry "<id>" not found` — the process still starts, which makes an unmounted extension easy to miss.
+
+3. **Confirm it loaded.** Have the extension print one line from `apply()` and read it back:
+
+```sh
+docker logs dsh-multi-tenant | grep '\[tool-sync-file\]'
+```
+
+`dsh --profile multi-tenant --dump-config` prints the composed tree, which distinguishes a row that composed from a module that actually mounted.
+
+4. **Keep its tests with it.** A mounted extension sits outside the repository test suite by construction, so it carries its own runnable check and the deployment runs it in place:
+
+```sh
+docker exec dsh-multi-tenant node /opt/.dsh/profiles/multi-tenant/plugins/tool-sync-file/tests/selftest.mjs
+```
+
+`tool-sync-file` is the worked example: it registers `sync_file_report` and `sync_file_skill` against the jeecg case platform, takes its address from the row's `config.serverUrl`, and takes the case and user from the session rather than from tool arguments. Its directory carries `README.md` (mount, config, troubleshooting) and `tests/selftest.mjs`.

@@ -14,9 +14,21 @@ Status: implemented
 
 案件平台的坐标是**可挂载 patch 层里的配置**。没有任何包携带地址。
 
-### 同步工具是一个挂载式插件
+### 同步工具是一个挂载扩展
 
-一个由部署挂载的插件目录在 jeecg-boot 后端之上注册两个模型可见的工具。它在 profile patch 里以 `local:report-sync` 被指名，`@deepseek-ai/dsh-plugin-roots` 把这个引用解析成挂载目录（[挂载式插件根目录](2026-09-23-mounted-plugin-roots.md)）。新增或更新一个工具，就是丢一个文件加一行配置，不需要重建镜像 —— 这正是它不做成发布包的全部理由：
+业务对接不是 harness 的能力。一个只面向某个部署的案件平台的插件属于那个部署，所以它住在部署方自己持有的目录里，而不是 `packages/`；新增或更新一个工具，就是丢一个文件加一行配置，不需要重建镜像。
+
+目录放在 profile **里面**（`$DSH_HOME/profiles/multi-tenant/plugins/tool-sync-file/`），因为挂载插件 `import` harness 包时走 Node 逐级向上的 `node_modules` 查找，只有从 profile 里面出发才会走到启动器维护的 `$DSH_HOME/profiles/node_modules` 兜底目录。profile patch 用相对 profile 目录（也就是 Loader 的 `baseUrl`）的路径 specifier 指名它，并且必须写在 `insert:` 块里 —— patch 层顶层的 `- id:` 是覆盖已有行，不是新增：
+
+```yaml
+- insert:
+    - id: tool-sync-file
+      name: './plugins/tool-sync-file/index.mjs'
+      config:
+        serverUrl: http://127.0.0.1:18081
+```
+
+它在 jeecg-boot 后端之上注册两个模型可见的工具：
 
 - `sync_file_report` 登记沙箱已经产出的报告，把 `userId`、`caseId`、`fileName` 以及可选的 `template` / `caseName` 以表单形式 POST 到 `<serverUrl>/jeecg-boot/report/upload`，返回平台报告 id，即 jeecg `Result` 信封的 `result` 字符串。平台按案件 id 加文件名在案件卷里定位文件，因此 `file_name` 是文件名而不是路径。
 - `sync_file_skill` 通过 `ctx.fs` 读取技战法包（因此路径就是调用方沙箱看到的路径），并以 multipart 表单携带 `typeId`、`userId` POST 到 `<serverUrl>/jeecg-boot/jzf/user/import`。

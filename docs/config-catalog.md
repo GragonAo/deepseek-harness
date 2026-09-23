@@ -1703,24 +1703,6 @@ export interface PlanModeConfig {
 
 Source: [`packages/plan/plan-mode/src/index.ts:71`](../packages/plan/plan-mode/src/index.ts)
 
-<a id="deepseek-aidsh-plugin-roots"></a>
-
-## `@deepseek-ai/dsh-plugin-roots`
-
-```ts config-catalog
-/** Mounted plugin roots configuration. */
-export interface Config {
-  /**
-   * Absolute directories searched, in order, for a mounted plugin reference.
-   * Empty (the default) resolves no reference: loading executable code from a
-   * directory is a trust decision only the deployment can make.
-   */
-  roots?: string[]
-}
-```
-
-Source: [`packages/boot/plugin-roots/src/index.ts:28`](../packages/boot/plugin-roots/src/index.ts)
-
 <a id="deepseek-aidsh-pwsh-local"></a>
 
 ## `@deepseek-ai/dsh-pwsh-local`

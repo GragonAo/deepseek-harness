@@ -25,3 +25,39 @@
 - **两个载体互斥** —— profile 不得同时挂载 `dsh-client-connection`，否则 `agent-http` 与 `connection` 都会注册 `/api` 前缀，并在重复路由上加载失败。
 - **消息反馈与会话投影缓存被禁用** —— 两者都在 init 时预载各自的存储域，而租户级 Postgres 后端在请求之外没有环境租户，该预载会抛 `NO_TENANT_IN_SCOPE`。重新启用任一个都需要租户作用域（按请求）的预载。
 - **租户开通留在部署层** —— `tenant` 行以零记录启动；profile 的 patch 必须提供 `Config.tenants`。
+
+## 怎么加一个挂载扩展
+
+业务对接不是 harness 的能力。一个只面向某个部署的案件平台、工单系统或内部 API 的插件属于那个部署，所以它不进 `packages/`；它以**挂载扩展**的形式发布 —— 一个部署方自己持有的目录 —— 改它就是换文件，而不是重建镜像。它依赖的 harness 能力只有 Loader 本来就有的路径解析。
+
+四步，每一步都在本部署上实测过：
+
+1. **把目录放进 profile 里面。** `$DSH_HOME/profiles/multi-tenant/plugins/<name>/`，里面放入口文件、`package.json` 和它需要的东西。位置是关键：挂载插件 `import` harness 包时，Node 从它自己的目录逐级向上找 `node_modules`，而启动器维护的 `$DSH_HOME/profiles/node_modules` 就是那个兜底目录。在本机实测：入口放在 `$DSH_HOME/profiles/multi-tenant/plugins/` 下能解析到 `@deepseek-ai/dsh-tools`；同一个文件放在 `$DSH_HOME/plugins/` 下会 `ERR_MODULE_NOT_FOUND`。
+
+2. **用相对 profile 目录的路径 specifier 注册**，写在 profile 的 `cordis.patch.yml` 里的 `insert:` 块中：
+
+```yaml
+- insert:
+    - id: tool-sync-file
+      name: './plugins/tool-sync-file/index.mjs'
+      config:
+        serverUrl: http://127.0.0.1:18081
+```
+
+Loader 的 `baseUrl` 就是 profile 目录，所以 `.` 开头的 specifier 按它解析。`insert:` 这层包裹是必需的：patch 层里顶层的 `- id:` 是**覆盖已有行**，这样写的新插件不会被挂上，启动时会打印 `patch: entry "<id>" not found` —— 进程照常起来，所以没挂上的扩展很容易被忽略。
+
+3. **确认它加载了。** 让扩展在 `apply()` 里打印一行，然后读回来：
+
+```sh
+docker logs dsh-multi-tenant | grep '\[tool-sync-file\]'
+```
+
+`dsh --profile multi-tenant --dump-config` 会打印合成后的树，用它可以区分「行合成了」和「模块真的挂上了」。
+
+4. **测试跟着扩展走。** 挂载扩展按构造就在仓库测试套件之外，所以它自带一个可执行的检查，由部署就地运行：
+
+```sh
+docker exec dsh-multi-tenant node /opt/.dsh/profiles/multi-tenant/plugins/tool-sync-file/tests/selftest.mjs
+```
+
+`tool-sync-file` 就是现成的例子：它对着 jeecg 案件平台注册 `sync_file_report` 和 `sync_file_skill`，地址取自该行的 `config.serverUrl`，案件与用户取自会话而不是工具参数。它的目录里带 `README.md`（挂载、配置、排错）和 `tests/selftest.mjs`。

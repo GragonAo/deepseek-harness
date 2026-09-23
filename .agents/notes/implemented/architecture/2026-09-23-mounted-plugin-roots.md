@@ -1,4 +1,4 @@
-# Agent Note: Mounted plugin roots
+# Agent Note: Mounted plugin roots are not a capability
 
 Status: implemented
 
@@ -6,36 +6,40 @@ English | [中文](2026-09-23-mounted-plugin-roots.zh.md)
 
 ## Problem
 
-A deployment that needs one more tool had to ship a new image: every plugin was an npm package the image installed, and a cordis row could only name one by bare specifier. The case-platform sync tools are a deployment artifact, not a product surface — they address one backend at one address, and the operator who needs them cannot rebuild the harness.
+A deployment needs to add a plugin that speaks its own business system without rebuilding the harness image. Every plugin was an npm package the image installed, and a cordis row could name one only by bare specifier, so a deployment had no way to point a row at code it owns.
 
-The Loader could already import an absolute path (`packages/boot/app-boot/src/index.ts` converts an absolute row name with `pathToFileURL`), and `scripts/verify-cordis-config.ts` exempts path specifiers from the resolver-manifest dependency gate. What was missing was a way to name a mounted plugin without an absolute path per row, and a load-time failure when the deployment's paths are wrong.
+Two mechanisms could close that: a new capability mapping a short name onto a configured directory, or the Loader's existing path specifiers, which already resolve a `.`-prefixed row against `baseUrl`.
 
 ## Decision
 
-`@deepseek-ai/dsh-plugin-roots` publishes a `pluginRoots` service built from a validated `Config.roots` list, and the root Include entry resolves a `local:` row through it.
+Mounted plugins are registered with path specifiers. No capability was added.
 
-The `local:` prefix is what separates the two specifier families. A bare name is always an installed package; a `local:` name is always a mounted directory. Nothing has to decide precedence between them, and a mounted plugin may take an installed package's name without ambiguity — the same deployment can mount a patched `@deepseek-ai/dsh-tools` directory and reach it as `local:@deepseek-ai/dsh-tools`.
+`mountRootInclude` sets the Loader's `baseUrl` to the configuration file's directory, and `Tree.import` resolves a `.`-prefixed specifier against it, so a deployment writes a relative row and the plugin resolves beside the config rather than beside the process working directory:
 
-The roots default to an empty list, and every configured root is validated when the row mounts. Loading a mounted directory runs its code, so the trust decision is the operator's to write down, explicitly, once per deployment; there is no directory scanning, no convention-based discovery, and no fallback to a package name.
+```yaml
+- insert:
+    - id: tool-sync-file
+      name: './plugins/tool-sync-file/index.mjs'
+```
 
-A `local:` row with no roots service mounted above it fails with the instruction to add the row, rather than resolving against nothing.
+The plugin directory lives under the deployment's profile (`$DSH_HOME/profiles/<profile>/plugins/<name>/`) because a mounted plugin that imports harness packages resolves them through Node's upward `node_modules` walk, which reaches the launcher-maintained `$DSH_HOME/profiles/node_modules` fallback only from inside the profile. Measured on the deployment host: an entry under the profile's `plugins/` resolves `@deepseek-ai/dsh-tools`; the same file under `$DSH_HOME/plugins/` fails with `ERR_MODULE_NOT_FOUND`.
+
+`packages/boot/app-boot/tests/mounted-plugins.spec.ts` guards it: a real composition whose root config carries a relative row mounts the plugin and its tool registers, the row resolves beside the configuration file rather than the working directory, and a row naming a directory or a missing file fails the boot with the path.
 
 ## Alternatives considered
 
-**Make the sync tools a published package.** Rejected by the operator's own constraint: every tool change would then need an image rebuild, and the address would have to reach a package the image ships rather than a file the deployment edits.
+**A `plugin-roots` capability with a `local:` prefix and a configured root list.** Built, covered by 18 cases, then removed. It worked, but the path specifier already covers the case with no new surface: the capability added a service, a specifier namespace, a root-resolution algorithm, and a package with its own README, invariant companion, and tests, all to produce a string that `new URL(name, baseUrl)` produces on its own. A mechanism with no consumer is a maintenance cost, and every abstraction is required to have a current one.
 
-**Resolve a bare name against the roots before npm resolution.** Rejected: the precedence is invisible in the row, and the same name would mean different things in different deployments. The prefix makes the choice part of the name.
+Its one real advantage was brevity: `local:report-sync` is shorter than `./plugins/report-sync/index.mjs`, and it cannot collide with an installed package name because a bare name can never begin with `local:`. The relative path keeps the same guarantee by construction — a bare specifier is never a path — at the cost of spelling out the entry file.
 
-**Scan a well-known directory automatically.** Rejected: an implicit scan makes an untrusted directory executable by placement alone, and a dropped file would become running code with no configuration change to review.
+**Resolve a bare name against a mounted directory before npm resolution.** Rejected: the precedence is invisible in the row, and the same name would mean different things in different deployments.
 
-**Skip an unresolvable reference and boot the rest.** Rejected: a silently absent tool is indistinguishable from a working one until the model calls it, which is exactly the failure an operator cannot debug.
-
-**Put the roots list on the root Include entry's config.** Rejected: the root include is app glue created before any patch layer applies, so no mounted config file can reach it — the operator's own `cordis.patch.yml` is applied by the tree it configures.
+**Scan a well-known directory automatically.** Rejected: an implicit scan makes an untrusted directory executable by placement alone.
 
 ## Consequences
 
-A mounted plugin that imports harness packages needs those packages resolvable from its own directory. A root under `$DSH_HOME/profiles/<name>/` gets them from the launcher-maintained `$DSH_HOME/profiles/node_modules` fallback; any other root needs its own `node_modules`, and the failure is a module-resolution error naming the missing package.
+A deployment that mounts a plugin states its entry file path in full, and the row's meaning depends on the configuration file's own directory: moving the config moves the plugin's resolution with it.
 
-The resolver reads the directory at load time, so replacing a mounted plugin's files takes a restart or an HMR reload rather than a config edit.
+The `.`-prefixed branch of `mountRootInclude` is now the whole mechanism, so the regression test above is what keeps it honest. An absolute-path row additionally depends on the launcher supplying a bare-module base, which is why that test covers the relative form.
 
-A deployment that mounts a `local:` row keeps the capability requirement: the running image must carry this package and the `local:` branch of the root Include. Adding tools afterwards does not.
+Business integration therefore lives entirely outside `packages/`: the harness ships the Loader's path resolution, and the deployment ships the code that resolution finds.

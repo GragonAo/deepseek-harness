@@ -14,9 +14,21 @@ The same platform is also reachable over MCP. The DSH deployment mounted one of 
 
 The case platform's coordinates are configuration in the mountable patch layers. No package carries an address.
 
-### The sync tools are a mounted plugin
+### The sync tools are a mounted extension
 
-A plugin directory the deployment mounts registers two model-facing tools over the jeecg-boot backend. It is named `local:report-sync` from the profile patch, and `@deepseek-ai/dsh-plugin-roots` resolves that reference into the mounted directory ([mounted plugin roots](2026-09-23-mounted-plugin-roots.md)). Adding or updating a tool is a file drop plus one config row, with no image rebuild, which is the whole reason it is not a published package:
+Business integration is not a harness capability. A plugin that speaks one deployment's case platform belongs to that deployment, so it lives in a directory the deployment owns rather than in `packages/`, and adding or updating a tool is a file drop plus one config row with no image rebuild.
+
+The directory sits inside the profile (`$DSH_HOME/profiles/multi-tenant/plugins/tool-sync-file/`) because a mounted plugin that imports harness packages resolves them through Node's upward `node_modules` walk, which reaches the launcher-maintained `$DSH_HOME/profiles/node_modules` fallback only from inside the profile. The profile patch names it with a path specifier relative to the profile directory — the Loader's `baseUrl` — inside an `insert:` block, because a top-level `- id:` entry in a patch layer patches an existing row rather than adding one:
+
+```yaml
+- insert:
+    - id: tool-sync-file
+      name: './plugins/tool-sync-file/index.mjs'
+      config:
+        serverUrl: http://127.0.0.1:18081
+```
+
+It registers two model-facing tools over the jeecg-boot backend:
 
 - `sync_file_report` registers a report the sandbox already produced, posting `userId`, `caseId`, `fileName` and the optional `template` / `caseName` as a form to `POST <serverUrl>/jeecg-boot/report/upload`. It returns the platform's report id, which is the jeecg `Result` envelope's `result` string. The platform locates the file by case id and file name inside the case volume, so `file_name` is a name and not a path.
 - `sync_file_skill` reads a 技战法 package through `ctx.fs` — so the path is whatever the calling sandbox sees — and posts it as a multipart form with `typeId` and `userId` to `POST <serverUrl>/jeecg-boot/jzf/user/import`.
