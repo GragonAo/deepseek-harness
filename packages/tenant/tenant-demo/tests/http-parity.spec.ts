@@ -86,6 +86,17 @@ class ScriptedAdapter extends LlmAdapter {
   }
 }
 
+/**
+ * A host filesystem probe reporting every path as an existing directory. The
+ * container runner is faked here, so the sandbox's bind-mount sources have to
+ * exist somewhere; a start checks them on the host before it runs the CLI.
+ */
+const presentHostProbe = {
+  isDirectory: () => true,
+  isFile: () => false,
+  readdir: () => [],
+}
+
 class FakeRunner implements DockerRunner {
   readonly calls: string[][] = []
 
@@ -133,7 +144,7 @@ async function boot(adapter: ScriptedAdapter, runner: DockerRunner, client?: Too
   await ctx.plugin(AgentDefaultModel, { provider: 'mock', model: 'mock' })
   await ctx.plugin(ContainerSubprocessRuntime)
   // Direct-construct so the test runner/client reach the constructor; ctx.plugin forwards only config.
-  new DockerContainerRuntime(ctx, { runtime: 'docker' }, runner, client)
+  new DockerContainerRuntime(ctx, { runtime: 'docker' }, runner, client, presentHostProbe)
   await ctx.plugin(BashEnvPlugin)
   await ctx.plugin(LocalBashExecutor, { cwd: process.cwd(), timeoutMs: 30_000 })
   await ctx.plugin(ToolBash)

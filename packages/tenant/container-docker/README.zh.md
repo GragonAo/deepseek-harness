@@ -51,6 +51,8 @@ docker run -d --name dsh-<tenantPartition>-<userPartition> \
   <toolExecImage>
 ```
 
+上面每一条绑定挂载源都会在触碰容器 CLI 之前先在本宿主上校验：源不是已存在的目录就启动失败，报错里同时给出该路径、它对应的容器内挂载点，以及它属于哪个 (租户, 成员)——这正是运维定位「该建谁的目录」所需的信息。这条校验的存在理由，是 Docker 会把不存在的绑定挂载源建成空目录：没有它，启动会成功、沙箱会显示健康，而该主体拿到的是一个空的 `/workspace`。按租户划分的源由 [`dsh-tenant-admin`](../tenant-admin/README.md) 预置——建租户与加成员时创建 `<workspaceRoot>/shared/<tier>` 与 `<workspaceRoot>/users/<sub>`；`usersRoot`、`systemRoot`、`pythonRoot` 以及租户的 `toolsRoot` 则由部署自己维护。
+
 随后读取已发布宿主机端口（`docker port`），等待容器的 `/exec` 服务应答（设上限，从而没有 exec 会与容器内 Node 绑定端口的时序竞争），再把每次 exec POST 到 `http://<connectHost>:<port>/exec`——agent 端从不执行 `docker exec`。同一作用域并发首次调用会并入那次进行中的启动，所以每个 (租户, 用户) 每进程最多付一次冷启动。运行镜像来自 `toolExecImage`；租户记录本身不携带镜像。设置 `idleTimeoutMs` 时，空闲容器会被 `docker rm -f` 回收，下次 exec 再懒式重启。
 
 `pythonRoot` 指向所有沙箱共用的那一份 Python 运行时——解释器、标准库与已安装的包都在同一个目录里——以同一绝对路径只读挂进沙箱。tool-exec 镜像自身不带解释器，所以这份挂载就是沙箱唯一的 Python：`<pythonRoot>/bin` 被前置到 `PATH`，`<pythonRoot>/pyvenv.cfg` 使该目录成为 `VIRTUAL_ENV`，`<pythonRoot>/lib/python3.<minor>/site-packages` 加入 `PYTHONPATH`。于是这一个目录同时定下解释器版本和全部依赖，这正是无公网部署要的：运维往它里面装包，下一个沙箱就有该依赖，既不用重建镜像、不用重新分发，也没有需要与镜像对齐的版本。省略该字段时不挂任何东西、也不设任何 Python 环境变量，结果是沙箱里根本没有 `python3`——这份挂载是硬依赖，不是可选优化。配了 `pythonRoot` 而本进程读不到它时，是加载直接失败而不是降级：宿主进程会自己先读这个目录再把路径交给容器运行时，因此只有 Docker daemon 能解析的路径——通常是因为该宿主目录没有按同路径挂进宿主进程自己所在的那个容器——否则就会挂进一个空目录、什么都不配。配置的目录里三个标记一个都没有时，同样会在加载阶段被拒绝，而 Docker 会把不存在的绑定挂载源建成空目录，正是这条规则的来由：那个空目录就是「挂载了、但环境从没建出来」的样子，不拦就会什么都不配。所以这里不依赖运维记住顺序——环境没建出来会挡住宿主启动，而不是让沙箱在没有解释器的情况下跑起来；两条出路是把这个路径上的环境装出来，或者去掉 `pythonRoot`。三个标记里只要有任意一个，该目录就合法，并且只按有的那个配置。

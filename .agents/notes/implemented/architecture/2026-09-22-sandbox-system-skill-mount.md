@@ -34,9 +34,9 @@ The case and user tiers need no matching field: `/shared` and `/global` are alre
 
 - **A fixed in-container location** (e.g. `/system/skills`): rejected. Every companion-file reference in a skill body is relative to the skill directory, so the mount point must be the host path the provider resolved.
 - **Mount the tree read-write**: rejected. The sandbox executes system assets and does not own them, so a writable shared tree would let one subject's writes change what every other subject reads.
-- **Mount unconditionally instead of through a Config field**: rejected. The host path is deployment-varying, and a deployment that does not mount `$DSH_HOME` at the same absolute path would get an empty directory mounted into every sandbox instead of a visible failure.
+- **Mount unconditionally instead of through a Config field**: rejected. The host path is deployment-varying, so a hardcoded path names a directory a deployment that installs elsewhere does not have, which the host-side check refuses.
 
 ## Consequences
 
-- The deployment must ensure the host container mounts `$DSH_HOME` at the same absolute path as inside it; otherwise the path the host hands Docker does not exist on the real host and Docker mounts an empty directory there. `docker-compose.yml` and `.env.example` pin absolute paths for that constraint.
+- The deployment must ensure the host container mounts `$DSH_HOME` at the same absolute path as inside it: the host process reads the tree itself, and a path that is not there fails the sandbox start with that path named ([bind-mount source preflight](../bug-fix/2026-09-23-sandbox-mount-source-preflight.md)) instead of mounting an empty directory. `docker-compose.yml` and `.env.example` pin absolute paths for that constraint.
 - The sandbox gains one read-only mount point, so everything under `/opt/.dsh/system` becomes visible to processes inside it (it holds no credentials; system skills are shared assets).

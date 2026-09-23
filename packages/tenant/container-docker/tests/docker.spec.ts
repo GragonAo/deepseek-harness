@@ -50,11 +50,32 @@ class FakeClient implements ToolExecClient {
   }
 }
 
+/**
+ * A probe reporting every path as an existing directory. These tests configure
+ * mount sources no host has; a start must find them present, so what the
+ * assertions read is the run arguments rather than the missing-source failure.
+ */
+const presentProbe: HostPathProbe = {
+  isDirectory: () => true,
+  isFile: () => false,
+  readdir: () => [],
+}
+
+/** Await a promise and return its rejection, failing the test if it resolves instead. */
+async function rejection(promise: Promise<unknown>): Promise<Error> {
+  try {
+    await promise
+  } catch (error: unknown) {
+    return error as Error
+  }
+  throw new Error('expected the call to reject')
+}
+
 function mount(
   runner: DockerRunner,
   client: ToolExecClient,
   config: Config = { runtime: 'docker' },
-  probe?: HostPathProbe,
+  probe: HostPathProbe = presentProbe,
 ): DockerContainerRuntime {
   return new DockerContainerRuntime(new Context(), config, runner, client, probe)
 }
@@ -90,12 +111,24 @@ class FakeProbe implements HostPathProbe {
   }
 }
 
-/** A probe that fails the test if the provider consults it at all. */
-function unconsultedProbe(): HostPathProbe {
-  const fail = (): never => {
-    throw new Error('the host filesystem was probed without a configured pythonRoot')
-  }
-  return { isDirectory: fail, isFile: fail, readdir: fail }
+/** The host directories one (tenant, user)'s sandbox mounts in these tests. */
+const SANDBOX_MOUNT_SOURCES = [
+  '/workspace/acme/users/user-1',
+  '/workspace/acme/shared',
+  '/workspace/acme/shared/skills',
+  '/tools/acme',
+] as const
+
+/**
+ * A {@link FakeProbe} over `directories` plus the sandbox's own mount sources, for
+ * a test that models one aspect of the host (the Python environment's layout) and
+ * leaves the mounts alone.
+ * @param directories - the directories the host has beyond the mounts.
+ * @param files - the regular files the host has.
+ * @returns the probe.
+ */
+function probeWithMounts(directories: readonly string[], files: readonly string[] = []): FakeProbe {
+  return new FakeProbe([...directories, ...SANDBOX_MOUNT_SOURCES], files)
 }
 
 /**
@@ -160,6 +193,51 @@ describe('DockerContainerRuntime', () => {
       { baseUrl: 'http://127.0.0.1:43210', req: { argv: ['sh', '-c', 'true'] } },
       { baseUrl: 'http://127.0.0.1:43210', req: { argv: ['echo', 'hi'] } },
     ])
+  })
+
+  it('refuses to start when a bind-mount source is missing, naming the path, its mount point, and the (tenant, member)', async () => {
+    const runner = new FakeRunner()
+    // Every source is on this host except the subject's case workspace, which is
+    // what a directory removed after admission looks like.
+    const probe: HostPathProbe = {
+      isDirectory: path => path !== '/workspace/acme/users/user-1',
+      isFile: () => false,
+      readdir: () => [],
+    }
+    const runtime = mount(runner, new FakeClient(), { runtime: 'docker', usersRoot: '/users' }, probe)
+    const error = await rejection(scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi'])))
+    expect(error.message).toContain("bind-mount source '/workspace/acme/users/user-1' (for '/workspace') is missing on this host")
+    // The directory to create belongs to a (tenant, member) pair, so both are named.
+    expect(error.message).toContain("tenant 'acme' member 'user-1'")
+    // The failure is this check, not a container CLI error: nothing ran, and no
+    // same-name container was cleared either.
+    expect(runner.calls).toHaveLength(0)
+  })
+
+  it('names every missing bind-mount source in one failure', async () => {
+    const runner = new FakeRunner()
+    // A host that has none of the sources: the case workspace, the case-shared tree,
+    // the case-shared skill view, the user-global root, the system tree, and the
+    // tenant's tools root are all absent.
+    const absent: HostPathProbe = { isDirectory: () => false, isFile: () => false, readdir: () => [] }
+    const runtime = mount(
+      runner,
+      new FakeClient(),
+      { runtime: 'docker', usersRoot: '/users', systemRoot: '/opt/.dsh/system' },
+      absent,
+    )
+    const error = await rejection(scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi'])))
+    for (const source of [
+      "'/workspace/acme/users/user-1' (for '/workspace')",
+      "'/workspace/acme/shared' (for '/shared')",
+      "'/workspace/acme/shared/skills' (for '/workspace/acme/shared/skills')",
+      "'/users/user-1' (for '/global')",
+      "'/opt/.dsh/system' (for '/opt/.dsh/system')",
+      "'/tools/acme' (for '/tools')",
+    ]) {
+      expect(error.message).toContain(source)
+    }
+    expect(runner.calls).toHaveLength(0)
   })
 
   it('publishes the tool-exec port on, and dials it at, the configured host addresses', async () => {
@@ -261,7 +339,7 @@ describe('DockerContainerRuntime', () => {
       runner,
       new FakeClient(),
       { runtime: 'docker', pythonRoot: '/opt/.dsh/pyenv' },
-      new FakeProbe(
+      probeWithMounts(
         [
           '/opt/.dsh/pyenv',
           '/opt/.dsh/pyenv/bin',
@@ -288,7 +366,7 @@ describe('DockerContainerRuntime', () => {
 
   it('mounts no Python environment and sets no Python variable when pythonRoot is absent', async () => {
     const runner = new FakeRunner()
-    const runtime = mount(runner, new FakeClient(), { runtime: 'docker' }, unconsultedProbe())
+    const runtime = mount(runner, new FakeClient())
     await scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi']))
     const runCall = runner.calls.find(c => c[0] === 'run')
     expect(runCall).not.toContain('/opt/.dsh/pyenv')
@@ -301,7 +379,7 @@ describe('DockerContainerRuntime', () => {
       runner,
       new FakeClient(),
       { runtime: 'docker', pythonRoot: '/opt/.dsh/pyenv' },
-      new FakeProbe(['/opt/.dsh/pyenv', '/opt/.dsh/pyenv/bin']),
+      probeWithMounts(['/opt/.dsh/pyenv', '/opt/.dsh/pyenv/bin']),
     )
     await scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi']))
     const runCall = runner.calls.find(c => c[0] === 'run')
@@ -354,7 +432,7 @@ describe('DockerContainerRuntime', () => {
       runner,
       new FakeClient(),
       { runtime: 'docker', pythonRoot: '/opt/.dsh/pyenv', toolExecImagePath: '/opt/node/bin:/usr/bin:/bin' },
-      new FakeProbe(['/opt/.dsh/pyenv', '/opt/.dsh/pyenv/bin']),
+      probeWithMounts(['/opt/.dsh/pyenv', '/opt/.dsh/pyenv/bin']),
     )
     await scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi']))
     const runCall = runner.calls.find(c => c[0] === 'run')

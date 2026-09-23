@@ -70,6 +70,17 @@ class ScriptedAdapter extends LlmAdapter {
   }
 }
 
+/**
+ * A host filesystem probe reporting every path as an existing directory. The
+ * container runner is faked here, so the sandbox's bind-mount sources have to
+ * exist somewhere; a start checks them on the host before it runs the CLI.
+ */
+const presentHostProbe = {
+  isDirectory: () => true,
+  isFile: () => false,
+  readdir: () => [],
+}
+
 class FakeRunner implements DockerRunner {
   readonly calls: string[][] = []
 
@@ -110,7 +121,7 @@ async function bootContainerStack(
   await ctx.plugin(ContainerSubprocessRuntime)
   // Direct-construct so the test runner/client actually reach the constructor:
   // ctx.plugin() forwards only config, not extra constructor args.
-  new DockerContainerRuntime(ctx, { runtime: 'docker' }, runner, client)
+  new DockerContainerRuntime(ctx, { runtime: 'docker' }, runner, client, presentHostProbe)
   await ctx.plugin(BashEnvPlugin)
   await ctx.plugin(LocalBashExecutor, { cwd: process.cwd(), timeoutMs: 30_000 })
   await ctx.plugin(ToolBash)
@@ -213,7 +224,7 @@ describe('multi-tenant agent container tool execution', () => {
   it('executes /exec over the live tool-exec HTTP server (real ip+host round trip)', async () => {
     const runner = new FakeRunner(toolExec.port)
     const ctx = new Context()
-    new DockerContainerRuntime(ctx, { runtime: 'docker' }, runner)
+    new DockerContainerRuntime(ctx, { runtime: 'docker' }, runner, undefined, presentHostProbe)
     try {
       const result = await runWithTenant(tenant('acme'), () => runWithUser(UserId('user-1'), () => ctx.containerRuntime.exec('sh', ['-c', 'printf direct-ok'])))
       expect(result).toEqual({ exitCode: 0, stdout: 'direct-ok', stderr: '' })

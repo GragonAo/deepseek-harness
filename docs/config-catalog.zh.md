@@ -709,7 +709,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/tenant/container-docker/src/index.ts:64`](../packages/tenant/container-docker/src/index.ts)
+Source: [`packages/tenant/container-docker/src/index.ts:66`](../packages/tenant/container-docker/src/index.ts)
 
 <a id="deepseek-aidsh-cordis-host-runner"></a>
 

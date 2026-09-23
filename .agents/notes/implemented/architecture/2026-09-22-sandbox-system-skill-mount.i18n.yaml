@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-09-22-sandbox-system-skill-mount.md
-2026-09-22-sandbox-system-skill-mount.md: 64ba5100c15f134dcf1e8d5c6ad82db34a02d7c0
-2026-09-22-sandbox-system-skill-mount.zh.md: e61326909718b595f8bf5d07e110d329bb9f3d69
+2026-09-22-sandbox-system-skill-mount.md: 688bbc0d505a09db7e164f572af1c15bafb1002c
+2026-09-22-sandbox-system-skill-mount.zh.md: 928ed665568c0f50cc1720689dd97b74cfe53d50

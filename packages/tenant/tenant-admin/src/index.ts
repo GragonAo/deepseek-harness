@@ -98,8 +98,11 @@ function assertSafeSegment(value: string, what: string): void {
   }
 }
 
-/** Top-level directory names a member's `/global` mount carries. */
-const USER_TIER_DIRS = ['config', 'skills', 'tools'] as const
+/**
+ * Top-level directory names one ambient tier carries: the case-shared tree under
+ * `<workspaceRoot>/shared` and a member's `/global` tree under `usersRoot`.
+ */
+const TIER_DIRS = ['config', 'skills', 'tools'] as const
 
 /**
  * Tenant administration service. Load with a tenant registry always present;
@@ -306,7 +309,8 @@ export class TenantAdmin extends Service {
   }
 
   /**
-   * Admit one subject, bootstrapping its `/global` tier directories.
+   * Admit one subject, bootstrapping the host directories its sandbox mounts: the
+   * tenant's `<workspaceRoot>/users/<subject>` and the subject's `/global` tier.
    * @param id - the tenant id.
    * @param subject - the JWT `sub` to admit.
    * @returns the tenant's members after the change.
@@ -314,7 +318,10 @@ export class TenantAdmin extends Service {
   async membersAdd(id: string, subject: string): Promise<string[]> {
     this.requireAdmin()
     assertSafeSegment(subject, 'subject')
-    await this.bootstrapUserDirs(subject)
+    // The record resolves before any directory is created: an unknown tenant must
+    // not leave a subject's host directories behind for a membership that failed.
+    const record = this.requireRecord(id)
+    await this.bootstrapUserDirs(subject, record.workspaceRoot)
     return this.withMembers(id, members => members.includes(subject) ? members : [...members, subject])
   }
 
@@ -330,7 +337,9 @@ export class TenantAdmin extends Service {
   }
 
   /**
-   * Pre-create one subject's `/global` tier directories.
+   * Pre-create one subject's `/global` tier directories. The per-tenant case
+   * workspace is not included: this operation names no tenant, so it has no
+   * `workspaceRoot` to create one under, and `create`/`membersAdd` own that path.
    * @param subject - the JWT `sub` to prepare.
    * @returns the host directory that now holds the subject's tiers.
    */
@@ -383,20 +392,34 @@ export class TenantAdmin extends Service {
     }
   }
 
-  /** Create a tenant's host directories plus every member's `/global` tree. */
+  /** Create a tenant's host directories plus every member's host directories. */
   private async bootstrapTenantDirs(record: Tenant): Promise<void> {
     await fs.mkdir(record.dataRoot, { recursive: true })
-    await fs.mkdir(join(record.workspaceRoot, 'shared'), { recursive: true })
+    await Promise.all(TIER_DIRS.map(dir => fs.mkdir(join(record.workspaceRoot, 'shared', dir), { recursive: true })))
     for (const subject of record.members ?? []) {
-      await this.bootstrapUserDirs(subject)
+      await this.bootstrapUserDirs(subject, record.workspaceRoot)
     }
   }
 
-  /** Create one subject's `/global` tier directories under `usersRoot`. */
-  private async bootstrapUserDirs(subject: string): Promise<void> {
+  /**
+   * Create one subject's host directories: the per-tenant case workspace the
+   * sandbox mounts at `/workspace`, and the `/global` tier directories under
+   * `usersRoot`. Both are bind-mount sources, and Docker creates a missing
+   * bind-mount source as an empty directory, so each is created here rather than
+   * left to the sandbox start.
+   *
+   * @param subject - the JWT `sub` whose directories are created.
+   * @param workspaceRoot - the admitting tenant's workspace root; absent only for
+   *   {@link usersEnsure}, which prepares a subject no tenant has admitted yet and
+   *   so has no per-tenant directory to name.
+   */
+  private async bootstrapUserDirs(subject: string, workspaceRoot?: string): Promise<void> {
+    if (workspaceRoot !== undefined) {
+      await fs.mkdir(join(workspaceRoot, 'users', subject), { recursive: true })
+    }
     if (this.usersRoot === undefined) return
     const root = join(this.usersRoot, subject)
-    await Promise.all(USER_TIER_DIRS.map(dir => fs.mkdir(join(root, dir), { recursive: true })))
+    await Promise.all(TIER_DIRS.map(dir => fs.mkdir(join(root, dir), { recursive: true })))
   }
 
   /** Move a removed tenant's directories under the archive root, leaving data intact. */

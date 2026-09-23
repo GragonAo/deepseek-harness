@@ -15,13 +15,13 @@ Every method is refused with `tenant-forbidden` unless the ambient JWT scopes ca
 | `tenant.admin.update` | Change `name`, `workspaceRoot`, `toolsRoot`, or `network` (`id`/`dataRoot` immutable). |
 | `tenant.admin.enable` / `.disable` | Toggle request admission at the carrier. |
 | `tenant.admin.remove` | Delete the record; `purge: true` also drops the partition and archives the directories. |
-| `tenant.admin.members.list` / `.add` / `.remove` | Admit or drop one subject; `add` bootstraps the subject's user-tier directories. |
+| `tenant.admin.members.list` / `.add` / `.remove` | Admit or drop one subject; `add` bootstraps the subject's case workspace and user-tier directories. |
 | `tenant.admin.users.ensure` | Pre-create one subject's `usersRoot/<sub>/{config,skills,tools}` tree. |
 
 ## Isolation and lifecycle
 
 - **Partition on create.** The schema lifecycle seam issues the tenant partition (`tenantPartitionName(id)` for Postgres) so a new tenant's providers share no storage with another tenant.
-- **Directories on create.** `bootstrapTenantDirs` creates `dataRoot`, `workspaceRoot/shared` (plus `tools`/`skills`), and each admitted member's host directory.
+- **Directories on create.** `bootstrapTenantDirs` creates `dataRoot`, the case-shared tiers `workspaceRoot/shared/{config,skills,tools}`, and each admitted member's `workspaceRoot/users/<sub>` and `usersRoot/<sub>/{config,skills,tools}`. Each of those paths is a bind-mount source of the subject's sandbox, so provisioning creates it rather than leaving the container runtime to create an empty directory at the mount.
 - **Archive, never delete.** `remove(id, purge: true)` moves `dataRoot` and `workspaceRoot` under `archiveRoot/<id>-<timestamp>/`, then drops the partition. A purge archives rather than deletes host data.
 - **Users are JWT subjects.** There is no user table: admission is a per-tenant `members` list, and a subject is anyone whose token `sub` resolves. `usersEnsure` materializes the user-tier directories before first use.
 

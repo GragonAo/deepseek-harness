@@ -1929,7 +1929,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'async membersAdd(id: string, subject: string): Promise<string[]>',
-        description: 'Admit one subject, bootstrapping its `/global` tier directories.',
+        description: 'Admit one subject, bootstrapping the host directories its sandbox mounts: the tenant\'s `<workspaceRoot>/users/<subject>` and the subject\'s `/global` tier.',
         parameters: [{ name: 'id', description: 'the tenant id.' }, { name: 'subject', description: 'the JWT `sub` to admit.' }],
         returns: 'the tenant\'s members after the change.',
       },
@@ -1941,7 +1941,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'async usersEnsure(subject: string): Promise<{ root: string }>',
-        description: 'Pre-create one subject\'s `/global` tier directories.',
+        description: 'Pre-create one subject\'s `/global` tier directories. The per-tenant case workspace is not included: this operation names no tenant, so it has no `workspaceRoot` to create one under, and `create`/`membersAdd` own that path.',
         parameters: [{ name: 'subject', description: 'the JWT `sub` to prepare.' }],
         returns: 'the host directory that now holds the subject\'s tiers.',
       },

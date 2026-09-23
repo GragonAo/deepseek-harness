@@ -9,7 +9,9 @@
  * pays a pre-warmed cold-start it could not honor (a per-user container has no
  * user to warm at boot); its stable name means a non-graceful host shutdown
  * cannot orphan an older execution world (the next start clears the same-name
- * container first). Idle containers are reaped after `idleTimeoutMs`, and the
+ * container first). Every bind-mount source is checked on the host first, because
+ * the container runtime creates a missing one as an empty directory instead of
+ * failing. Idle containers are reaped after `idleTimeoutMs`, and the
  * execution world itself is stateless: everything a tenant and user own lives
  * on its mounts, never in the container. Every container CLI invocation, the
  * cold start as a whole, and each tool-exec round trip carry their own deadline,
@@ -170,6 +172,44 @@ export interface Config {
   cpuLimit?: number
 }
 
+/** One bind mount a sandbox is started with. */
+interface MountSource {
+  /** Host absolute path the container runtime resolves. */
+  source: string
+  /** Path inside the container the source is mounted at. */
+  target: string
+  /** Whether the mount is read-only. */
+  readOnly: boolean
+}
+
+/** The `docker run -v` argument one mount contributes. */
+function mountArgument(mount: MountSource): string {
+  return `${mount.source}:${mount.target}${mount.readOnly ? ':ro' : ''}`
+}
+
+/**
+ * The diagnostic for a start whose bind-mount sources this host does not have.
+ *
+ * Docker creates a missing bind-mount source as an empty directory, so a start
+ * that skipped this check reports success and hands the subject an empty mount.
+ * The tenant and the member are part of the message because they are what an
+ * operator needs to find the directory: the per-tenant sources are that pair's.
+ *
+ * @param missing - the mounts whose host source is absent.
+ * @param tenant - the tenant whose sandbox was about to start.
+ * @param user - the subject whose sandbox was about to start.
+ * @returns the message naming every missing source, the container path it was for, and both sides of the (tenant, member) pair.
+ */
+function missingMountMessage(missing: readonly MountSource[], tenant: Tenant, user: UserId): string {
+  const listed = missing.map(mount => `'${mount.source}' (for '${mount.target}')`).join(', ')
+  const noun = missing.length === 1 ? 'bind-mount source' : 'bind-mount sources'
+  const verb = missing.length === 1 ? 'is' : 'are'
+  return `container-docker: refusing to start the sandbox of tenant '${String(tenant.id)}' member '${user}': ${noun} ${listed} ${verb} missing on this host. `
+    + 'Docker creates a missing bind-mount source as an empty directory, so the start would report success and hand that subject an empty mount. '
+    + "Create each path on the host, or drop the configuration that names it: tenant-admin creates '<workspaceRoot>/shared/<tier>' and '<workspaceRoot>/users/<subject>' on tenant create and member add, "
+    + "and the deployment owns 'usersRoot', 'systemRoot', 'pythonRoot', and a tenant's 'toolsRoot'."
+}
+
 const PUBLISHED_PORT = /(?:\d+\.\d+\.\d+\.\d+|\[?::\]?):(\d+)/
 /**
  * Deadline codes this provider stamps on its own expiries. `timeoutOf` reads
@@ -256,6 +296,7 @@ export class DockerContainerRuntime extends ContainerRuntime {
 
   private readonly runner: DockerRunner
   private readonly client: ToolExecClient
+  private readonly probe: HostPathProbe
   private readonly runtimeName: string
   private readonly network: string
   private readonly toolExecImage: string
@@ -283,7 +324,8 @@ export class DockerContainerRuntime extends ContainerRuntime {
    * @param config - the validated plugin configuration.
    * @param runner - container CLI seam; production spawns the configured binary.
    * @param client - tool-exec HTTP seam; production posts to the published port.
-   * @param probe - host filesystem reads for the mounted Python environment; production reads the host.
+   * @param probe - host filesystem reads, for the mounted Python environment and
+   *   for the bind-mount sources of every start; production reads the host.
    */
   constructor(
     ctx: Context,
@@ -295,6 +337,7 @@ export class DockerContainerRuntime extends ContainerRuntime {
     super(ctx)
     this.runtimeName = config.runtime ?? 'docker'
     this.runner = runner ?? cliRunner(this.runtimeName)
+    this.probe = probe
     this.client = client ?? { exec: execToolCommand }
     this.network = config.network ?? 'bridge'
     this.toolExecImage = config.toolExecImage ?? 'dsh-tool-exec:latest'
@@ -490,6 +533,11 @@ export class DockerContainerRuntime extends ContainerRuntime {
    * @returns the running container's name and published host port.
    */
   private async startContainer(tenant: Tenant, user: UserId, signal: AbortSignal): Promise<TenantRuntime> {
+    // Every source is checked before the container CLI is touched: Docker creates a
+    // missing bind-mount source as an empty directory, so a start would otherwise
+    // succeed with an empty mount and no diagnostic anywhere.
+    const mounts = this.mounts(tenant, user)
+    this.requireMountSources(mounts, tenant, user)
     // One stable, (tenant, user)-partitioned name, so at most one execution
     // world exists per subject in a tenant at a time: clear any same-name
     // container a non-graceful host shutdown left behind before starting
@@ -512,29 +560,8 @@ export class DockerContainerRuntime extends ContainerRuntime {
     if (this.cpuLimit !== undefined) {
       args.push('--cpus', String(this.cpuLimit))
     }
-    args.push(
-      '-v', `${tenant.workspaceRoot}/users/${user}:/workspace`,
-      '-v', `${tenant.workspaceRoot}/shared:/shared`,
-      // The case-shared skill tier reports its own host directory as a skill's base
-      // directory, and a skill body tells the model to resolve relative paths against
-      // it. That path must therefore resolve inside the sandbox too. The same tree is
-      // already writable at /shared, so this read-only view adds reachability without
-      // adding authority.
-      '-v', `${tenant.workspaceRoot}/shared/skills:${tenant.workspaceRoot}/shared/skills:ro`,
-    )
-    if (this.usersRoot !== undefined) {
-      args.push('-v', `${this.usersRoot}/${user}:/global`)
-    }
-    if (this.systemRoot !== undefined) {
-      // Read-only at its own absolute path: skill bodies reach the model through the
-      // host-side skill provider, but the companion files they cite are readable only
-      // through the sandbox.
-      args.push('-v', `${this.systemRoot}:${this.systemRoot}:ro`)
-    }
-    if (tenant.toolsRoot !== undefined) {
-      args.push('-v', `${tenant.toolsRoot}:/tools:ro`)
-    }
-    args.push(...this.pythonArgs())
+    for (const mount of mounts) args.push('-v', mountArgument(mount))
+    args.push(...this.pythonEnvironmentArgs())
     // The platform knows which case and subject a sandbox belongs to, so it
     // states it: a skill that must locate its own case otherwise infers identity
     // from the container name or the `/shared` directory name, and Docker sets
@@ -561,20 +588,78 @@ export class DockerContainerRuntime extends ContainerRuntime {
   }
 
   /**
-   * The mount and environment variables that put the host's Python environment
-   * in front of the sandbox's own interpreter.
+   * Every bind mount one subject's sandbox is started with, in `docker run` order.
    *
-   * Read-only at its own absolute path, because the environment's scripts,
-   * `pyvenv.cfg`, and `.pth` files name that path and the sandbox only reads
-   * it. Each variable follows its own probe: a directory holding only `bin`
-   * gets `PATH` alone.
+   * The sources differ in owner: the first three belong to the (tenant, member)
+   * pair, `/global` to the deployment's user root, `/tools` to the tenant, and the
+   * Python environment to the deployment. Each is a host path the container
+   * runtime resolves, so each must exist here first.
    *
-   * @returns the `docker run` arguments for the mounted environment, empty when none is configured.
+   * @param tenant - the ambient tenant.
+   * @param user - the ambient user.
+   * @returns the mounts, each absent when its configuring field is absent.
    */
-  private pythonArgs(): string[] {
+  private mounts(tenant: Tenant, user: UserId): MountSource[] {
+    const mounts: MountSource[] = [
+      { source: `${tenant.workspaceRoot}/users/${user}`, target: '/workspace', readOnly: false },
+      { source: `${tenant.workspaceRoot}/shared`, target: '/shared', readOnly: false },
+      // The case-shared skill tier reports its own host directory as a skill's base
+      // directory, and a skill body tells the model to resolve relative paths against
+      // it. That path must therefore resolve inside the sandbox too. The same tree is
+      // already writable at /shared, so this read-only view adds reachability without
+      // adding authority.
+      { source: `${tenant.workspaceRoot}/shared/skills`, target: `${tenant.workspaceRoot}/shared/skills`, readOnly: true },
+    ]
+    if (this.usersRoot !== undefined) {
+      mounts.push({ source: `${this.usersRoot}/${user}`, target: '/global', readOnly: false })
+    }
+    if (this.systemRoot !== undefined) {
+      // Read-only at its own absolute path: skill bodies reach the model through the
+      // host-side skill provider, but the companion files they cite are readable only
+      // through the sandbox.
+      mounts.push({ source: this.systemRoot, target: this.systemRoot, readOnly: true })
+    }
+    if (tenant.toolsRoot !== undefined) {
+      mounts.push({ source: tenant.toolsRoot, target: '/tools', readOnly: true })
+    }
+    if (this.pythonEnv !== undefined) {
+      // Read-only at its own absolute path, because the environment's scripts,
+      // `pyvenv.cfg`, and `.pth` files name that path and the sandbox only reads it.
+      mounts.push({ source: this.pythonEnv.root, target: this.pythonEnv.root, readOnly: true })
+    }
+    return mounts
+  }
+
+  /**
+   * Refuse a start whose bind-mount sources this host does not have.
+   *
+   * The tenant and the member are known only here, and this host process is the
+   * only party that can tell an absent directory from one the container runtime
+   * would create, so this is the earliest point that can name what is missing for
+   * whom.
+   *
+   * @param mounts - the mounts the start would hand the container runtime.
+   * @param tenant - the tenant whose sandbox is starting.
+   * @param user - the subject whose sandbox is starting.
+   * @throws when a source is not an existing host directory, naming every missing
+   *   source, its container path, and the (tenant, member) pair it belongs to.
+   */
+  private requireMountSources(mounts: readonly MountSource[], tenant: Tenant, user: UserId): void {
+    const missing = mounts.filter(mount => !this.probe.isDirectory(mount.source))
+    if (missing.length > 0) throw new Error(missingMountMessage(missing, tenant, user))
+  }
+
+  /**
+   * The environment variables that put the host's Python environment in front of
+   * the sandbox's own interpreter. Each follows its own probe: a directory
+   * holding only `bin` gets `PATH` alone.
+   *
+   * @returns the `docker run -e` arguments for the mounted environment, empty when none is configured.
+   */
+  private pythonEnvironmentArgs(): string[] {
     const environment = this.pythonEnv
     if (environment === undefined) return []
-    const args = ['-v', `${environment.root}:${environment.root}:ro`]
+    const args: string[] = []
     if (environment.bin !== undefined) args.push('-e', `PATH=${environment.bin}:${this.toolExecImagePath}`)
     if (environment.virtualEnv !== undefined) args.push('-e', `VIRTUAL_ENV=${environment.virtualEnv}`)
     if (environment.sitePackages !== undefined) args.push('-e', `PYTHONPATH=${environment.sitePackages}`)

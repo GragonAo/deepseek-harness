@@ -111,6 +111,13 @@ describe('TenantAdmin', () => {
     expect((await store.load()).map(r => String(r.id))).toEqual(['acme'])
     expect(existsSync(join(root, 'tenants', 'acme'))).toBe(true)
     expect(existsSync(join(root, 'work', 'acme', 'workspace', 'shared'))).toBe(true)
+    // The case-shared tier directories and the member's case workspace are bind-mount
+    // sources of the subject's sandbox, so create provisions them rather than leaving
+    // the container runtime to create an empty directory at the mount.
+    expect(existsSync(join(root, 'work', 'acme', 'workspace', 'shared', 'skills'))).toBe(true)
+    expect(existsSync(join(root, 'work', 'acme', 'workspace', 'shared', 'tools'))).toBe(true)
+    expect(existsSync(join(root, 'work', 'acme', 'workspace', 'shared', 'config'))).toBe(true)
+    expect(existsSync(join(root, 'work', 'acme', 'workspace', 'users', 'user-1'))).toBe(true)
     expect(existsSync(join(usersRoot, 'user-1', 'tools'))).toBe(true)
     expect(existsSync(join(usersRoot, 'user-1', 'skills'))).toBe(true)
     expect(existsSync(join(usersRoot, 'user-1', 'config'))).toBe(true)
@@ -191,6 +198,8 @@ describe('TenantAdmin', () => {
       expect(await ctx.tenantAdmin.membersAdd('acme', 'user-2')).toEqual(['user-1', 'user-2'])
       expect(await ctx.tenantAdmin.membersAdd('acme', 'user-2')).toEqual(['user-1', 'user-2'])
       expect(existsSync(join(usersRoot, 'user-2', 'config'))).toBe(true)
+      // The admitted subject's case workspace, which the sandbox mounts at /workspace.
+      expect(existsSync(join(root, 'w', 'acme', 'users', 'user-2'))).toBe(true)
       expect(await ctx.tenantAdmin.membersRemove('acme', 'user-1')).toEqual(['user-2'])
       expect(ctx.tenantAdmin.membersList('acme')).toEqual(['user-2'])
     })

@@ -138,7 +138,8 @@ async remove(id: string, purge: boolean): Promise<{ removed: true }>
 membersList(id: string): string[]
 
 /**
- * Admit one subject, bootstrapping its `/global` tier directories.
+ * Admit one subject, bootstrapping the host directories its sandbox mounts: the
+ * tenant's `<workspaceRoot>/users/<subject>` and the subject's `/global` tier.
  * @param id - the tenant id.
  * @param subject - the JWT `sub` to admit.
  * @returns the tenant's members after the change.
@@ -154,14 +155,16 @@ async membersAdd(id: string, subject: string): Promise<string[]>
 async membersRemove(id: string, subject: string): Promise<string[]>
 
 /**
- * Pre-create one subject's `/global` tier directories.
+ * Pre-create one subject's `/global` tier directories. The per-tenant case
+ * workspace is not included: this operation names no tenant, so it has no
+ * `workspaceRoot` to create one under, and `create`/`membersAdd` own that path.
  * @param subject - the JWT `sub` to prepare.
  * @returns the host directory that now holds the subject's tiers.
  */
 async usersEnsure(subject: string): Promise<{ root: string }>
 ```
 
-Source: [`packages/tenant/tenant-admin/src/index.ts:109`](../../packages/tenant/tenant-admin/src/index.ts)
+Source: [`packages/tenant/tenant-admin/src/index.ts:112`](../../packages/tenant/tenant-admin/src/index.ts)
 
 <a id="ctxtenantauth--tenantauthenticator-abstract-seam"></a>
 

@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-09-23-sandbox-mounted-python-environment.md
-2026-09-23-sandbox-mounted-python-environment.md: b562c0922b397f85aea966f3cb5cbf14997215d4
-2026-09-23-sandbox-mounted-python-environment.zh.md: 8cddf69cea6ad0eb25850c9b5b6e344e12dde14c
+2026-09-23-sandbox-mounted-python-environment.md: 9dff3fd2fd59f496673af2422993d966cb5eee1e
+2026-09-23-sandbox-mounted-python-environment.zh.md: 8149b4a84f8596db57f4affe711eff0897180b8c

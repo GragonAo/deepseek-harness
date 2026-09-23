@@ -15,13 +15,13 @@
 | `tenant.admin.update` | 修改 `name`、`workspaceRoot`、`toolsRoot` 或 `network`（`id`/`dataRoot` 不可变）。 |
 | `tenant.admin.enable` / `.disable` | 在载体处切换请求准入。 |
 | `tenant.admin.remove` | 删除记录；`purge: true` 同时删除分区并归档目录。 |
-| `tenant.admin.members.list` / `.add` / `.remove` | 准入或移除一个主体；`add` 会引导该主体的用户层目录。 |
+| `tenant.admin.members.list` / `.add` / `.remove` | 准入或移除一个主体；`add` 会引导该主体的案件工作区目录与用户层目录。 |
 | `tenant.admin.users.ensure` | 预创建某主体的 `usersRoot/<sub>/{config,skills,tools}` 目录树。 |
 
 ## 隔离与生命周期
 
 - **创建时建分区。** schema 生命周期接缝会创建租户分区（Postgres 下为 `tenantPartitionName(id)`），使新租户的提供方不与其它租户共享存储。
-- **创建时建目录。** `bootstrapTenantDirs` 创建 `dataRoot`、`workspaceRoot/shared`（含 `tools`/`skills`）以及每个已准入成员的宿主机目录。
+- **创建时建目录。** `bootstrapTenantDirs` 创建 `dataRoot`、案件共享层 `workspaceRoot/shared/{config,skills,tools}`，以及每个已准入成员的 `workspaceRoot/users/<sub>` 与 `usersRoot/<sub>/{config,skills,tools}`。这些路径都是该主体沙箱的绑定挂载源，因此由预置流程创建，而不是留给容器运行时在挂载点建一个空目录。
 - **归档而绝不删除。** `remove(id, purge: true)` 先把 `dataRoot` 与 `workspaceRoot` 移入 `archiveRoot/<id>-<timestamp>/`，再删除分区。purge 是归档而非删除宿主机数据。
 - **用户即 JWT 主体。** 没有用户表：准入是每个租户的 `members` 列表，主体是任何 token `sub` 能解析出来的人。`usersEnsure` 在首次使用前物化用户层目录。
 
