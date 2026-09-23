@@ -42,7 +42,7 @@ The plugin reads through the same mounts the container provider binds for the ca
 | `/shared/<rel>` | `<tenant.workspaceRoot>/shared/<rel>` | `<mediaRoot>/<case>/<subject>/…` |
 | `/global/<rel>` | `<usersRoot>/<subject>/<rel>` | `<mediaRoot>/<case>/<subject>/…` |
 
-A path outside those mounts is rejected, and the resolved file is re-checked after symlinks are followed, so a link planted inside a mount cannot read outside it.
+A path outside those mounts is rejected, and the resolved file is re-checked after symlinks are followed, so a link planted inside a mount cannot read outside it. A path that is not there is reported as absent; a host that refuses to resolve it — a permission denial, a symlink loop, an over-long name — reports that failure instead, so a file the deployment cannot read is never answered with "does not exist".
 
 ## Isolation
 
@@ -54,7 +54,7 @@ Publication is scoped twice, by the request authorities the deployment authentic
 
 #### What the model sees
 
-`artifact_publish` returns the delivered file's same-origin path and the delivery tag, with one instruction: append the tag to the reply verbatim as its own paragraph. When the copy left the source in place, the result also names the source path, so the model can read the file again in a later turn. `artifact_list` returns this subject's deliveries, newest first.
+`artifact_publish` returns the delivered file's same-origin path and the delivery tag, with one instruction: append the tag to the reply verbatim as its own paragraph. When the copy left the source in place, the result also names the source path, so the model can read the file again in a later turn. `artifact_list` returns this subject's deliveries, newest first; a library directory it cannot read fails the call rather than answering with an empty library, and an entry it cannot examine fails it rather than quietly shortening the list.
 
 #### Token effect
 

@@ -13,7 +13,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { copyFile, mkdir, open, readdir, realpath, rename, stat, unlink } from 'node:fs/promises'
+import { promises as fs } from 'node:fs'
 import { basename, join, resolve as resolveHost } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -141,6 +141,18 @@ interface Source {
 }
 
 /**
+ * Whether a filesystem failure means the path is absent. Only `ENOENT` reports absence:
+ * `EACCES` (an unreadable component), `ELOOP` (a symlink loop), and `ENAMETOOLONG` (a name
+ * the host cannot represent) are failures of a path that is not missing, so answering with
+ * absence would report a specific, wrong conclusion.
+ * @param error - the value a filesystem call rejected with.
+ * @returns true when the failure is an absent path.
+ */
+function isENOENT(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | null)?.code === 'ENOENT'
+}
+
+/**
  * Resolve a model-supplied path to a host file inside the calling subject's mounts.
  * @param scope - the calling case scope.
  * @param input - the model-supplied path.
@@ -148,7 +160,8 @@ interface Source {
  * @param maxBytes - the largest file this deployment publishes.
  * @returns the resolved source file.
  * @throws when the path leaves the subject's mounts, does not exist, is not a regular file, or is
- * larger than the deployment allows.
+ * larger than the deployment allows; a filesystem failure other than an absent path surfaces
+ * unchanged, because only `ENOENT` means the file is not there.
  */
 async function resolveSource(scope: CaseScope, input: string, cwd: string, maxBytes: number): Promise<Source> {
   const addressed = addressContainerPath(input, cwd, scope.mounts)
@@ -157,17 +170,23 @@ async function resolveSource(scope: CaseScope, input: string, cwd: string, maxBy
     throw new Error(`file_path ${JSON.stringify(input)} is not inside the paths this subject can publish from (${readable})`)
   }
   const candidate = join(addressed.mount.host, addressed.relativePath)
-  const root = await realpath(addressed.mount.host)
+  const root = await fs.realpath(addressed.mount.host)
   let real: string
   try {
-    real = await realpath(candidate)
-  } catch {
+    real = await fs.realpath(candidate)
+  } catch (error) {
+    // `candidate` is the mount root — already resolved above — joined with the model's path, so
+    // nothing about it is unknown except whether it is there: ENOENT is that absence.
+    // An unreadable component (EACCES), a symlink loop (ELOOP), or an over-long name
+    // (ENAMETOOLONG) reaches this call for a path that is not missing, and reporting any of them
+    // as "does not exist" would hand the model a conclusion instead of the failure that happened.
+    if (!isENOENT(error)) throw error
     throw new Error(`file_path ${JSON.stringify(addressed.containerPath)} does not exist`)
   }
   if (!isInside(root, real)) {
     throw new Error(`file_path ${JSON.stringify(addressed.containerPath)} resolves outside ${addressed.mount.container}`)
   }
-  const info = await stat(real)
+  const info = await fs.stat(real)
   if (!info.isFile()) throw new Error(`file_path ${JSON.stringify(addressed.containerPath)} is not a regular file`)
   if (info.size > maxBytes) {
     throw new Error(`file_path ${JSON.stringify(addressed.containerPath)} is ${info.size} bytes, above this deployment's ${maxBytes}-byte limit`)
@@ -188,14 +207,14 @@ async function resolveSource(scope: CaseScope, input: string, cwd: string, maxBy
  */
 async function publishInto(directory: string, source: Source, stamp: string, stem: string, extension: string): Promise<string> {
   const staging = join(directory, `.${stamp}.${randomUUID()}.part`)
-  await copyFile(source.host, staging)
+  await fs.copyFile(source.host, staging)
   try {
     for (let attempt = 1; attempt <= 100; attempt++) {
       const destination = join(directory, deliveryName(stamp, stem, extension, attempt))
       try {
-        const claim = await open(destination, 'wx')
+        const claim = await fs.open(destination, 'wx')
         await claim.close()
-        await rename(staging, destination)
+        await fs.rename(staging, destination)
         return destination
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'EEXIST') continue
@@ -204,7 +223,14 @@ async function publishInto(directory: string, source: Source, stamp: string, ste
     }
     throw new Error(`cannot allocate a delivery name for ${stem}${extension}`)
   } finally {
-    await unlink(staging).catch(() => undefined)
+    // Best-effort removal of the staging file, and the one place this module swallows a failure
+    // beyond absence. The success path renamed `staging` to `destination`, so ENOENT is what a
+    // published artifact normally reports here; any other code (EACCES, EIO) leaves at most a
+    // `.`-prefixed `.part` file that no reader opens and no listing reports, because the name is
+    // never referenced. Cleanup cannot turn a failure into a success — the try above propagates
+    // its own error first — and letting a cleanup failure out of this `finally` would replace a
+    // returned destination with an error, reporting a delivered artifact as an undelivered one.
+    await fs.unlink(staging).catch(() => undefined)
   }
 }
 
@@ -227,7 +253,15 @@ interface PublishedArtifact {
 async function listPublished(scope: CaseScope, policy: Policy, limit: number): Promise<{ entries: PublishedArtifact[]; total: number }> {
   const entries: PublishedArtifact[] = []
   const collect = async (directory: string, kind: ArtifactKind | undefined, segments: string[]): Promise<void> => {
-    const dirents = await readdir(directory, { withFileTypes: true }).catch(() => [])
+    // The subject's delivery directory does not exist until its first publish, and a subdirectory
+    // named by the readdir that listed it a moment earlier can be gone before this call reaches it:
+    // ENOENT is absence, which is an empty list. Every other code (EACCES, EIO, ENOTDIR) means the
+    // read failed for some reason other than absence, and answering that with an empty list tells
+    // the model it has delivered nothing — a wrong conclusion, not an empty result.
+    const dirents = await fs.readdir(directory, { withFileTypes: true }).catch((error: unknown) => {
+      if (!isENOENT(error)) throw error
+      return []
+    })
     for (const dirent of dirents) {
       if (dirent.name.startsWith('.')) continue
       if (dirent.isDirectory()) {
@@ -235,7 +269,14 @@ async function listPublished(scope: CaseScope, policy: Policy, limit: number): P
         continue
       }
       if (!dirent.isFile()) continue
-      const info = await stat(join(directory, dirent.name)).catch(() => undefined)
+      // The name came from this directory's own readdir a moment ago, so the entry existed: ENOENT
+      // is a concurrent removal, and skipping a file that is no longer there is accurate. Any other
+      // code means the entry is there but could not be examined, and dropping it would shorten the
+      // list without saying so — a partial list the model reads as the whole one.
+      const info = await fs.stat(join(directory, dirent.name)).catch((error: unknown) => {
+        if (!isENOENT(error)) throw error
+        return undefined
+      })
       if (info === undefined) continue
       entries.push({
         name: dirent.name,
@@ -348,11 +389,11 @@ export function apply(ctx: Context, config: Config): void {
       const stem = sanitizeSegment(args.title ?? rawStem, 'artifact')
       const kind = args.kind ?? kindForExtension(ext)
       const directory = policy.groupByKind ? join(scope.directory, kind) : scope.directory
-      await mkdir(directory, { recursive: true })
+      await fs.mkdir(directory, { recursive: true })
       const stamp = formatStamp(new Date())
       const destination = await publishInto(directory, source, stamp, stem, ext)
       const moved = args.move === true
-      if (moved) await unlink(source.host)
+      if (moved) await fs.unlink(source.host)
       const prefix = policy.groupByKind ? [scope.caseId, scope.userId, kind] : [scope.caseId, scope.userId]
       const segments = [...prefix, basename(destination)]
       const publicPath = publicPathFor(policy.urlPrefix, segments)
