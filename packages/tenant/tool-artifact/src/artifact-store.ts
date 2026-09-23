@@ -22,10 +22,13 @@ export type ArtifactKind = 'html' | 'docs' | 'sheets' | 'slides' | 'images' | 'd
 export const ARTIFACT_KINDS: readonly ArtifactKind[] = ['html', 'docs', 'sheets', 'slides', 'images', 'data', 'packages', 'other']
 
 /**
- * Delivery-tag markers the deployment's web front end parses out of a reply. Fixed protocol: the
- * front end matches these exact literals, so they are not deployment configuration.
+ * Opening marker of the delivery tag the deployment's web front end parses out of a reply. Fixed
+ * protocol: the front end matches the exact literals of this marker pair, so neither is deployment
+ * configuration.
  */
 export const TAG_OPEN = '[hermes-attachment]'
+
+/** Closing marker of the delivery tag opened by {@link TAG_OPEN}. */
 export const TAG_CLOSE = '[/hermes-attachment]'
 
 /** Extension (leading dot, lowercase) to delivery directory. Unlisted extensions land in `other`. */

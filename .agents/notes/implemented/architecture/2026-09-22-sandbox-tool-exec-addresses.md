@@ -2,6 +2,8 @@
 
 Status: implemented
 
+English | [中文](2026-09-22-sandbox-tool-exec-addresses.zh.md)
+
 ## Problem
 
 Every (tenant, user) scope runs its tool calls in its own `dsh-tool-exec` container, started by the harness over the Docker socket. The provider published that container's HTTP port with `-p 127.0.0.1::<port>` and dialled it at `http://127.0.0.1:<port>`, both literals in the provider. That pair only holds when the harness shares the host's network namespace, which is why the multi-tenant deployment ran `network_mode: host`. A deployment that runs the harness in its own container on a bridge network cannot use it at all: inside that container `127.0.0.1` is the harness itself, so no sandbox is reachable and the published port sits where only the host can see it. Changing that was a source edit, not a deployment edit.

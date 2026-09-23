@@ -2,6 +2,8 @@
 
 Status: implemented
 
+English | [中文](2026-09-22-sandbox-resource-ceilings.zh.md)
+
 ## Problem
 
 Every (tenant, user) scope runs its tool calls in its own `dsh-tool-exec` container. The provider passed no resource flags to `docker run`, and Docker applies no ceiling of its own, so one subject's compile, test run, or data job could take memory and CPU from its co-tenants and from the host's own services. The multi-tenant deployment host (4 cores, 16 GB, shared with the case platform's containers) had no way to bound that blast radius, and `container-docker` exposed no Config field an operator could set.

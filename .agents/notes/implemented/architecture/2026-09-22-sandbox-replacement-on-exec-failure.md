@@ -1,27 +1,33 @@
-# 沙箱失效后自动替换
+# Agent Note: A failed tool-exec transport replaces the sandbox and replays the request
 
-**日期**：2026-09-22
-**状态**：implemented
-**范围**：`packages/tenant/container-docker`
+Status: implemented
 
-## 问题
+English | [中文](2026-09-22-sandbox-replacement-on-exec-failure.zh.md)
 
-`DockerContainerRuntime` 按 (租户, 用户) 缓存沙箱：`ensure` 命中缓存就直接返回，`exec` 拿它的地址发请求，不做任何存活判断。
+## Problem
 
-沙箱的存活没有保证：宿主进程重启、运维手工 `docker rm`、主体被 OOM kill、外部清理脚本，都会让缓存里的地址变成死地址。此后**该主体的每一次工具调用都失败**，直到宿主自己重启——`fs-container` 的读写、`bash` 执行、`glob` 全部走同一个 `runtime.exec`，所以整个沙箱能力一起失效。
+`DockerContainerRuntime` caches sandboxes by (tenant, user): `ensure` returns a cache hit as-is, and `exec` takes its address and sends the request without checking whether the sandbox is alive.
 
-实测现象：删掉沙箱容器后，会话里所有对 `/shared`、`/workspace` 的读取与 bash 调用持续报 `fetch failed`，模型只能向用户报"沙箱执行/文件系统后端当前不可用"。对非技术用户这是死路——他们无法知道要重启宿主容器。
+Nothing guarantees a sandbox survives: a host process restart, an operator's `docker rm`, the subject being OOM-killed, or an external cleanup script all turn the cached address into a dead one. Every tool call for that subject then fails until the host itself restarts — `fs-container` reads and writes, `bash` execution, and `glob` all go through the same `runtime.exec`, so the whole sandbox capability fails together.
 
-## 决定
+Measured: after the sandbox container was deleted, every read of `/shared` and `/workspace` and every bash call in the session reported `fetch failed` for the rest of the session, and the model could only report to the user that the sandbox execution / filesystem backend was currently unavailable. For a non-technical user that is a dead end — nothing tells them to restart the host container.
 
-`exec` 在传输失败时**自愈**：丢弃缓存沙箱（`discard`）、重新 `ensure` 拉起一个、把同一个请求再发一次。只有第二次也失败才把错误抛给调用方。
+## Decision
 
-判定依据：`client.exec` 只在传输或协议失败时 reject——命令自身的退出码在返回值里（`exitCode`），不是异常。所以 `exec` 抛出的任何错误都意味着"沙箱可能没了"，重试是安全的：容器已经不在，命令不可能已经执行过。调用方主动 abort（`opts.signal.aborted`）时不重试，那是用户的取消，不是故障。
+`exec` self-heals on a transport failure: it discards the cached sandbox (`discard`), calls `ensure` to start one again, and sends the same request a second time. Only a second failure reaches the caller.
 
-同时把原 `reap`（空闲回收）改名为 `discard`：空闲超时和 exec 失败走同一条"丢弃沙箱"路径，名字不该只描述前者。
+The discriminator is what `client.exec` rejects on: it rejects only on a transport or protocol failure — a command's own exit code travels in the result (`exitCode`), not as an exception. Any error thrown by `exec` therefore means the sandbox may be gone, and replaying is safe: the container no longer exists, so the command cannot already have run. Two cases do not replay. A caller-initiated abort (`opts.signal.aborted`) is the user cancelling, not a failure. An expired `transportTimeoutMs` is not a transport failure either — the command may still be running inside the container, so replaying it would repeat its side effects; the discard still happens, so the next call lands on a fresh sandbox.
 
-## 后果
+The former `reap` (idle collection) is renamed `discard`: the idle timeout and a failed exec take the same "throw the sandbox away" path, and the old name described only the first.
 
-- 沙箱失效对用户不可见：下一次工具调用自动在新沙箱里成功。
-- 命令在"容器中途死亡"的边界上可能被执行两次。沙箱的 `/workspace` 与 `/shared` 是绑定挂载，重跑有意义；这比让会话永久挂起可接受。
-- 并发调用同时失败时各自触发替换，`ensure` 的 `starting` 表保证只拉起一个容器。
+## Alternatives considered
+
+- **Surface the unreachable-container error to the caller**: rejected. The subject cannot act on it — the measured failure was every later tool call failing the same way, with the model reporting an unavailable backend until the host was restarted.
+- **Replay more than once**: rejected. A persistent cause (the image is gone, the host is out of memory) would make every tool call pay repeated cold starts instead of failing loud; one replay separates a dead address from a broken deployment.
+- **Keep `reap` as the name of the shared path**: rejected. The idle timeout and a transport failure are different triggers for one action, and a name describing only the timer hides that the failure path exists.
+
+## Consequences
+
+- A sandbox failure is invisible to the user: the next tool call succeeds in a new sandbox.
+- A command may run twice at the "container died mid-command" boundary. The sandbox's `/workspace` and `/shared` are bind mounts, so replaying is meaningful there; that is more acceptable than leaving the session permanently stuck.
+- Concurrent calls that fail together each trigger a replacement, and `ensure`'s `starting` table keeps that to one container.

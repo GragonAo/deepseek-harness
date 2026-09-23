@@ -1,12 +1,12 @@
-# 沙箱只读挂载系统 skill 树
+# Agent Note: The sandbox mounts the system skill tree read-only
 
-**日期**：2026-09-22
-**状态**：implemented
-**范围**：`packages/tenant/container-docker`
+Status: implemented
 
-## 问题
+English | [中文](2026-09-22-sandbox-system-skill-mount.zh.md)
 
-skill 分三层：案件共享（`<workspaceRoot>/shared/skills`）> 用户全局（`<usersRoot>/<sub>/skills`）> 系统（`$DSH_HOME/system/skills`）。沙箱容器只挂了三个目录：
+## Problem
+
+Skills have three tiers: case-shared (`<workspaceRoot>/shared/skills`) > user-global (`<usersRoot>/<sub>/skills`) > system (`$DSH_HOME/system/skills`). The sandbox container mounted only three directories:
 
 ```
 <workspaceRoot>/users/<sub>  ->  /workspace
@@ -14,23 +14,29 @@ skill 分三层：案件共享（`<workspaceRoot>/shared/skills`）> 用户全�
 <usersRoot>/<sub>            ->  /global
 ```
 
-前两层的目录**恰好**落在挂载点内，所以它们的配套文件在沙箱里可读。系统层不在任何挂载点内：skill 正文经宿主侧 provider 注入模型上下文（大文件还会 spill 到沙箱 `/tmp/dsh-spill-*`），正文里引用的配套文件（报告模板、方法论、校验脚本、范例 HTML）在沙箱里**读不到**。
+The first two tiers' directories happen to fall inside those mount points, so their companion files are readable in the sandbox. The system tier is inside no mount point: a skill body reaches the model context through the host-side provider (large bodies also spill to the sandbox's `/tmp/dsh-spill-*`), while the companion files the body references — report templates, methodology, validation scripts, sample HTML — are unreadable in the sandbox.
 
-重资产 skill 会在正文里按**相对 skill 目录**的路径引用这些文件，并要求执行其中的脚本。实测一个 55 KB 的线索初核 skill：agent 加载正文后按指令找 `report_template.md`，只能 `find / -name` 满世界搜索，找不到，收口阶段的 `verify_delivery.py` 也无法执行。
+A heavy-asset skill references those files by a path relative to the skill directory and requires running the scripts among them. Measured on a 55 KB clue-screening skill: after the agent loaded the body it followed the instruction to find `report_template.md`, could only search the whole filesystem with `find / -name`, did not find it, and the closing stage's `verify_delivery.py` could not run either.
 
-## 决定
+## Decision
 
-`container-docker` 新增 `systemRoot` 配置项，把系统 skill 树**以同一绝对路径**只读挂进沙箱：
+`container-docker` gains a `systemRoot` Config field that mounts the system skill tree read-only into the sandbox at the same absolute path:
 
 ```
 -v <systemRoot>:<systemRoot>:ro
 ```
 
-同路径而非固定的容器内位置，因为 skill 正文引用的相对路径要相对**宿主解析出的那个目录**成立；挂到别处会让每一条引用失效。只读，因为沙箱只执行、不拥有系统资产。省略该配置时行为不变：系统 skill 树留在宿主侧，只有正文能到达模型。
+The same path rather than a fixed in-container location, because the relative paths a skill body references must resolve against the directory the host resolved; mounting elsewhere would break every one of those references. Read-only, because the sandbox only executes and does not own system assets. Omitting the field leaves behavior unchanged: the system skill tree stays host-side and only a body reaches the model.
 
-case 层与用户层不需要对应配置：`/shared` 和 `/global` 本来就是它们的挂载点。
+The case and user tiers need no matching field: `/shared` and `/global` are already their mount points.
 
-## 后果
+## Alternatives considered
 
-- 部署侧要保证宿主容器把 `$DSH_HOME` 挂在与容器内**相同**的绝对路径上，否则宿主交给 docker 的路径在真实宿主上不存在，docker 会建空目录挂进去。`docker-compose.yml` 与 `.env.example` 已按此约束写死绝对路径。
-- 沙箱多一个只读挂载点；`/opt/.dsh/system` 下的内容因此对沙箱内进程可见（本就无凭据，系统 skill 是共享资产）。
+- **A fixed in-container location** (e.g. `/system/skills`): rejected. Every companion-file reference in a skill body is relative to the skill directory, so the mount point must be the host path the provider resolved.
+- **Mount the tree read-write**: rejected. The sandbox executes system assets and does not own them, so a writable shared tree would let one subject's writes change what every other subject reads.
+- **Mount unconditionally instead of through a Config field**: rejected. The host path is deployment-varying, and a deployment that does not mount `$DSH_HOME` at the same absolute path would get an empty directory mounted into every sandbox instead of a visible failure.
+
+## Consequences
+
+- The deployment must ensure the host container mounts `$DSH_HOME` at the same absolute path as inside it; otherwise the path the host hands Docker does not exist on the real host and Docker mounts an empty directory there. `docker-compose.yml` and `.env.example` pin absolute paths for that constraint.
+- The sandbox gains one read-only mount point, so everything under `/opt/.dsh/system` becomes visible to processes inside it (it holds no credentials; system skills are shared assets).

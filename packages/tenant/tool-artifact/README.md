@@ -1,6 +1,6 @@
 # @deepseek-ai/dsh-tool-artifact
 
-English | 中文
+English | [中文](README.zh.md)
 
 Case-scoped artifact delivery. A model working in a container sandbox writes reports, HTML summaries, charts, and data exports where only the sandbox can see them, so the user — who reaches the deployment through a web front end — never receives them. This plugin closes that gap with two model-facing tools: `artifact_publish` copies a generated file into the case's static directory (the one the front end serves) and returns the same-origin path plus the delivery tag the model appends to its reply; `artifact_list` reports what this subject already delivered.
 
