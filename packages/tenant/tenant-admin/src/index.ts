@@ -422,7 +422,11 @@ export class TenantAdmin extends Service {
     await Promise.all(TIER_DIRS.map(dir => fs.mkdir(join(root, dir), { recursive: true })))
   }
 
-  /** Move a removed tenant's directories under the archive root, leaving data intact. */
+  /**
+   * Move a removed tenant's directories under the archive root, leaving data
+   * intact. Both are moved into one timestamped slot, so a purge that archives
+   * only one of them is not a state this leaves behind.
+   */
   private async archiveDirs(record: Tenant): Promise<void> {
     const root = this.archiveRoot ?? join(record.dataRoot, '.archived')
     const stamp = `${String(record.id)}-${Date.now()}`
@@ -432,7 +436,41 @@ export class TenantAdmin extends Service {
       ['workspace', record.workspaceRoot],
     ]
     for (const [label, source] of sources) {
-      await fs.rename(source, join(root, stamp, label)).catch(() => { /* absent directory: nothing to archive */ })
+      await this.moveIntoArchive(source, join(root, stamp, label))
+    }
+  }
+
+  /**
+   * Move one directory into its slot under the archive root.
+   *
+   * `ENOENT` is the only code this absorbs: the slot's parent was just created,
+   * so the failure can only mean the source directory is already gone, and a
+   * purge of a tenant whose directory no longer exists still archives what does.
+   * Every other code reaches the caller — `remove` answers `{ removed: true }`
+   * only after this returns, so absorbing one would report a purge whose archive
+   * never happened.
+   *
+   * `EXDEV` is a normal outcome here, not a fault: the archive root and a
+   * tenant's roots are separate bind-mount sources of a containerized
+   * deployment, and `rename(2)` refuses to link a directory across filesystems.
+   * The move then degrades to the copy-and-delete `mv` performs on the same
+   * input. The copy preserves file modes and timestamps and keeps symlinks
+   * verbatim, so a relative link inside the tree still resolves at the archive
+   * location; the source is removed only once the copy completes, so a copy that
+   * fails partway leaves the tenant's data where it was.
+   *
+   * @param source - the tenant directory to move.
+   * @param destination - its slot under the archive root, whose parent exists.
+   */
+  private async moveIntoArchive(source: string, destination: string): Promise<void> {
+    try {
+      await fs.rename(source, destination)
+    } catch (error: unknown) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === 'ENOENT') return
+      if (code !== 'EXDEV') throw error
+      await fs.cp(source, destination, { recursive: true, preserveTimestamps: true, verbatimSymlinks: true })
+      await fs.rm(source, { recursive: true, force: true })
     }
   }
 

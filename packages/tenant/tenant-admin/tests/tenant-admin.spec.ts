@@ -1,8 +1,8 @@
-import { existsSync } from 'node:fs'
-import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { existsSync, promises as fs } from 'node:fs'
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import TenantRegistry, { TenantId, runWithScopes } from '@deepseek-ai/dsh-tenant'
 import type { Tenant } from '@deepseek-ai/dsh-tenant'
@@ -86,6 +86,27 @@ async function rejection(promise: Promise<unknown>): Promise<unknown> {
     return error
   }
   throw new Error('expected promise to reject')
+}
+
+/** An errno-coded filesystem failure, as `fs` reports one. */
+function errno(code: string, message: string): NodeJS.ErrnoException {
+  return Object.assign(new Error(message), { code })
+}
+
+/**
+ * Make one source path report a filesystem failure from `rename`, the syscall a
+ * cross-device move fails in. Every other path keeps the real rename.
+ * @param source - the path whose rename fails.
+ * @param error - the failure it raises.
+ * @returns a restore function to call once the assertion is done.
+ */
+function failRenameOf(source: string, error: NodeJS.ErrnoException): () => void {
+  const real = fs.rename
+  const spy = vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+    if (String(from) === source) throw error
+    await real(from, to)
+  })
+  return () => { spy.mockRestore() }
 }
 
 describe('TenantAdmin', () => {
@@ -182,7 +203,82 @@ describe('TenantAdmin', () => {
     await runWithScopes(ADMIN, () => ctx.tenantAdmin.remove('beta', true))
     expect(events).toEqual(['provision:acme', 'provision:beta', 'purge:beta'])
     expect(existsSync(join(root, 'tenants', 'beta'))).toBe(false)
-    expect(await readdir(join(root, '.archived'))).toHaveLength(1)
+    expect(existsSync(join(root, 'work', 'beta', 'workspace'))).toBe(false)
+    const archived = await readdir(join(root, '.archived'))
+    expect(archived).toHaveLength(1)
+    // A purge archives both roots: a workspace left behind keeps occupying the
+    // host while the call reports the tenant removed.
+    expect((await readdir(join(root, '.archived', archived[0]!))).sort()).toEqual(['data', 'workspace'])
+  })
+
+  it('archives a workspace that lives on another filesystem than the archive root', async () => {
+    const root = await tmpRoot()
+    const archiveRoot = join(root, '.archived')
+    const data = join(root, 'data', 'acme')
+    const workspace = join(root, 'tenants', 'acme', 'workspace')
+    const ctx = await boot({ archiveRoot })
+    await runWithScopes(ADMIN, () => ctx.tenantAdmin.create(request('acme', {
+      dataRoot: data,
+      workspaceRoot: workspace,
+      members: ['user-1'],
+    })))
+    await writeFile(join(workspace, 'users', 'user-1', 'case.txt'), 'evidence')
+
+    // The archive root and a tenant's roots are separate bind-mount sources of the
+    // containerized deployment, so the move between them is cross-device and
+    // rename(2) refuses it with EXDEV. The move degrades to copy-and-delete; the
+    // workspace must land in the archive rather than stay where it was.
+    const restore = failRenameOf(workspace, errno('EXDEV', `EXDEV: cross-device link not permitted, rename '${workspace}'`))
+    try {
+      await runWithScopes(ADMIN, () => ctx.tenantAdmin.remove('acme', true))
+    } finally {
+      restore()
+    }
+
+    expect(existsSync(workspace)).toBe(false)
+    const [stamp] = await readdir(archiveRoot)
+    expect(stamp).toMatch(/^acme-\d+$/)
+    expect((await readdir(join(archiveRoot, stamp!))).sort()).toEqual(['data', 'workspace'])
+    expect(await readFile(join(archiveRoot, stamp!, 'workspace', 'users', 'user-1', 'case.txt'), 'utf8')).toBe('evidence')
+  })
+
+  it('propagates an archive failure instead of reporting the tenant removed', async () => {
+    const root = await tmpRoot()
+    const data = join(root, 'data', 'acme')
+    const ctx = await boot({ archiveRoot: join(root, '.archived') })
+    await runWithScopes(ADMIN, () => ctx.tenantAdmin.create(request('acme', {
+      dataRoot: data,
+      workspaceRoot: join(root, 'tenants', 'acme', 'workspace'),
+    })))
+
+    const restore = failRenameOf(data, errno('EACCES', `EACCES: permission denied, rename '${data}'`))
+    try {
+      await expect(runWithScopes(ADMIN, () => ctx.tenantAdmin.remove('acme', true))).rejects.toThrow(/EACCES/)
+    } finally {
+      restore()
+    }
+
+    // The failure is not absorbed: no acknowledgement was returned, and the record
+    // and its directories are still there.
+    expect(ctx.tenants.get(TenantId('acme'))).toBeDefined()
+    expect(existsSync(data)).toBe(true)
+  })
+
+  it('purges a tenant whose directory is already gone', async () => {
+    const root = await tmpRoot()
+    const archiveRoot = join(root, '.archived')
+    const data = join(root, 'data', 'acme')
+    const workspace = join(root, 'tenants', 'acme', 'workspace')
+    const ctx = await boot({ archiveRoot })
+    await runWithScopes(ADMIN, () => ctx.tenantAdmin.create(request('acme', { dataRoot: data, workspaceRoot: workspace })))
+    await rm(workspace, { recursive: true, force: true })
+
+    // A missing directory is the one failure the archive absorbs: there is nothing
+    // left to archive for it, and the rest of the purge still runs.
+    await runWithScopes(ADMIN, () => ctx.tenantAdmin.remove('acme', true))
+    expect(ctx.tenants.get(TenantId('acme'))).toBeUndefined()
+    const [stamp] = await readdir(archiveRoot)
+    expect(await readdir(join(archiveRoot, stamp!))).toEqual(['data'])
   })
 
   it('manages members: add bootstraps dirs and dedupes, remove filters, list reads', async () => {

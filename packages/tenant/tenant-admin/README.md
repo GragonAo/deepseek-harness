@@ -22,7 +22,8 @@ Every method is refused with `tenant-forbidden` unless the ambient JWT scopes ca
 
 - **Partition on create.** The schema lifecycle seam issues the tenant partition (`tenantPartitionName(id)` for Postgres) so a new tenant's providers share no storage with another tenant.
 - **Directories on create.** `bootstrapTenantDirs` creates `dataRoot`, the case-shared tiers `workspaceRoot/shared/{config,skills,tools}`, and each admitted member's `workspaceRoot/users/<sub>` and `usersRoot/<sub>/{config,skills,tools}`. Each of those paths is a bind-mount source of the subject's sandbox, so provisioning creates it rather than leaving the container runtime to create an empty directory at the mount.
-- **Archive, never delete.** `remove(id, purge: true)` moves `dataRoot` and `workspaceRoot` under `archiveRoot/<id>-<timestamp>/`, then drops the partition. A purge archives rather than deletes host data.
+- **Archive, never delete.** `remove(id, purge: true)` drops the partition, then moves `dataRoot` and `workspaceRoot` under `archiveRoot/<id>-<timestamp>/`. A purge archives rather than deletes host data.
+- **A cross-filesystem archive copies.** The archive root and a tenant's roots are separate bind-mount sources of a containerized deployment, so `rename` reports `EXDEV` and the move degrades to a recursive copy followed by removal of the source. File modes and timestamps are preserved and symlinks are copied verbatim, so a relative link inside the tree still resolves at the archive location. Only a directory that is already gone is skipped: every other archive failure fails the `remove` call rather than answering `{ removed: true }`.
 - **Users are JWT subjects.** There is no user table: admission is a per-tenant `members` list, and a subject is anyone whose token `sub` resolves. `usersEnsure` materializes the user-tier directories before first use.
 
 ## Durability
@@ -62,4 +63,4 @@ Independent of the model request prefix.
 
 - **No credential or user management.** Subjects are JWT `sub` values; the surface admits or drops them from a tenant's `members` but mints no credentials.
 - **Record-only remove leaves orphans.** `remove` without `purge` deletes the record but keeps the partition and host directories; the operator is expected to re-create or purge.
-- **Purge is not transactional.** Directory archival runs before the partition drop, and a failure between the two leaves an archived tree alongside a still-present partition.
+- **Purge is not transactional.** The partition drop runs before the directory archival, so a failure in either step leaves a registered tenant whose partition may already be gone and whose directories are still on the host.

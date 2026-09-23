@@ -22,7 +22,8 @@
 
 - **创建时建分区。** schema 生命周期接缝会创建租户分区（Postgres 下为 `tenantPartitionName(id)`），使新租户的提供方不与其它租户共享存储。
 - **创建时建目录。** `bootstrapTenantDirs` 创建 `dataRoot`、案件共享层 `workspaceRoot/shared/{config,skills,tools}`，以及每个已准入成员的 `workspaceRoot/users/<sub>` 与 `usersRoot/<sub>/{config,skills,tools}`。这些路径都是该主体沙箱的绑定挂载源，因此由预置流程创建，而不是留给容器运行时在挂载点建一个空目录。
-- **归档而绝不删除。** `remove(id, purge: true)` 先把 `dataRoot` 与 `workspaceRoot` 移入 `archiveRoot/<id>-<timestamp>/`，再删除分区。purge 是归档而非删除宿主机数据。
+- **归档而绝不删除。** `remove(id, purge: true)` 先删除分区，再把 `dataRoot` 与 `workspaceRoot` 移入 `archiveRoot/<id>-<timestamp>/`。purge 是归档而非删除宿主机数据。
+- **跨文件系统归档靠复制。** 容器化部署里归档根与租户的各个根是两个独立的绑定挂载源，因此 `rename` 会报 `EXDEV`，移动退化为递归复制再删除源目录。文件权限与时间戳得以保留，符号链接按原样复制，因此目录树内的相对链接在归档位置仍然可解析。只有「目录本就不存在」会被跳过：其余任何归档失败都会让 `remove` 调用失败，而不是返回 `{ removed: true }`。
 - **用户即 JWT 主体。** 没有用户表：准入是每个租户的 `members` 列表，主体是任何 token `sub` 能解析出来的人。`usersEnsure` 在首次使用前物化用户层目录。
 
 ## 持久化
@@ -62,4 +63,4 @@
 
 - **没有凭据或用户管理。** 主体是 JWT 的 `sub` 值；管理面只能把主体加入或移出某个租户的 `members`，不签发任何凭据。
 - **仅删记录会留下孤儿。** 不带 `purge` 的 `remove` 只删记录，分区与宿主机目录仍在；运维需自行重建或 purge。
-- **purge 非事务化。** 目录归档先于分区删除，若中间失败会留下已归档的目录树与仍存在的分区。
+- **purge 非事务化。** 分区删除先于目录归档，因此任一步骤失败都会留下一个仍注册的租户：它的分区可能已被删除，而目录还在宿主机上。
