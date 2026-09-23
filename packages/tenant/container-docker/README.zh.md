@@ -95,6 +95,8 @@ docker build -f packages/tenant/container-docker/docker/Dockerfile \
   --build-arg NPM_REGISTRY=https://registry.npmmirror.com -t dsh-tool-exec:latest .
 ```
 
+覆盖基座时要保持 slim。`docker/build-images.sh` 会同时构建本镜像与宿主，本镜像的基座取自 `TOOL_EXEC_NODE_IMAGE`（默认 `node:22-bookworm-slim`），与宿主的 `NODE_IMAGE` 分开：完整的 `node:22-bookworm` 是 buildpack-deps，自带 `python3-minimal`，用它构建的沙箱会在挂载的解释器之外多带一个，并在 `PATH` 上遮蔽它。任何一次构建都用 `docker run --rm --entrypoint sh dsh-tool-exec:latest -c 'command -v python3 || echo NO-PYTHON'` 自检，必须打印 `NO-PYTHON`。
+
 ## 模型体验
 
 ### 租户与用户作用域容器执行

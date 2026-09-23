@@ -99,6 +99,8 @@ docker build -f packages/tenant/container-docker/docker/Dockerfile \
   --build-arg NPM_REGISTRY=https://registry.npmmirror.com -t dsh-tool-exec:latest .
 ```
 
+Keep the base slim when you override it. `docker/build-images.sh` builds this image and the host together and takes this one's base from `TOOL_EXEC_NODE_IMAGE` (default `node:22-bookworm-slim`), separately from the host's `NODE_IMAGE`: the full `node:22-bookworm` is buildpack-deps and ships `python3-minimal`, so a sandbox built on it carries an interpreter beside the mounted one and shadows it on `PATH`. Verify any build with `docker run --rm --entrypoint sh dsh-tool-exec:latest -c 'command -v python3 || echo NO-PYTHON'`, which must print `NO-PYTHON`.
+
 ## Model Experience
 
 ### Tenant- and user-scoped container execution
