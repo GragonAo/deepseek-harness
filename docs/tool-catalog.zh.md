@@ -43,6 +43,7 @@
 | `@deepseek-ai/dsh-tool-todo` | `todo_write` | `ctx.tools`、`owning Agent session` | `tool/call`、`todo/write`、`tool/result` | - | todo_write 是会话所有的状态；UI 将最新的 todo/write 事件渲染为检查清单。`allowParallelInProgress` 是没有默认值的必填项，因此本目录明确选择 `true`，对应描述允许同时存在多个 `in_progress` 项。选择 `false` 的部署会获得同一工具，但描述会要求只能有 1 个活动任务。 |
 | `@deepseek-ai/dsh-tool-workflow` | `workflow` | `ctx.tools`、`ctx.workflowEngine`、`ctx.systemPrompt`、`a calling Agent (exec.agent parents the script children)` | `tool/call`、`tool/result` | - | - |
 | `@deepseek-ai/dsh-tool-web` | `web_fetch`、`web_search` | `ctx.tools`、`ctx.web`、`ctx.systemPrompt` | `tool/call`、`tool/result` | - | web_search 和 web_fetch 将提供方选择置于 ctx.web 之后，使模型可见 schema 在更换后端时保持稳定。 |
+| `@deepseek-ai/dsh-tool-artifact` | `artifact_list`、`artifact_publish` | `ctx.tools`、`the authenticated (tenant, user) request scope at call time` | `tool/call`、`tool/result` | - | 两个工具都从已鉴权的请求作用域解析案件与主体，而不是从参数解析，因此在案件作用域之外的调用会失败，而不是回退到共享目录。artifact_publish 返回 Web 前端从回复中解析出的交付标签；前端匹配那几个确切字面量，所以该标签是固定协议，而不是部署配置。 |
 
 <a id="deepseek-aidsh-tool-ask-user"></a>
 
@@ -2223,3 +2224,70 @@ todo_write 是会话所有的状态；UI 将最新的 todo/write 事件渲染为
 来源：[`packages/web/tool-web/src/index.ts`](../packages/web/tool-web/src/index.ts)
 
 web_search 和 web_fetch 将提供方选择置于 ctx.web 之后，使模型可见 schema 在更换后端时保持稳定。
+
+<a id="deepseek-aidsh-tool-artifact"></a>
+
+## `@deepseek-ai/dsh-tool-artifact`
+
+### `artifact_list`
+
+列出你已经交付给该用户的文件，最新在前。这里只列出你自己发布的产物；同一案件其他主体发布的产物不可见。
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "limit": {
+      "type": "integer",
+      "description": "Largest number of entries to return; defaults to 50."
+    }
+  }
+}
+```
+
+来源：[`packages/tenant/tool-artifact/src/index.ts`](../packages/tenant/tool-artifact/src/index.ts)
+
+### `artifact_publish`
+
+把你生成的文件交付给用户，让他们能打开或下载。你沙箱里的文件用户够不到：本工具把文件复制进 Web 前端所服务的案件库，并返回路径以及你的回复必须携带的交付标签。用户应当收到的每一个产物都用它——报告、表格、HTML 摘要、图表、数据导出。已发布的副本不可变：再次发布会生成一个新文件，而源文件除非你传 move，否则留在你的工作区。
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "file_path": {
+      "type": "string",
+      "description": "The file to deliver, as this sandbox sees it — absolute, or relative to the working directory."
+    },
+    "title": {
+      "type": "string",
+      "description": "Title recorded in the delivered file name; defaults to the source file name."
+    },
+    "kind": {
+      "type": "string",
+      "description": "Delivery folder; inferred from the file extension when omitted.",
+      "enum": [
+        "html",
+        "docs",
+        "sheets",
+        "slides",
+        "images",
+        "data",
+        "packages",
+        "other"
+      ]
+    },
+    "move": {
+      "type": "boolean",
+      "description": "Move the file instead of copying it. Defaults to false, which leaves the source readable."
+    }
+  },
+  "required": [
+    "file_path"
+  ]
+}
+```
+
+来源：[`packages/tenant/tool-artifact/src/index.ts`](../packages/tenant/tool-artifact/src/index.ts)
+
+两个工具都从已鉴权的请求作用域解析案件与主体，而不是从参数解析，因此在案件作用域之外的调用会失败，而不是回退到共享目录。artifact_publish 还会返回 Web 前端从回复中解析出的交付标签；前端匹配那几个确切字面量，所以该标签是固定协议，而不是部署配置。

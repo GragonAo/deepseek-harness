@@ -66,6 +66,7 @@ import * as ToolWeb from '@deepseek-ai/dsh-tool-web'
 import VmWorkflowEngine from '@deepseek-ai/dsh-workflow-worker-thread'
 import * as ToolRalph from '@deepseek-ai/dsh-tool-ralph'
 import * as ToolWorkflow from '@deepseek-ai/dsh-tool-workflow'
+import * as ToolArtifact from '@deepseek-ai/dsh-tool-artifact'
 import { githubSlug } from './verify-md-links.ts'
 
 /** Attachment seam marker that makes the attachments-conditional `read_image` schema harvestable. */
@@ -605,6 +606,28 @@ const TOOL_PACKAGES: ToolPackage[] = [
     },
     note:
       'web_search and web_fetch keep provider selection behind ctx.web so model-visible schemas stay stable across backend swaps.',
+  },
+  {
+    pkg: '@deepseek-ai/dsh-tool-artifact',
+    dir: 'tool-artifact',
+    source: 'packages/tenant/tool-artifact/src/index.ts',
+    requires: ['ctx.tools', 'the authenticated (tenant, user) request scope at call time'],
+    writes: ['tool/call', 'tool/result'],
+    async mount(ctx) {
+      // Both tools read the case and the subject from the request scope, so the
+      // harvest needs no tenant record. The package's Config type requires its
+      // defaulted fields too; none of them reaches a harvested schema, and no
+      // harvest-time call resolves a path beneath mediaRoot.
+      await ctx.plugin(ToolArtifact, {
+        mediaRoot: resolve(root, '.tmp/tool-catalog/media'),
+        urlPrefix: '/media',
+        groupByKind: true,
+        maxBytes: 100 * 1024 * 1024,
+      })
+    },
+    note:
+      'Both tools resolve the case and the subject from the authenticated request scope rather than from arguments, so a call outside a case-scoped request fails instead of falling back to a shared directory. '
+      + 'artifact_publish returns the delivery tag the web front end parses out of the reply; the front end matches those exact literals, so the tag is a fixed protocol rather than deployment configuration.',
   },
 ]
 

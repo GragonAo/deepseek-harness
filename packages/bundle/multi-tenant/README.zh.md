@@ -10,22 +10,6 @@
 
 **部署补丁层只要命中 `container-runtime` 这一行，就是整行替换它的 `config` 对象。** patch 语义是把补丁条目的每个键赋到条目上，所以 `config` 是被覆盖而不是被合并；部署方若给这一行补 `systemRoot`（或任何其它字段），就必须把 `usersRoot`、`pythonRoot` 与各上界一并重述。它省略的字段会退回 schema 默认值，而 `usersRoot` 与 `pythonRoot` 的默认值是「没有值」——于是变成静默不挂载，而不是加载失败。`dsh --profile multi-tenant --dump-config` 会打印组合后的整棵树，这是加过任何一层之后核对生效行的办法。
 
-## 模型体验
-
-间接来自被插入的行：`agent-http` 校验 bearer 令牌并把网关请求限定到一个 `(tenant, user)`，容器 provider 在该 `(tenant, user)` 的容器内运行每次工具调用（挂载 `/workspace` 加 `/shared` 与 `/global`）。`tools.mode` 钉扎在标准单用户原生工具面之上追加 Code Mode 的 `run_code` 工具（及其 `tools:sdk` 提示段），其程序在该租户容器内执行。本 bundle 自身不贡献除此以外的模型可见文本。
-
-#### KV Cache 影响
-
-无直接影响；每个被插入行各自的包拥有其效应。
-
-## 已知局限与后续工作
-
-- **替换已通过 Loader 启动实证，但尚无一整回合真实 agent 回合** —— `tenant-demo/tests/multi-tenant-loader.spec.ts` 经 Loader 启动 base + web-app + 本 bundle（禁用浏览器表层行、钉住租户行、收拢确定性接缝），并断言每个被替换的 provider 都解析到位；真实 LLM + 真实 Docker/Postgres 的闭环回合仍是服务器这一步。
-- **workspace 注册表按 (租户, 用户) 键控且在作用域内初始为空** —— 它惰性打开每个分区的 KV 领域，因此同步的 `list()`/`get()` 投影在首次访问时返回空，直到某个异步方法打开该 (租户, 用户) 分区（[`@deepseek-ai/dsh-workspace`](../../workspace/workspace/README.md)）。
-- **两个载体互斥** —— profile 不得同时挂载 `dsh-client-connection`，否则 `agent-http` 与 `connection` 都会注册 `/api` 前缀，并在重复路由上加载失败。
-- **消息反馈与会话投影缓存被禁用** —— 两者都在 init 时预载各自的存储域，而租户级 Postgres 后端在请求之外没有环境租户，该预载会抛 `NO_TENANT_IN_SCOPE`。重新启用任一个都需要租户作用域（按请求）的预载。
-- **租户开通留在部署层** —— `tenant` 行以零记录启动；profile 的 patch 必须提供 `Config.tenants`。
-
 ## 怎么加一个挂载扩展
 
 业务对接不是 harness 的能力。一个只面向某个部署的案件平台、工单系统或内部 API 的插件属于那个部署，所以它不进 `packages/`；它以**挂载扩展**的形式发布 —— 一个部署方自己持有的目录 —— 改它就是换文件，而不是重建镜像。它依赖的 harness 能力只有 Loader 本来就有的路径解析。
@@ -61,3 +45,19 @@ docker exec dsh-multi-tenant node /opt/.dsh/profiles/multi-tenant/plugins/tool-s
 ```
 
 `tool-sync-file` 就是现成的例子：它对着 jeecg 案件平台注册 `sync_file_report` 和 `sync_file_skill`，地址取自该行的 `config.serverUrl`，案件与用户取自会话而不是工具参数。它的目录里带 `README.md`（挂载、配置、排错）和 `tests/selftest.mjs`。
+
+## 模型体验
+
+间接来自被插入的行：`agent-http` 校验 bearer 令牌并把网关请求限定到一个 `(tenant, user)`，容器 provider 在该 `(tenant, user)` 的容器内运行每次工具调用（挂载 `/workspace` 加 `/shared` 与 `/global`）。`tools.mode` 钉扎在标准单用户原生工具面之上追加 Code Mode 的 `run_code` 工具（及其 `tools:sdk` 提示段），其程序在该租户容器内执行。本 bundle 自身不贡献除此以外的模型可见文本。
+
+#### KV Cache 影响
+
+无直接影响；每个被插入行各自的包拥有其效应。
+
+## 已知局限与后续工作
+
+- **替换已通过 Loader 启动实证，但尚无一整回合真实 agent 回合** —— `tenant-demo/tests/multi-tenant-loader.spec.ts` 经 Loader 启动 base + web-app + 本 bundle（禁用浏览器表层行、钉住租户行、收拢确定性接缝），并断言每个被替换的 provider 都解析到位；真实 LLM + 真实 Docker/Postgres 的闭环回合仍是服务器这一步。
+- **workspace 注册表按 (租户, 用户) 键控且在作用域内初始为空** —— 它惰性打开每个分区的 KV 领域，因此同步的 `list()`/`get()` 投影在首次访问时返回空，直到某个异步方法打开该 (租户, 用户) 分区（[`@deepseek-ai/dsh-workspace`](../../workspace/workspace/README.md)）。
+- **两个载体互斥** —— profile 不得同时挂载 `dsh-client-connection`，否则 `agent-http` 与 `connection` 都会注册 `/api` 前缀，并在重复路由上加载失败。
+- **消息反馈与会话投影缓存被禁用** —— 两者都在 init 时预载各自的存储域，而租户级 Postgres 后端在请求之外没有环境租户，该预载会抛 `NO_TENANT_IN_SCOPE`。重新启用任一个都需要租户作用域（按请求）的预载。
+- **租户开通留在部署层** —— `tenant` 行以零记录启动；profile 的 patch 必须提供 `Config.tenants`。

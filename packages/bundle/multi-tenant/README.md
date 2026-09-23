@@ -10,22 +10,6 @@ This layer does set one deployment-shaped value itself: `container-runtime`'s `p
 
 **A deployment patch that targets the `container-runtime` row replaces that row's whole `config` object.** Patch semantics assign each key of the patch entry onto the entry, so `config` is overwritten rather than merged; a deployment adding `systemRoot` (or any other field) to that row must restate `usersRoot`, `pythonRoot`, and the bounds alongside it. Whatever it omits falls back to its schema default, which for `usersRoot` and `pythonRoot` is no value at all — a silently unmounted environment rather than a load failure. `dsh --profile multi-tenant --dump-config` prints the composed tree, which is how to check the effective row after any layer is added.
 
-## Model Experience
-
-Indirectly, through the inserted rows: `agent-http` verifies a bearer token and scopes the gateway request to one `(tenant, user)`, and the container providers run every tool call inside that `(tenant, user)`'s container (mounted at `/workspace` with `/shared` and `/global`). The `tools.mode` pin adds the Code Mode `run_code` tool (plus its `tools:sdk` prompt section) to the standard, single-user native tool surface, with its programs executing in the tenant container. This bundle contributes no further model-visible text of its own.
-
-#### KV Cache effect
-
-None directly; each inserted row's package owns its effect.
-
-## Known Limitations and Deferred Work
-
-- **The swap is boot-verified through the Loader, not a real agent turn** — `tenant-demo/tests/multi-tenant-loader.spec.ts` boots base + web-app + this bundle through the Loader (browser-surface rows disabled, tenant rows pinned, deterministic seams hemmed) and asserts each swapped provider resolved; the real-LLM + real-Docker/Postgres closed-loop turn remains the server step.
-- **The workspace registry is (tenant, user)-keyed and starts empty in a scope** — it opens each partition's KV domain lazily, so the synchronous `list()`/`get()` projections return empty on first access until an asynchronous method opens that (tenant, user) partition ([`@deepseek-ai/dsh-workspace`](../../workspace/workspace/README.md)).
-- **The two carriers are mutually exclusive** — a profile must not also mount `dsh-client-connection`, or `agent-http` and `connection` both register the `/api` prefix and fail the load on a duplicate route.
-- **Message feedback and the session-projection cache are disabled** — both bootstrap by preloading their storage domain at init, but the tenant-keyed Postgres backend has no ambient tenant outside a request, so that preload throws `NO_TENANT_IN_SCOPE`. Re-enabling either needs a tenant-scoped (per-request) preload.
-- **Tenant provisioning stays in the deployment layer** — the `tenant` row boots with zero records; the profile's patch must supply `Config.tenants`.
-
 ## Adding a mounted extension
 
 Business integration is not a harness capability. A plugin that speaks one deployment's case platform, ticketing system, or internal API belongs to that deployment, so it does not ship in `packages/`; it ships as a **mounted extension** — a directory the deployment owns — and changing it is a file replacement rather than an image rebuild. The only harness capability it leans on is the Loader's ordinary path resolution.
@@ -61,3 +45,19 @@ docker exec dsh-multi-tenant node /opt/.dsh/profiles/multi-tenant/plugins/tool-s
 ```
 
 `tool-sync-file` is the worked example: it registers `sync_file_report` and `sync_file_skill` against the jeecg case platform, takes its address from the row's `config.serverUrl`, and takes the case and user from the session rather than from tool arguments. Its directory carries `README.md` (mount, config, troubleshooting) and `tests/selftest.mjs`.
+
+## Model Experience
+
+Indirectly, through the inserted rows: `agent-http` verifies a bearer token and scopes the gateway request to one `(tenant, user)`, and the container providers run every tool call inside that `(tenant, user)`'s container (mounted at `/workspace` with `/shared` and `/global`). The `tools.mode` pin adds the Code Mode `run_code` tool (plus its `tools:sdk` prompt section) to the standard, single-user native tool surface, with its programs executing in the tenant container. This bundle contributes no further model-visible text of its own.
+
+#### KV Cache effect
+
+None directly; each inserted row's package owns its effect.
+
+## Known Limitations and Deferred Work
+
+- **The swap is boot-verified through the Loader, not a real agent turn** — `tenant-demo/tests/multi-tenant-loader.spec.ts` boots base + web-app + this bundle through the Loader (browser-surface rows disabled, tenant rows pinned, deterministic seams hemmed) and asserts each swapped provider resolved; the real-LLM + real-Docker/Postgres closed-loop turn remains the server step.
+- **The workspace registry is (tenant, user)-keyed and starts empty in a scope** — it opens each partition's KV domain lazily, so the synchronous `list()`/`get()` projections return empty on first access until an asynchronous method opens that (tenant, user) partition ([`@deepseek-ai/dsh-workspace`](../../workspace/workspace/README.md)).
+- **The two carriers are mutually exclusive** — a profile must not also mount `dsh-client-connection`, or `agent-http` and `connection` both register the `/api` prefix and fail the load on a duplicate route.
+- **Message feedback and the session-projection cache are disabled** — both bootstrap by preloading their storage domain at init, but the tenant-keyed Postgres backend has no ambient tenant outside a request, so that preload throws `NO_TENANT_IN_SCOPE`. Re-enabling either needs a tenant-scoped (per-request) preload.
+- **Tenant provisioning stays in the deployment layer** — the `tenant` row boots with zero records; the profile's patch must supply `Config.tenants`.
