@@ -7,6 +7,10 @@
 #
 # dsh-tool-exec is the per-(tenant,user) sandbox the host spawns at runtime;
 # dsh-multi-tenant is the host that compose starts directly.
+#
+# Neither image carries Python at all: the interpreter and every package the sandboxes
+# run come from the host directory compose mounts at /opt/.dsh/pyenv, maintained
+# outside this build (packages/tenant/container-docker/README.md).
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 NPM_REGISTRY=${NPM_REGISTRY:-https://registry.npmmirror.com}

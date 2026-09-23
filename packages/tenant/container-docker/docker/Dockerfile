@@ -7,6 +7,16 @@
 # runtime stage installs it explicitly — `node:22-bookworm-slim` ships only
 # dash as `/bin/sh`.
 #
+# The image carries no Python runtime: every interpreter and every package a case
+# skill imports comes from the host directory `Config.pythonRoot` mounts at its
+# own absolute path (packages/tenant/container-docker/README.md). One portable
+# Python lives on the host, so a version bump or a new dependency is one directory
+# change for every sandbox rather than an image rebuild, the interpreter version
+# cannot drift from the packages installed beside it, and this build reaches no
+# package index. A sandbox started without that mount has no `python3` at all,
+# which is the intended failure — the mount is a hard requirement, not an
+# optimization.
+#
 # Build from the repository root:
 #   docker build -f packages/tenant/container-docker/docker/Dockerfile \
 #     --build-arg NPM_REGISTRY=https://registry.npmmirror.com -t dsh-tool-exec:latest .
@@ -28,24 +38,17 @@ FROM ${NODE_IMAGE}
 RUN command -v bash >/dev/null 2>&1 || (apt-get update \
   && apt-get install -y --no-install-recommends bash \
   && rm -rf /var/lib/apt/lists/*)
-# Case data is Excel (.xlsx/.xls) and this image ships no reader for it. Install one
-# at build time — the sandbox downloads nothing at run time — from the PyPI mirror the
-# deployment host can reach. The interpreter has no ensurepip, so pip itself comes from
-# get-pip.py, and PEP 668's externally-managed marker is overridden because this image
-# exists only to run case tooling.
-ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
-RUN curl -sS https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py \
-  && python3 /tmp/get-pip.py --quiet --break-system-packages \
-  && pip3 install --no-cache-dir --break-system-packages -i "${PIP_INDEX_URL}" openpyxl xlrd pandas \
-  && rm -rf /tmp/get-pip.py /root/.cache/pip
 # Case skills are written against their original host layout: the bundled report
 # builder is invoked as /opt/data/skills/<skill>/report_html/build_report_html.py
-# with /opt/hermes/.venv/bin/python3. Both paths resolve inside the sandbox —
-# /opt/data/skills is the case-shared skill directory it is mounted from, and the
-# interpreter is this image's own python3.
+# with /opt/hermes/.venv/bin/python3. /opt/data/skills is the case-shared skill
+# directory it is mounted from; the interpreter is not in this image, so that path
+# is a wrapper around `python3` from PATH, where the provider puts the mounted
+# environment's bin directory first. With no environment mounted the wrapper fails
+# as `python3: not found` instead of running some other interpreter.
 RUN mkdir -p /opt/data /opt/hermes/.venv/bin \
   && ln -s /shared/skills /opt/data/skills \
-  && ln -s /usr/bin/python3 /opt/hermes/.venv/bin/python3
+  && printf '#!/bin/sh\nexec python3 "$@"\n' > /opt/hermes/.venv/bin/python3 \
+  && chmod 0755 /opt/hermes/.venv/bin/python3
 WORKDIR /opt/tool-exec
 COPY --from=build /build/tool-exec.mjs /build/entry.mjs ./
 EXPOSE 8642

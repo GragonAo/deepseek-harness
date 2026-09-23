@@ -16,6 +16,7 @@ import Loader, { type Entry, type EntryOptions } from '@deepseek-ai/cordis-plugi
 import Include, { applyEntryPatches, entryListSchema, type PatchOptions } from '@deepseek-ai/cordis-plugin-include'
 import Group from '@deepseek-ai/cordis-plugin-group'
 import { dshHomePath, resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+import { LOCAL_PLUGIN_PREFIX } from '@deepseek-ai/dsh-plugin-roots'
 import { createLaunchEnvironmentSnapshot, type LaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import type {} from '@deepseek-ai/cordis-plugin-hmr'
 // Side-effect type import: resolves `ctx.get('systemPrompt')` to the service.
@@ -473,6 +474,24 @@ function groupedDump(
 }
 
 /**
+ * Resolve a `local:` row to the URL of its entry file, through the mounted
+ * plugin roots service.
+ * @param ctx - the root include's context, which carries the roots service.
+ * @param name - the row's plugin specifier, prefix included.
+ * @returns the entry file's URL.
+ * @throws when no `plugin-roots` row is mounted above this one.
+ */
+function mountedPluginUrl(ctx: Context, name: string): string {
+  const roots = ctx.get('pluginRoots')
+  if (roots === undefined) {
+    throw new Error(
+      `${name}: no plugin root is configured. Add a @deepseek-ai/dsh-plugin-roots row carrying \`roots:\` above this entry.`,
+    )
+  }
+  return pathToFileURL(roots.resolve(name.slice(LOCAL_PLUGIN_PREFIX.length))).href
+}
+
+/**
  * Mount and remember the exact root Include entry used by app boot and user patch-layer HMR.
  * @param ctx - context carrying an initialized Loader service.
  * @param absoluteConfigPath - absolute YAML or JSON configuration path.
@@ -482,6 +501,8 @@ function groupedDump(
  * @returns the created root Include entry, or `undefined` when a surface
  * disposed the whole tree (taking the Loader service with it) while the
  * transactional create was still settling entry lifecycle.
+ * @throws when a `local:` row names no resolvable mounted plugin, or when no
+ * `plugin-roots` row is mounted above it.
  */
 export async function mountRootInclude(
   ctx: Context,
@@ -489,19 +510,18 @@ export async function mountRootInclude(
   patches: readonly PatchOptions[] = [],
   bareModuleBaseUrl?: string,
 ): Promise<Entry | undefined> {
-  ctx.loader.builtins.include = bareModuleBaseUrl === undefined
-    ? Include
-    : class HostResolvedRootInclude extends Include {
-      override import(name: string, getOuterStack?: () => string[]): unknown {
-        const specifier = isAbsolute(name) ? pathToFileURL(name).href : name
-        if (name.startsWith('.') || name.startsWith('cordis:')) return super.import(specifier, getOuterStack)
-        const internal = this.ctx.loader.internal
-        /* v8 ignore next -- Node supplies the internal loader; this preserves the
-           original diagnostic for hypothetical embedders without it. */
-        if (internal === undefined) return super.import(specifier, getOuterStack)
-        return internal.import(specifier, bareModuleBaseUrl, {})
-      }
+  ctx.loader.builtins.include = class HostResolvedRootInclude extends Include {
+    override import(name: string, getOuterStack?: () => string[]): unknown {
+      if (name.startsWith(LOCAL_PLUGIN_PREFIX)) return super.import(mountedPluginUrl(this.ctx, name), getOuterStack)
+      const specifier = isAbsolute(name) ? pathToFileURL(name).href : name
+      if (name.startsWith('.') || name.startsWith('cordis:')) return super.import(specifier, getOuterStack)
+      const internal = this.ctx.loader.internal
+      /* v8 ignore next -- Node supplies the internal loader; this preserves the
+         original diagnostic for hypothetical embedders without it. */
+      if (internal === undefined || bareModuleBaseUrl === undefined) return super.import(specifier, getOuterStack)
+      return internal.import(specifier, bareModuleBaseUrl, {})
     }
+  }
   // `cordis:group` alongside it: a group row is how a composition gives one
   // `isolate` realm to a provider and its consumers together, and an agent
   // preset living outside this workspace cannot resolve `@deepseek-ai/cordis-plugin-group`

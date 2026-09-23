@@ -45,6 +45,7 @@
     "@deepseek-ai/dsh-container-docker": "workspace:^",
     "@deepseek-ai/dsh-credentials-postgres": "workspace:^",
     "@deepseek-ai/dsh-fs-container": "workspace:^",
+    "@deepseek-ai/dsh-mcp-client": "workspace:^",
     "@deepseek-ai/dsh-session-persistence-postgres": "workspace:^",
     "@deepseek-ai/dsh-settings-postgres": "workspace:^",
     "@deepseek-ai/dsh-settings-tier": "workspace:^",

@@ -6,6 +6,10 @@
 
 租户记录、按成员分层的用户根（`DSH_USERS_ROOT`）、租户管理的归档根（`DSH_ARCHIVE_ROOT`）、Postgres 坐标（`DSH_POSTGRES_URL`）与认证材料（`DSH_OIDC_ISSUER`/`DSH_OIDC_SECRET`）刻意留在部署方自己的 profile `cordis.patch.yml`（或环境变量）中：本层只表达 provider 替换，缺失值会在加载时大声失败，因为租户 provider 的配置字段是必填的。
 
+本层自己也设了一个带部署含义的值：`container-runtime` 的 `pythonRoot` 指向 `/opt/.dsh/pyenv`——运维在宿主上维护的唯一一份 Python 运行时，以同一绝对路径只读挂进每个沙箱。tool-exec 镜像不带解释器，所以这个目录就是沙箱唯一的 Python：一份可重定位的构建里同时含解释器、标准库与全部包，运维就地更新它，就等于把每个沙箱换到新版本或新依赖（[挂载语义](../../tenant/container-docker/README.md)）。provider 是在宿主进程里读这个目录的，所以宿主自身跑在容器里的部署必须让该路径在那个容器里同样可见——挂这个目录本身，或按同一路径挂它的父目录都可以。[`docker/docker-compose.multi-tenant.yml`](../../../docker/docker-compose.multi-tenant.yml) 显式挂了该目录，因为它没有挂它的任何父目录；而宿主进程读不到的 `pythonRoot` 会让加载失败，而不是什么都不配。因此全新部署要在第一次启动之前就把 `/opt/.dsh/pyenv` 建出来，而且这个目录必须真的装着环境、不能只是存在：宿主上没有它，或者它里面 `bin`、`pyvenv.cfg`、`lib/python3.<minor>/site-packages` 一个都没有时，都会拒绝启动，而不是让沙箱在没有解释器的情况下跑起来。挡住「Docker 为缺失的挂载源自动建出的空目录」的正是这次拒绝，而不是运维记住了顺序。
+
+**部署补丁层只要命中 `container-runtime` 这一行，就是整行替换它的 `config` 对象。** patch 语义是把补丁条目的每个键赋到条目上，所以 `config` 是被覆盖而不是被合并；部署方若给这一行补 `systemRoot`（或任何其它字段），就必须把 `usersRoot`、`pythonRoot` 与各上界一并重述。它省略的字段会退回 schema 默认值，而 `usersRoot` 与 `pythonRoot` 的默认值是「没有值」——于是变成静默不挂载，而不是加载失败。`dsh --profile multi-tenant --dump-config` 会打印组合后的整棵树，这是加过任何一层之后核对生效行的办法。
+
 ## 模型体验
 
 间接来自被插入的行：`agent-http` 校验 bearer 令牌并把网关请求限定到一个 `(tenant, user)`，容器 provider 在该 `(tenant, user)` 的容器内运行每次工具调用（挂载 `/workspace` 加 `/shared` 与 `/global`）。`tools.mode` 钉扎在标准单用户原生工具面之上追加 Code Mode 的 `run_code` 工具（及其 `tools:sdk` 提示段），其程序在该租户容器内执行。本 bundle 自身不贡献除此以外的模型可见文本。

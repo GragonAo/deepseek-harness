@@ -17,6 +17,11 @@
 # under \`/opt/dsh-deploy\` — stay outside it: compose mounts them and the entrypoint
 # replays the patches on every start. Rebuilding the image is the upgrade step after
 # an upstream sync.
+#
+# The sandboxes' Python runtime is one more bind mount: the tool-exec image carries
+# no interpreter, so compose mounts the host directory at /opt/.dsh/pyenv and every
+# sandbox runs that one. It is maintained outside this build
+# (packages/tenant/container-docker/README.md).
 
 ARG NODE_IMAGE=node:22-bookworm
 ARG DOCKER_CLI_IMAGE=docker:27-cli

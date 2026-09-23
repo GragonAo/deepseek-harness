@@ -637,6 +637,38 @@ export interface Config {
    * reach the model.
    */
   systemRoot?: string
+  /**
+   * Host directory holding the Python runtime every sandbox runs against,
+   * bind-mounted read-only at the same absolute path. The tool-exec image ships
+   * no interpreter of its own, so this directory is the sandbox's only Python:
+   * one portable build (interpreter, standard library, and packages in that one
+   * directory, e.g. a python-build-standalone `install_only` tree) serves every
+   * sandbox, and a version bump or a new dependency is one directory change
+   * rather than an image rebuild. It must run on the image's own glibc (Debian
+   * 12), because a build made for a newer one fails to load; a virtual
+   * environment is not usable here, since it depends on the standard library
+   * and `libpython` of the system it was created on.
+   * `<pythonRoot>/bin` goes to the front of `PATH`, `<pythonRoot>/pyvenv.cfg`
+   * makes the directory `VIRTUAL_ENV`, and
+   * `<pythonRoot>/lib/python3.<minor>/site-packages` joins `PYTHONPATH`.
+   * When omitted nothing is mounted and no Python variable is set, so a sandbox
+   * has no `python3` at all. A configured path fails the load when this process
+   * cannot read it, and also when it holds none of those three markers: either
+   * way the mount would configure nothing, and Docker creating a missing
+   * bind-mount source as an empty directory makes the second case the likeliest
+   * way to reach it.
+   */
+  pythonRoot?: string
+  /**
+   * `PATH` the tool-exec image gives its commands, used when `pythonRoot` puts
+   * a mounted interpreter's `bin` directory first: `docker run -e PATH=`
+   * replaces the image's value instead of extending it, so the rest of PATH has
+   * to be restated. Defaults to the shipped image's Debian base PATH
+   * (`node:22-bookworm-slim`; `docker/Dockerfile` sets none of its own).
+   * Change it together with `toolExecImage` whenever that image's PATH differs,
+   * or the directories it adds disappear from every sandbox command.
+   */
+  toolExecImagePath?: string
   /** Milliseconds of exec idleness before the container is reaped. Omit to keep. */
   idleTimeoutMs?: number
   /**
@@ -675,7 +707,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/tenant/container-docker/src/index.ts:62`](../packages/tenant/container-docker/src/index.ts)
+Source: [`packages/tenant/container-docker/src/index.ts:64`](../packages/tenant/container-docker/src/index.ts)
 
 <a id="deepseek-aidsh-cordis-host-runner"></a>
 
@@ -1670,6 +1702,24 @@ export interface PlanModeConfig {
 ```
 
 Source: [`packages/plan/plan-mode/src/index.ts:71`](../packages/plan/plan-mode/src/index.ts)
+
+<a id="deepseek-aidsh-plugin-roots"></a>
+
+## `@deepseek-ai/dsh-plugin-roots`
+
+```ts config-catalog
+/** Mounted plugin roots configuration. */
+export interface Config {
+  /**
+   * Absolute directories searched, in order, for a mounted plugin reference.
+   * Empty (the default) resolves no reference: loading executable code from a
+   * directory is a trust decision only the deployment can make.
+   */
+  roots?: string[]
+}
+```
+
+Source: [`packages/boot/plugin-roots/src/index.ts:28`](../packages/boot/plugin-roots/src/index.ts)
 
 <a id="deepseek-aidsh-pwsh-local"></a>
 

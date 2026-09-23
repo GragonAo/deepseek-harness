@@ -102,6 +102,15 @@ describe('multi-tenant bundle boot', () => {
     const web = loadOverlayPatches('mt loader', WEB_PATCH)
     const multiTenant = loadOverlayPatches('mt loader', MULTI_TENANT_PATCH)
 
+    // The bundle mounts a host Python environment at an absolute path no test
+    // machine has, and the provider refuses to load when that directory is not
+    // readable or holds no environment, so the hermetic boot points it at a
+    // throwaway world holding one marker of an environment. A patch replaces
+    // this row's whole config: the fields not restated here are the ones whose
+    // schema default already equals the bundle's value.
+    const pythonRoot = join(world, 'pyenv')
+    await mkdir(join(pythonRoot, 'bin'), { recursive: true })
+
     const hermetic: PatchOptions[] = [
       // Agent composition resolves nothing at boot; a turn would get no tools.
       { id: 'agent-presets', config: { default: 'standard', roots: [], includeUserRoot: false } },
@@ -131,6 +140,7 @@ describe('multi-tenant bundle boot', () => {
           archiveRoot: join(world, 'archive'),
         },
       },
+      { id: 'container-runtime', config: { pythonRoot } },
       { id: 'tenant-auth-jwt', config: { issuer: 'mt-test', secret: 'mt-test-secret' } },
       {
         id: 'tenant',

@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { ContainerCommandResult } from '@deepseek-ai/dsh-container'
@@ -5,6 +8,8 @@ import { TenantId, UserId, runWithTenant, runWithUser } from '@deepseek-ai/dsh-t
 import type { Tenant } from '@deepseek-ai/dsh-tenant'
 import { DockerContainerRuntime } from '../src/index.ts'
 import type { Config, DockerRunner, ToolExecClient } from '../src/index.ts'
+import { hostPathProbe } from '../src/python-env.ts'
+import type { HostPathProbe } from '../src/python-env.ts'
 import type { ToolExecRequest, ToolExecResult } from '../src/tool-exec.ts'
 
 function tenant(id: string): Tenant {
@@ -45,8 +50,52 @@ class FakeClient implements ToolExecClient {
   }
 }
 
-function mount(runner: DockerRunner, client: ToolExecClient, config: Config = { runtime: 'docker' }): DockerContainerRuntime {
-  return new DockerContainerRuntime(new Context(), config, runner, client)
+function mount(
+  runner: DockerRunner,
+  client: ToolExecClient,
+  config: Config = { runtime: 'docker' },
+  probe?: HostPathProbe,
+): DockerContainerRuntime {
+  return new DockerContainerRuntime(new Context(), config, runner, client, probe)
+}
+
+/**
+ * A host filesystem probe over an in-memory tree: exactly the directories and
+ * files it is given, and nothing else. `readdir` derives the entry names
+ * directly under a directory from those directories, which is all the Python
+ * environment resolution asks of it.
+ */
+class FakeProbe implements HostPathProbe {
+  private readonly directories: readonly string[]
+  private readonly files: readonly string[]
+
+  constructor(directories: readonly string[], files: readonly string[] = []) {
+    this.directories = directories
+    this.files = files
+  }
+
+  isDirectory(path: string): boolean {
+    return this.directories.includes(path)
+  }
+
+  isFile(path: string): boolean {
+    return this.files.includes(path)
+  }
+
+  readdir(path: string): string[] {
+    const prefix = `${path}/`
+    return [...new Set(this.directories
+      .filter(directory => directory.startsWith(prefix))
+      .map(directory => directory.slice(prefix.length).split('/')[0] ?? ''))]
+  }
+}
+
+/** A probe that fails the test if the provider consults it at all. */
+function unconsultedProbe(): HostPathProbe {
+  const fail = (): never => {
+    throw new Error('the host filesystem was probed without a configured pythonRoot')
+  }
+  return { isDirectory: fail, isFile: fail, readdir: fail }
 }
 
 /**
@@ -206,6 +255,122 @@ describe('DockerContainerRuntime', () => {
     expect(runCall).not.toContain('/opt/.dsh/system')
   })
 
+  it('mounts the configured Python environment read-only and points the sandbox at it', async () => {
+    const runner = new FakeRunner()
+    const runtime = mount(
+      runner,
+      new FakeClient(),
+      { runtime: 'docker', pythonRoot: '/opt/.dsh/pyenv' },
+      new FakeProbe(
+        [
+          '/opt/.dsh/pyenv',
+          '/opt/.dsh/pyenv/bin',
+          '/opt/.dsh/pyenv/lib/python3.11/site-packages',
+          // A second version directory holding no packages, and a `lib` entry that
+          // is no version directory: neither contributes a PYTHONPATH entry.
+          '/opt/.dsh/pyenv/lib/python3.12',
+          '/opt/.dsh/pyenv/lib/site-packages',
+        ],
+        ['/opt/.dsh/pyenv/pyvenv.cfg'],
+      ),
+    )
+    await scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi']))
+    const runCall = runner.calls.find(c => c[0] === 'run')
+    expect(runCall).toContain('/opt/.dsh/pyenv:/opt/.dsh/pyenv:ro')
+    expect(runCall).toContain('VIRTUAL_ENV=/opt/.dsh/pyenv')
+    expect(runCall).toContain('PYTHONPATH=/opt/.dsh/pyenv/lib/python3.11/site-packages')
+    // `docker run -e PATH=…` replaces the image's PATH, so the mounted bin
+    // directory is prepended to the image's own value, not to the host's.
+    const pathArg = runCall?.find(arg => arg.startsWith('PATH='))
+    expect(pathArg?.startsWith('PATH=/opt/.dsh/pyenv/bin:')).toBe(true)
+    expect(pathArg).not.toBe('PATH=/opt/.dsh/pyenv/bin:')
+  })
+
+  it('mounts no Python environment and sets no Python variable when pythonRoot is absent', async () => {
+    const runner = new FakeRunner()
+    const runtime = mount(runner, new FakeClient(), { runtime: 'docker' }, unconsultedProbe())
+    await scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi']))
+    const runCall = runner.calls.find(c => c[0] === 'run')
+    expect(runCall).not.toContain('/opt/.dsh/pyenv')
+    expect(runCall?.some(arg => /^(?:PATH|VIRTUAL_ENV|PYTHONPATH)=/u.test(arg))).toBe(false)
+  })
+
+  it('prepends PATH alone for a mounted directory that is no virtual environment', async () => {
+    const runner = new FakeRunner()
+    const runtime = mount(
+      runner,
+      new FakeClient(),
+      { runtime: 'docker', pythonRoot: '/opt/.dsh/pyenv' },
+      new FakeProbe(['/opt/.dsh/pyenv', '/opt/.dsh/pyenv/bin']),
+    )
+    await scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi']))
+    const runCall = runner.calls.find(c => c[0] === 'run')
+    expect(runCall).toContain('/opt/.dsh/pyenv:/opt/.dsh/pyenv:ro')
+    expect(runCall?.find(arg => arg.startsWith('PATH='))?.startsWith('PATH=/opt/.dsh/pyenv/bin:')).toBe(true)
+    expect(runCall?.some(arg => arg.startsWith('VIRTUAL_ENV='))).toBe(false)
+    expect(runCall?.some(arg => arg.startsWith('PYTHONPATH='))).toBe(false)
+  })
+
+  it('refuses to load when the configured pythonRoot is not a directory this host can read', () => {
+    // Configured but invisible: mounting it would produce an empty directory and
+    // no Python variable at all, so the load fails instead of degrading.
+    expect(() => mount(
+      new FakeRunner(),
+      new FakeClient(),
+      { runtime: 'docker', pythonRoot: '/opt/.dsh/pyenv' },
+      new FakeProbe([]),
+    )).toThrow(/pythonRoot '\/opt\/\.dsh\/pyenv' is not a directory this process can read/u)
+    // A path that exists as a file is no more usable than a missing one.
+    expect(() => mount(
+      new FakeRunner(),
+      new FakeClient(),
+      { runtime: 'docker', pythonRoot: '/opt/.dsh/pyenv' },
+      new FakeProbe([], ['/opt/.dsh/pyenv']),
+    )).toThrow(/\/opt\/\.dsh\/pyenv/u)
+  })
+
+  it('refuses to load when the configured pythonRoot holds no Python environment', () => {
+    // An existing directory with none of the three markers configures nothing,
+    // and Docker turns a missing bind-mount source into exactly this, so the
+    // load fails instead of starting a sandbox with no interpreter.
+    expect(() => mount(
+      new FakeRunner(),
+      new FakeClient(),
+      { runtime: 'docker', pythonRoot: '/opt/.dsh/pyenv' },
+      new FakeProbe(['/opt/.dsh/pyenv']),
+    )).toThrow(/pythonRoot '\/opt\/\.dsh\/pyenv' is a directory holding no Python environment/u)
+    // A directory with something else in it is no environment either.
+    expect(() => mount(
+      new FakeRunner(),
+      new FakeClient(),
+      { runtime: 'docker', pythonRoot: '/opt/.dsh/pyenv' },
+      new FakeProbe(['/opt/.dsh/pyenv', '/opt/.dsh/pyenv/wheels']),
+    )).toThrow(/is a directory holding no Python environment/u)
+  })
+
+  it('restates a configured toolExecImagePath when the mounted bin directory is prepended', async () => {
+    const runner = new FakeRunner()
+    const runtime = mount(
+      runner,
+      new FakeClient(),
+      { runtime: 'docker', pythonRoot: '/opt/.dsh/pyenv', toolExecImagePath: '/opt/node/bin:/usr/bin:/bin' },
+      new FakeProbe(['/opt/.dsh/pyenv', '/opt/.dsh/pyenv/bin']),
+    )
+    await scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi']))
+    const runCall = runner.calls.find(c => c[0] === 'run')
+    expect(runCall).toContain('PATH=/opt/.dsh/pyenv/bin:/opt/node/bin:/usr/bin:/bin')
+  })
+
+  it('tells the sandbox which case and subject it belongs to', async () => {
+    const runner = new FakeRunner()
+    const runtime = mount(runner, new FakeClient())
+    await scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi']))
+    const runCall = runner.calls.find(c => c[0] === 'run')
+    expect(runCall).toContain('DSH_CASE_ID=acme')
+    expect(runCall).toContain('DSH_TENANT_ID=acme')
+    expect(runCall).toContain('DSH_USER_ID=user-1')
+  })
+
   it('waits for the tool-exec server to answer before the first exec', async () => {
     const runner = new FakeRunner()
     let attempts = 0
@@ -335,5 +500,26 @@ describe('DockerContainerRuntime', () => {
     // The shared start outlives this caller, but the caller does not wait for it.
     await expect(pending).rejects.toThrow('aborted')
     expect(runner.starts).toBe(0)
+  })
+})
+
+describe('hostPathProbe', () => {
+  it('reports directories, files, and entry names, and nothing for a path it cannot read', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-python-env-'))
+    try {
+      mkdirSync(join(root, 'bin'))
+      writeFileSync(join(root, 'pyvenv.cfg'), 'home = /usr/bin\n')
+      expect(hostPathProbe.isDirectory(join(root, 'bin'))).toBe(true)
+      expect(hostPathProbe.isDirectory(join(root, 'pyvenv.cfg'))).toBe(false)
+      expect(hostPathProbe.isFile(join(root, 'pyvenv.cfg'))).toBe(true)
+      expect(hostPathProbe.isFile(join(root, 'bin'))).toBe(false)
+      expect(hostPathProbe.isFile(join(root, 'missing'))).toBe(false)
+      expect(hostPathProbe.readdir(root).sort()).toEqual(['bin', 'pyvenv.cfg'])
+      // Absent and non-directory alike yield no candidate.
+      expect(hostPathProbe.readdir(join(root, 'missing'))).toEqual([])
+      expect(hostPathProbe.readdir(join(root, 'pyvenv.cfg'))).toEqual([])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })

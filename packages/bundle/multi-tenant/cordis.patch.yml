@@ -120,7 +120,25 @@
     - id: container-runtime
       name: '@deepseek-ai/dsh-container-docker'
       config:
+        # A deployment patch that targets this row REPLACES this whole config
+        # object (patch semantics assign each key of the patch onto the entry),
+        # so it has to restate every field it wants to keep: usersRoot,
+        # pythonRoot, and the bounds below. The ones omitted silently fall back
+        # to their schema default, which for usersRoot and pythonRoot is no
+        # value at all. Verify the effective tree with
+        # `dsh --profile multi-tenant --dump-config`.
         usersRoot: !!js process.env.DSH_USERS_ROOT
+        # The one Python runtime operations maintain on the host, mounted
+        # read-only into every sandbox at this same absolute path: updating that
+        # directory updates every sandbox's interpreter and dependencies, with no
+        # image rebuild. The tool-exec image carries no Python, so this is the
+        # sandbox's only interpreter and must be a complete relocatable build
+        # (python-build-standalone install_only, or a conda environment) that runs
+        # on the image's Debian 12 glibc.
+        # The directory must be readable at this path by the host process itself, so
+        # a harness running in its own container needs the host directory
+        # mounted into it as well (docker/docker-compose.multi-tenant.yml).
+        pythonRoot: /opt/.dsh/pyenv
         cliTimeoutMs: 60000
         startTimeoutMs: 180000
         transportTimeoutMs: 600000
@@ -224,3 +242,110 @@
 - id: user-questions
   config:
     answerTimeoutMs: 120000
+
+# ── case-platform MCP servers (jeecg-boot-mcp-server) ───────────────────────
+# One instance per serverKey, each registering its own `mcp__<serverName>__*`
+# tools, mirroring the platform's `mcp_server` rows. The tool counts below are
+# what each serverKey registered when this list was written; the platform owns
+# the actual tool set, so a deployment reads it from the server, not here.
+#
+# ⚠️ THE URLS BELOW ARE THIS DEPLOYMENT'S, NOT THE PRODUCT'S — this block is
+# what an operator edits when the case platform moves. `127.0.0.1:19830` is the
+# mcp-server container's published port as seen from a DSH host that shares the
+# host network. A DSH host on a container network must address the service by
+# its own name and port instead (the Hermes deployment uses
+# `http://jeecg-boot-mcp-server:19830/mcp/<serverKey>`); neither address
+# resolves from the other side, and a wrong one fails at MCP connect, not at
+# boot.
+#
+# Identity: the mcp-server reads case_id / user_id / session from the tools/call
+# `_meta`; this client does not send `_meta` yet, so every case falls back to
+# the server-side `icac.case-id` default.
+#
+# ⚠️ A deployment patch that already inserts any `mcp-icac-*` id must drop that
+# row when this layer ships: a loader entry id may be inserted by one layer only,
+# and a second insert is a duplicate-id failure at boot, not an override.
+- insert:
+    - id: mcp-icac-case          # 1 个工具 —— 案件基础信息
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: icac-case
+        transport: streamable-http
+        url: http://127.0.0.1:19830/mcp/case
+
+    - id: mcp-icac-bill          # 31 个工具 —— 资金/账单
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: icac-bill
+        transport: streamable-http
+        url: http://127.0.0.1:19830/mcp/bill
+
+    - id: mcp-icac-callrecord          # 17 个工具 —— 话单
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: icac-callrecord
+        transport: streamable-http
+        url: http://127.0.0.1:19830/mcp/callrecord
+
+    - id: mcp-icac-property          # 12 个工具 —— 资产
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: icac-property
+        transport: streamable-http
+        url: http://127.0.0.1:19830/mcp/property
+
+    - id: mcp-icac-relationship          # 3 个工具 —— 关系
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: icac-relationship
+        transport: streamable-http
+        url: http://127.0.0.1:19830/mcp/relationship
+
+    - id: mcp-icac-trajectory          # 4 个工具 —— 轨迹
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: icac-trajectory
+        transport: streamable-http
+        url: http://127.0.0.1:19830/mcp/trajectory
+
+    - id: mcp-icac-timeline          # 2 个工具 —— 时光轴
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: icac-timeline
+        transport: streamable-http
+        url: http://127.0.0.1:19830/mcp/timeline
+
+    - id: mcp-icac-persona          # 42 个工具 —— 画像
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: icac-persona
+        transport: streamable-http
+        url: http://127.0.0.1:19830/mcp/persona
+
+    - id: mcp-icac-specialized          # 29 个工具 —— 专项（微信/支付宝/税务/发票/快递）
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: icac-specialized
+        transport: streamable-http
+        url: http://127.0.0.1:19830/mcp/specialized
+
+    - id: mcp-icac-doubt          # 5 个工具 —— 疑点模型
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: icac-doubt
+        transport: streamable-http
+        url: http://127.0.0.1:19830/mcp/doubt
+
+    - id: mcp-icac-import          # 3 个工具 —— 数据导入
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: icac-import
+        transport: streamable-http
+        url: http://127.0.0.1:19830/mcp/import
+
+    - id: mcp-icac-ai-analysis          # 11 个工具 —— 自然语言数据查询
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: icac-ai-analysis
+        transport: streamable-http
+        url: http://127.0.0.1:19830/mcp/ai-analysis

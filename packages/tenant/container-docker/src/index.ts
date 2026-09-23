@@ -28,6 +28,8 @@ import { requireTenant, requireUser, tenantPartitionName, userPartitionName } fr
 import type { Tenant, UserId } from '@deepseek-ai/dsh-tenant'
 import { cliRunner } from './runner.ts'
 import type { DockerRunner } from './runner.ts'
+import { hostPathProbe, resolvePythonEnvironment } from './python-env.ts'
+import type { HostPathProbe, PythonEnvironment } from './python-env.ts'
 import { execToolCommand } from './tool-exec.ts'
 import type { ToolExecRequest, ToolExecResult } from './tool-exec.ts'
 
@@ -99,6 +101,38 @@ export interface Config {
    * reach the model.
    */
   systemRoot?: string
+  /**
+   * Host directory holding the Python runtime every sandbox runs against,
+   * bind-mounted read-only at the same absolute path. The tool-exec image ships
+   * no interpreter of its own, so this directory is the sandbox's only Python:
+   * one portable build (interpreter, standard library, and packages in that one
+   * directory, e.g. a python-build-standalone `install_only` tree) serves every
+   * sandbox, and a version bump or a new dependency is one directory change
+   * rather than an image rebuild. It must run on the image's own glibc (Debian
+   * 12), because a build made for a newer one fails to load; a virtual
+   * environment is not usable here, since it depends on the standard library
+   * and `libpython` of the system it was created on.
+   * `<pythonRoot>/bin` goes to the front of `PATH`, `<pythonRoot>/pyvenv.cfg`
+   * makes the directory `VIRTUAL_ENV`, and
+   * `<pythonRoot>/lib/python3.<minor>/site-packages` joins `PYTHONPATH`.
+   * When omitted nothing is mounted and no Python variable is set, so a sandbox
+   * has no `python3` at all. A configured path fails the load when this process
+   * cannot read it, and also when it holds none of those three markers: either
+   * way the mount would configure nothing, and Docker creating a missing
+   * bind-mount source as an empty directory makes the second case the likeliest
+   * way to reach it.
+   */
+  pythonRoot?: string
+  /**
+   * `PATH` the tool-exec image gives its commands, used when `pythonRoot` puts
+   * a mounted interpreter's `bin` directory first: `docker run -e PATH=`
+   * replaces the image's value instead of extending it, so the rest of PATH has
+   * to be restated. Defaults to the shipped image's Debian base PATH
+   * (`node:22-bookworm-slim`; `docker/Dockerfile` sets none of its own).
+   * Change it together with `toolExecImage` whenever that image's PATH differs,
+   * or the directories it adds disappear from every sandbox command.
+   */
+  toolExecImagePath?: string
   /** Milliseconds of exec idleness before the container is reaped. Omit to keep. */
   idleTimeoutMs?: number
   /**
@@ -156,6 +190,8 @@ const DEFAULT_TRANSPORT_TIMEOUT_MS = 600_000
 const DEFAULT_READY_TIMEOUT_MS = 10_000
 /** Default for {@link Config.readyPollMs}. */
 const DEFAULT_READY_POLL_MS = 30
+/** Default for {@link Config.toolExecImagePath}. */
+const DEFAULT_TOOL_EXEC_IMAGE_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 
 function parsePublishedPort(stdout: string): number | undefined {
   const match = PUBLISHED_PORT.exec(stdout)
@@ -206,6 +242,8 @@ export class DockerContainerRuntime extends ContainerRuntime {
     connectHost: z.string().default('127.0.0.1'),
     usersRoot: z.string(),
     systemRoot: z.string(),
+    pythonRoot: z.string(),
+    toolExecImagePath: z.string().default(DEFAULT_TOOL_EXEC_IMAGE_PATH),
     idleTimeoutMs: z.natural().min(1),
     cliTimeoutMs: z.natural().min(1).default(DEFAULT_CLI_TIMEOUT_MS),
     startTimeoutMs: z.natural().min(1).default(DEFAULT_START_TIMEOUT_MS),
@@ -226,6 +264,8 @@ export class DockerContainerRuntime extends ContainerRuntime {
   private readonly connectHost: string
   private readonly usersRoot: string | undefined
   private readonly systemRoot: string | undefined
+  private readonly pythonEnv: PythonEnvironment | undefined
+  private readonly toolExecImagePath: string
   private readonly idleTimeoutMs: number | undefined
   private readonly cliTimeoutMs: number
   private readonly startTimeoutMs: number
@@ -238,7 +278,20 @@ export class DockerContainerRuntime extends ContainerRuntime {
   private readonly starting = new Map<string, Promise<TenantRuntime>>()
   private readonly idleTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
-  constructor(ctx: Context, config: Config, runner?: DockerRunner, client?: ToolExecClient) {
+  /**
+   * @param ctx - the Cordis context this provider registers its effects on.
+   * @param config - the validated plugin configuration.
+   * @param runner - container CLI seam; production spawns the configured binary.
+   * @param client - tool-exec HTTP seam; production posts to the published port.
+   * @param probe - host filesystem reads for the mounted Python environment; production reads the host.
+   */
+  constructor(
+    ctx: Context,
+    config: Config,
+    runner?: DockerRunner,
+    client?: ToolExecClient,
+    probe: HostPathProbe = hostPathProbe,
+  ) {
     super(ctx)
     this.runtimeName = config.runtime ?? 'docker'
     this.runner = runner ?? cliRunner(this.runtimeName)
@@ -250,6 +303,14 @@ export class DockerContainerRuntime extends ContainerRuntime {
     this.connectHost = config.connectHost ?? '127.0.0.1'
     this.usersRoot = config.usersRoot
     this.systemRoot = config.systemRoot
+    // Probed once, on the host: the environment's layout fixes the container's
+    // start arguments for its lifetime. Packages installed into that directory
+    // reach the next sandbox, but creating its bin/pyvenv.cfg/lib after boot
+    // needs a restart.
+    this.pythonEnv = config.pythonRoot === undefined
+      ? undefined
+      : resolvePythonEnvironment(config.pythonRoot, probe)
+    this.toolExecImagePath = config.toolExecImagePath ?? DEFAULT_TOOL_EXEC_IMAGE_PATH
     this.idleTimeoutMs = config.idleTimeoutMs
     this.cliTimeoutMs = config.cliTimeoutMs ?? DEFAULT_CLI_TIMEOUT_MS
     this.startTimeoutMs = config.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS
@@ -473,6 +534,16 @@ export class DockerContainerRuntime extends ContainerRuntime {
     if (tenant.toolsRoot !== undefined) {
       args.push('-v', `${tenant.toolsRoot}:/tools:ro`)
     }
+    args.push(...this.pythonArgs())
+    // The platform knows which case and subject a sandbox belongs to, so it
+    // states it: a skill that must locate its own case otherwise infers identity
+    // from the container name or the `/shared` directory name, and Docker sets
+    // `/etc/hostname` to the container id, so that inference lands nowhere.
+    args.push(
+      '-e', `DSH_CASE_ID=${tenant.id}`,
+      '-e', `DSH_TENANT_ID=${tenant.id}`,
+      '-e', `DSH_USER_ID=${user}`,
+    )
     args.push(this.toolExecImage)
     const result = await this.runCli(args, signal)
     if (result.exitCode !== 0) {
@@ -487,6 +558,27 @@ export class DockerContainerRuntime extends ContainerRuntime {
   /** The stable, (tenant, user)-partitioned name of one subject's container. */
   private containerName(tenant: Tenant, user: UserId): string {
     return `dsh-${tenantPartitionName(tenant.id)}-${userPartitionName(user)}`
+  }
+
+  /**
+   * The mount and environment variables that put the host's Python environment
+   * in front of the sandbox's own interpreter.
+   *
+   * Read-only at its own absolute path, because the environment's scripts,
+   * `pyvenv.cfg`, and `.pth` files name that path and the sandbox only reads
+   * it. Each variable follows its own probe: a directory holding only `bin`
+   * gets `PATH` alone.
+   *
+   * @returns the `docker run` arguments for the mounted environment, empty when none is configured.
+   */
+  private pythonArgs(): string[] {
+    const environment = this.pythonEnv
+    if (environment === undefined) return []
+    const args = ['-v', `${environment.root}:${environment.root}:ro`]
+    if (environment.bin !== undefined) args.push('-e', `PATH=${environment.bin}:${this.toolExecImagePath}`)
+    if (environment.virtualEnv !== undefined) args.push('-e', `VIRTUAL_ENV=${environment.virtualEnv}`)
+    if (environment.sitePackages !== undefined) args.push('-e', `PYTHONPATH=${environment.sitePackages}`)
+    return args
   }
 
   private async readPublishedPort(name: string, signal: AbortSignal): Promise<number> {

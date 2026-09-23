@@ -15,7 +15,9 @@
 # 2. 挂载路径宿主/容器必须完全一致 —— 租户记录里的 dataRoot / workspaceRoot / toolsRoot
 #    和 DSH_USERS_ROOT 都会被原样交给 `docker -v`，由宿主 daemon 解析；同一路径又必须在
 #    这个容器里可见（bootstrapTenantDirs、skill/settings/tools tier 都直接读它）。
-#    所以下面每一行都是 /x:/x，不是随便配的。
+#    所以下面每一行都是 /x:/x，不是随便配的。pythonRoot（Python 运行时目录）同理，但
+#    只要求宿主进程能按同一路径读到它；读不到时加载直接报错，不会静默降级。注意
+#    Docker 会把不存在的挂载源建成空目录，所以要先建好环境再 up（见下面 volumes）。
 #
 # 环境变量：放在 compose 文件同目录的 .env（compose 默认读该目录），或 export 后 up，
 # 或 docker compose --env-file <file> -f <this> up -d。
@@ -69,6 +71,21 @@ services:
       # 每个用户的 /workspace 是 <workspaceRoot>/users/<sub>，case 共享目录是
       # <workspaceRoot>/shared，都在这棵树里，所以这一行覆盖了租户的全部持久化数据。
       - /root/work/tenants:/root/work/tenants
+      # Python 运行时目录（硬约束 2 的同类）：tool-exec 镜像里没有 Python，沙箱的
+      # 解释器与全部依赖都来自这里。container-docker 在【本容器内】探测这个目录，
+      # 据此决定沙箱要不要挂它、以及 PATH/VIRTUAL_ENV/PYTHONPATH 怎么设
+      # （packages/tenant/container-docker/src/python-env.ts）。这份 compose 不整目录
+      # 挂 /opt/.dsh，所以必须显式给这一行；宿主进程看不见该路径时加载直接报错拒绝
+      # 启动，而不是静默空转。部署若已整目录挂载 /opt/.dsh（同路径），这行是冗余的，
+      # 嵌套挂载不冲突，留删皆可。
+      # 只读即可：宿主进程只读它，往这里装包由运维在宿主上做。
+      # 顺序：先建好 /opt/.dsh/pyenv 再 up。Docker 对不存在的绑定挂载源会【自动建一个
+      # 空目录】，而空目录现在同样会被拒绝：pythonRoot 里 bin/pyvenv.cfg/
+      # lib/python3.*/site-packages 一个都没有时加载直接失败。也就是说漏建环境会挡住
+      # 启动，而不是回到「以为配好了、其实没生效」——不靠运维记住这一步。
+      # 路径要和 container-runtime 行的 pythonRoot 一致
+      # （packages/bundle/multi-tenant/cordis.patch.yml）；改一处就要改另一处。
+      - /opt/.dsh/pyenv:/opt/.dsh/pyenv:ro
     # 默认只绑 127.0.0.1:8787（宿主 loopback，配合宿主网络即宿主本机）。
     # 要从局域网访问 /console、/swagger、/api，二选一：
     #   a) ssh -L 8787:127.0.0.1:8787 root@<server>，然后开 http://127.0.0.1:8787/console
