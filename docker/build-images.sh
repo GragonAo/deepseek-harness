@@ -17,7 +17,10 @@
 # slim image, which is also the Dockerfile's own default. The full base is buildpack-deps and
 # ships python3-minimal, so building the sandbox on it puts a second, unrelated interpreter
 # inside the image, shadows the mounted one on PATH, and silently defeats the arrangement.
-# TOOL_EXEC_NODE_IMAGE defaults to slim and must stay slim.
+# TOOL_EXEC_NODE_IMAGE defaults to slim and must stay slim. A `docker build` straight from
+# that Dockerfile is safe on its own — its own ARG default is already slim — so this variable
+# and the check at the end of this script backstop the script path rather than repair the
+# Dockerfile.
 #
 # dsh-multi-tenant compiles the harness from source and needs the full base's toolchain,
 # so NODE_IMAGE defaults to the full image.
