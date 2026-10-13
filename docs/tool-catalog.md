@@ -41,7 +41,7 @@ This table connects model-visible tool names to the plugin package and service s
 | `@deepseek-ai/dsh-tool-todo` | `todo_write` | `ctx.tools`, `owning Agent session` | `tool/call`, `todo/write`, `tool/result` | - | todo_write is session-owned state; UIs render the latest todo/write event as a checklist. `allowParallelInProgress` is required with no default, so the catalog states its choice: `true`, whose description invites several `in_progress` items. A deployment choosing `false` receives the same tool with a description asking for exactly one active task. |
 | `@deepseek-ai/dsh-tool-workflow` | `workflow` | `ctx.tools`, `ctx.workflowEngine`, `ctx.systemPrompt`, `a calling Agent (exec.agent parents the script children)` | `tool/call`, `tool/result` | - | - |
 | `@deepseek-ai/dsh-tool-web` | `web_fetch`, `web_search` | `ctx.tools`, `ctx.web`, `ctx.systemPrompt` | `tool/call`, `tool/result` | - | web_search and web_fetch keep provider selection behind ctx.web so model-visible schemas stay stable across backend swaps. |
-| `@deepseek-ai/dsh-tool-artifact` | `artifact_list`, `artifact_publish` | `ctx.tools`, `the authenticated (tenant, user) request scope at call time` | `tool/call`, `tool/result` | - | Both tools resolve the case and the subject from the authenticated request scope rather than from arguments, so a call outside a case-scoped request fails instead of falling back to a shared directory. artifact_publish returns the delivery tag the web front end parses out of the reply; the front end matches those exact literals, so the tag is a fixed protocol rather than deployment configuration. |
+| `@deepseek-ai/dsh-object-store` | `object_publish` | `ctx.tools`, `the authenticated (tenant, user) request scope at call time` | `tool/call`, `tool/result` | - | object_publish resolves the case and the subject from the authenticated request scope, and the file from the mounts that scope allows, so no argument can address another subject's file. The endpoint, the bucket and the public base URL are deployment configuration; the tool's own result carries the address the user downloads from. |
 
 <a id="deepseek-aidsh-tool-ask-user"></a>
 
@@ -2221,31 +2221,13 @@ Source: [`packages/web/tool-web/src/index.ts`](../packages/web/tool-web/src/inde
 
 web_search and web_fetch keep provider selection behind ctx.web so model-visible schemas stay stable across backend swaps.
 
-<a id="deepseek-aidsh-tool-artifact"></a>
+<a id="deepseek-aidsh-object-store"></a>
 
-## `@deepseek-ai/dsh-tool-artifact`
+## `@deepseek-ai/dsh-object-store`
 
-### `artifact_list`
+### `object_publish`
 
-List the files you have already delivered to this user, newest first. Only your own published artifacts are listed; artifacts other subjects of the same case published are not visible here.
-
-```json
-{
-  "type": "object",
-  "properties": {
-    "limit": {
-      "type": "integer",
-      "description": "Largest number of entries to return; defaults to 50."
-    }
-  }
-}
-```
-
-Source: [`packages/tenant/tool-artifact/src/index.ts`](../packages/tenant/tool-artifact/src/index.ts)
-
-### `artifact_publish`
-
-Deliver a file you generated to the user, so they can open or download it. Files inside your sandbox are not reachable by the user: this tool copies the file into the case library that the web front end serves, and returns the path plus the delivery tag your reply must carry. Use it for every artifact the user should receive — reports, spreadsheets, HTML summaries, charts, data exports. The published copy is immutable: publishing again produces a new file, and the source stays in your workspace unless you pass move.
+Publish a file you generated to object storage and get back a public URL the user can download. Files inside your sandbox are unreachable by the user: this tool uploads the file to the deployment's object store and returns an absolute address that needs no credentials. Give that address to the user in your reply. Use it for reports, exports, spreadsheets, HTML summaries and archives. The uploaded object is immutable: publishing again uploads a new object, and the source stays in your workspace.
 
 ```json
 {
@@ -2253,29 +2235,15 @@ Deliver a file you generated to the user, so they can open or download it. Files
   "properties": {
     "file_path": {
       "type": "string",
-      "description": "The file to deliver, as this sandbox sees it — absolute, or relative to the working directory."
+      "description": "The file to publish, as this sandbox sees it — absolute, or relative to the working directory."
     },
     "title": {
       "type": "string",
-      "description": "Title recorded in the delivered file name; defaults to the source file name."
+      "description": "Stem recorded in the object key; the source extension is appended. Defaults to the source file name without its extension."
     },
-    "kind": {
+    "content_type": {
       "type": "string",
-      "description": "Delivery folder; inferred from the file extension when omitted.",
-      "enum": [
-        "html",
-        "docs",
-        "sheets",
-        "slides",
-        "images",
-        "data",
-        "packages",
-        "other"
-      ]
-    },
-    "move": {
-      "type": "boolean",
-      "description": "Move the file instead of copying it. Defaults to false, which leaves the source readable."
+      "description": "Content type to store; inferred from the file extension when omitted."
     }
   },
   "required": [
@@ -2284,6 +2252,6 @@ Deliver a file you generated to the user, so they can open or download it. Files
 }
 ```
 
-Source: [`packages/tenant/tool-artifact/src/index.ts`](../packages/tenant/tool-artifact/src/index.ts)
+Source: [`packages/tenant/object-store/src/index.ts`](../packages/tenant/object-store/src/index.ts)
 
-Both tools resolve the case and the subject from the authenticated request scope rather than from arguments, so a call outside a case-scoped request fails instead of falling back to a shared directory. artifact_publish returns the delivery tag the web front end parses out of the reply; the front end matches those exact literals, so the tag is a fixed protocol rather than deployment configuration.
+object_publish resolves the case and the subject from the authenticated request scope, and the file from the mounts that scope allows, so no argument can address another subject's file. The endpoint, the bucket and the public base URL are deployment configuration; the tool's own result carries the address the user downloads from.

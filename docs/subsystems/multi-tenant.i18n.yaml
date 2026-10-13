@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write docs/subsystems/multi-tenant.md
-multi-tenant.md: 1934c80163bc51ce849704f70a6621d71cd1d221
-multi-tenant.zh.md: 38b1076c5d6c0f529f2a53eaaea11d3fd690a1f3
+multi-tenant.md: aab6a51c6ee3e0596586dccac2ea9deaf2935ccf
+multi-tenant.zh.md: 556881b2ff685086f7d339de56f38c9cb488c884

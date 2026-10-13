@@ -69,21 +69,22 @@ flowchart LR
   svc_workspaceRegistry["ctx.workspaceRegistry<br/>Workspace entity registry"]
   pkg_tenant["tenant"]
   svc_tenants["ctx.tenants<br/>Tenant registry and request authority"]
-  pkg_api_http["api-http"]
+  pkg_tenant_app["tenant-app"]
   pkg_tenant_auth["tenant-auth"]
   svc_tenantAuth["ctx.tenantAuth<br/>Tenant authentication seam"]
   pkg_tenant_auth_jwt["tenant-auth-jwt"]
+  pkg_agent_http["agent-http"]
+  pkg_tenant_admin_http["tenant-admin-http"]
   pkg_container["container"]
   svc_containerRuntime["ctx.containerRuntime<br/>Tenant container execution seam"]
   pkg_container_docker["container-docker"]
+  pkg_container_k8s["container-k8s"]
   pkg_subprocess_container["subprocess-container"]
   pkg_fs_container["fs-container"]
-  svc_tenantHttpApi["ctx.tenantHttpApi<br/>Tenant HTTP API surface"]
-  pkg_tenant_demo["tenant-demo"]
-  pkg_agent_http["agent-http"]
   svc_agentHttp["ctx.agentHttp<br/>Multi-tenant agent HTTP carrier"]
   pkg_tenant_admin["tenant-admin"]
   svc_tenantAdmin["ctx.tenantAdmin<br/>Scope-gated tenant administration"]
+  svc_tenantAdminHttp["ctx.tenantAdminHttp<br/>Tenant-management HTTP carrier"]
   svc_tenantRecordStore["ctx.tenantRecordStore<br/>Durable tenant-record store seam"]
   pkg_tenant_admin_postgres["tenant-admin-postgres"]
   svc_tenantSchemaLifecycle["ctx.tenantSchemaLifecycle<br/>Per-tenant storage-partition lifecycle seam"]
@@ -231,7 +232,6 @@ flowchart LR
   pkg_agent_presets --> svc_agentPresets
   pkg_agent_team --> svc_agentTeams
   pkg_api_gateway --> svc_typertGateway
-  pkg_api_http --> svc_tenantHttpApi
   pkg_apiproxy --> svc_apiProxy
   pkg_approval --> svc_approval
   pkg_attachment --> svc_attachments
@@ -246,6 +246,7 @@ flowchart LR
   pkg_compaction_tool_result_pruner --> svc_toolResultPruner
   pkg_container --> svc_containerRuntime
   pkg_container_docker --> svc_containerRuntime
+  pkg_container_k8s --> svc_containerRuntime
   pkg_cordis_host_runner --> svc_cordisInspect
   pkg_cordis_host_runner --> svc_dynamicCordisRunner
   pkg_credentials --> svc_credentials
@@ -324,6 +325,7 @@ flowchart LR
   pkg_tenant_admin --> svc_tenantAdmin
   pkg_tenant_admin --> svc_tenantRecordStore
   pkg_tenant_admin --> svc_tenantSchemaLifecycle
+  pkg_tenant_admin_http --> svc_tenantAdminHttp
   pkg_tenant_admin_postgres --> svc_tenantRecordStore
   pkg_tenant_admin_postgres --> svc_tenantSchemaLifecycle
   pkg_tenant_auth --> svc_tenantAuth
@@ -345,7 +347,7 @@ flowchart LR
   pkg_workspace --> svc_workspaceRegistry
   svc_agentDefaultModel --> pkg_headless
   svc_agentDefaultModel --> pkg_host_apiproxy
-  svc_agentHttp --> pkg_tenant_demo
+  svc_agentHttp --> pkg_tenant_app
   svc_agentLoop --> pkg_agent_spine_demo
   svc_agentTeams --> pkg_tool_agent_team
   svc_agents --> pkg_acp
@@ -436,12 +438,13 @@ flowchart LR
   svc_systemPrompt --> pkg_tool_terminal
   svc_systemPrompt --> pkg_tool_web
   svc_systemPrompt --> pkg_tools
-  svc_tenantAdmin --> pkg_apiproxy
-  svc_tenantAuth --> pkg_api_http
-  svc_tenantHttpApi --> pkg_tenant_demo
+  svc_tenantAdmin --> pkg_tenant_admin_http
+  svc_tenantAdminHttp --> pkg_tenant_app
+  svc_tenantAuth --> pkg_agent_http
+  svc_tenantAuth --> pkg_tenant_admin_http
   svc_tenantRecordStore --> pkg_tenant_admin
   svc_tenantSchemaLifecycle --> pkg_tenant_admin
-  svc_tenants --> pkg_api_http
+  svc_tenants --> pkg_tenant_app
   svc_terminals --> pkg_tool_terminal
   svc_tokenMeter --> pkg_compaction_basic
   svc_toolResultPruner --> pkg_compaction_basic
@@ -486,12 +489,12 @@ flowchart LR
 | `ctx.storageDomain` | `core` | [`storage-domain`](../packages/storage/storage-domain) | - | [`workspace`](../packages/workspace/workspace), [`message-feedback`](../packages/feedback/message-feedback) | - | Waits for every configured backend, then publishes the domain form as one lifecycle-bound service for typed durable state. |
 | `ctx.messageFeedback` | `core` | [`message-feedback`](../packages/feedback/message-feedback) | - | - | - | Owns local per-assistant-message feedback, lifecycle and target validation, per-item compare-and-set, and the Host unary Remote contract without entering Session history or telemetry. |
 | `ctx.workspaceRegistry` | `core` | [`workspace`](../packages/workspace/workspace) | - | `apiproxy` | - | Owns WorkspaceId-branded records over the domain facility; stable sessionIds accounts drive Host RPC and GUI projections. |
-| `ctx.tenants` | `core` | [`tenant`](../packages/tenant/tenant) | - | [`api-http`](../packages/tenant/api-http) | - | Resolves an authenticated id to a live tenant record fail-closed, and owns the AsyncLocalStorage authority every tenant-aware provider reads per request. |
-| `ctx.tenantAuth` | `seam` | [`tenant-auth`](../packages/tenant/tenant-auth) | [`tenant-auth-jwt`](../packages/tenant/tenant-auth-jwt) | [`api-http`](../packages/tenant/api-http) | - | Verifies a bearer credential into a tenant principal; the JWT provider pins RS256 JWKS or HS256 shared-secret verification per mode. |
-| `ctx.containerRuntime` | `seam` | [`container`](../packages/tenant/container) | [`container-docker`](../packages/tenant/container-docker) | [`subprocess-container`](../packages/tenant/subprocess-container), [`fs-container`](../packages/tenant/fs-container) | - | Runs a command inside the ambient tenant's container; subprocess and filesystem providers delegate into that one world. |
-| `ctx.tenantHttpApi` | `core` | [`api-http`](../packages/tenant/api-http) | - | [`tenant-demo`](../packages/tenant/tenant-demo) | - | Authenticates, resolves the tenant, enters runWithTenant, and runs the single registered operation. |
-| `ctx.agentHttp` | `core` | [`agent-http`](../packages/tenant/agent-http) | - | [`tenant-demo`](../packages/tenant/tenant-demo) | - | Wraps the single-tenant gateway (ctx.apiProxy via toFetchHandler) with bearer authentication, tenant + user authority, and session-scoped channel filtering; the tenant demo drives it directly and the multi-tenant bundle registers it as the request entry point. |
-| `ctx.tenantAdmin` | `core` | [`tenant-admin`](../packages/tenant/tenant-admin) | - | `apiproxy` | - | Tenant CRUD, enable/disable, member admission, and the partition/directory lifecycle behind the tenant.admin.* methods; every method refuses with tenant-forbidden unless the ambient scopes carry the administrative scope. |
+| `ctx.tenants` | `core` | [`tenant`](../packages/tenant/tenant) | - | [`tenant-app`](../packages/tenant/tenant-app) | - | Resolves an authenticated id to a live tenant record fail-closed, and owns the AsyncLocalStorage authority every tenant-aware provider reads per request. |
+| `ctx.tenantAuth` | `seam` | [`tenant-auth`](../packages/tenant/tenant-auth) | [`tenant-auth-jwt`](../packages/tenant/tenant-auth-jwt) | [`agent-http`](../packages/tenant/agent-http), [`tenant-admin-http`](../packages/tenant/tenant-admin-http) | - | Verifies a bearer credential into a tenant principal; the JWT provider pins RS256 JWKS or HS256 shared-secret verification per mode, and a token without the tenant claim authenticates as a tenantless platform principal for the management surface. |
+| `ctx.containerRuntime` | `seam` | [`container`](../packages/tenant/container) | [`container-docker`](../packages/tenant/container-docker), [`container-k8s`](../packages/tenant/container-k8s) | [`subprocess-container`](../packages/tenant/subprocess-container), [`fs-container`](../packages/tenant/fs-container) | - | Runs a command inside the ambient tenant's container; subprocess and filesystem providers delegate into that one world. |
+| `ctx.agentHttp` | `core` | [`agent-http`](../packages/tenant/agent-http) | - | [`tenant-app`](../packages/tenant/tenant-app) | - | Wraps the single-tenant gateway (ctx.apiProxy via toFetchHandler) with bearer authentication, tenant + user authority, and session-scoped channel filtering; the tenant service registers it as the business request entry point at /api and refuses a credential that names no tenant. |
+| `ctx.tenantAdmin` | `core` | [`tenant-admin`](../packages/tenant/tenant-admin) | - | [`tenant-admin-http`](../packages/tenant/tenant-admin-http) | - | Tenant CRUD, enable/disable, member admission, and the partition/directory lifecycle behind the management surface; every method refuses with tenant-forbidden unless the ambient scopes carry the administrative scope. |
+| `ctx.tenantAdminHttp` | `core` | [`tenant-admin-http`](../packages/tenant/tenant-admin-http) | - | [`tenant-app`](../packages/tenant/tenant-app) | - | Serves the tenant-management methods under its own /admin prefix, gated by the administrative scope alone: it resolves no tenant and checks no membership, so a platform credential needs none, and the tenant service registers it beside the business carrier at /api. |
 | `ctx.tenantRecordStore` | `seam` | [`tenant-admin`](../packages/tenant/tenant-admin) | [`tenant-admin-postgres`](../packages/tenant/tenant-admin-postgres) | [`tenant-admin`](../packages/tenant/tenant-admin) | - | Loads, upserts, and deletes the durable tenant list; tenantAdmin hydrates its live registry from it at boot, and a stored record wins over a same-id config seed. |
 | `ctx.tenantSchemaLifecycle` | `seam` | [`tenant-admin`](../packages/tenant/tenant-admin) | [`tenant-admin-postgres`](../packages/tenant/tenant-admin-postgres) | [`tenant-admin`](../packages/tenant/tenant-admin) | - | Provisions the tenant partition on create and drops it on purge, so a new tenant's providers share no storage with another tenant. |
 | `ctx.sessionQuery` | `seam` | [`session-query`](../packages/session-query/session-query) | [`session-query-sqlite`](../packages/session-query/session-query-sqlite) | [`session-reference`](../packages/context/session-reference), [`tool-session-query`](../packages/session-query/tool-session-query) | - | The interface supplies exact reads, filters, and traces; its concrete backend adds full-text reconciliation, ranking, snippets, and cursor generations, while the model consumer owns workspace authority and cursor-free rendering. |

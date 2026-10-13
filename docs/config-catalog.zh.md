@@ -342,22 +342,6 @@ Depends on: [`ToolPresentationMode`](subsystems/tools.md)
 
 Source: [`packages/core/agent-tool-presentation/src/index.ts:38`](../packages/core/agent-tool-presentation/src/index.ts)
 
-<a id="deepseek-aidsh-api-http"></a>
-
-## `@deepseek-ai/dsh-api-http`
-
-Requires: `webServer` · `tenantAuth` · `tenants`
-
-```ts config-catalog
-/** Plugin configuration. */
-export interface Config {
-  /** Exact route pathname the operation serves. */
-  path?: string
-}
-```
-
-Source: [`packages/tenant/api-http/src/index.ts:38`](../packages/tenant/api-http/src/index.ts)
-
 <a id="deepseek-aidsh-attachment-local"></a>
 
 ## `@deepseek-ai/dsh-attachment-local`
@@ -1019,6 +1003,14 @@ export interface Config {
    * @default 1024
    */
   coldBlankProbeMaxBytes?: number
+  /**
+   * Whether this gateway answers user questions through its connected clients.
+   * `false` leaves the `userQuestions` seam to the other provider in this
+   * composition — the multi-tenant deployment answers through its business API
+   * — because the seam accepts exactly one provider per context.
+   * @default true
+   */
+  userQuestionsProvider?: boolean
 }
 ```
 
@@ -1571,6 +1563,8 @@ export interface StdioConfig {
   failOnStartupError: boolean
   /** Automatic reconnect policy after a lost connection; omission uses the defaults. */
   reconnect?: ReconnectConfig
+  /** Tool-call concurrency for this server; omission uses the defaults. */
+  toolConcurrency?: ToolConcurrencyConfig
 }
 
 /** Config for connecting to an MCP server over Streamable HTTP (SSE). */
@@ -1593,6 +1587,8 @@ export interface StreamableHttpConfig {
   failOnStartupError: boolean
   /** Automatic reconnect policy after a lost connection; omission uses the defaults. */
   reconnect?: ReconnectConfig
+  /** Tool-call concurrency for this server; omission uses the defaults. */
+  toolConcurrency?: ToolConcurrencyConfig
 }
 
 /** Automatic reconnect policy for one MCP server connection. */
@@ -1606,9 +1602,112 @@ export interface ReconnectConfig {
   /** Consecutive failed attempts per outage before giving up for good (default 10). */
   maxAttempts?: number
 }
+
+/** Per-server tool-call concurrency configuration. */
+export interface ToolConcurrencyConfig {
+  /**
+   * Judgement rule for this server (default `annotations`). `annotations`
+   * trusts `readOnlyHint` and `idempotentHint`; `parallel` allows every call to
+   * overlap regardless of annotations; `exclusive` allows none, which is the
+   * switch for a server whose annotations are wrong or whose tools must not
+   * overlap.
+   */
+  policy?: ToolConcurrencyPolicy
+  /**
+   * Most `tools/call` requests this server may have in flight at once (default
+   * 10, the harness-wide parallelism default). Calls beyond the cap wait in
+   * submission order.
+   */
+  maxConcurrentCalls?: number
+  /**
+   * This server's own (raw) tool names whose calls must never overlap another
+   * call, whatever `policy` says for the rest of its tools. The names are the
+   * ones `tools/list` reports, not the model-facing `mcp__<server>__<name>`
+   * form. Omission and an empty list both mean no tool is excluded — Schemastery
+   * materializes a missing array key as `[]`, so the two are the same value and
+   * an empty list names no referent to miss. Every listed name must exist in the
+   * server's tool list; a name the server does not report fails the tool
+   * synchronization that discovered the list, so a typo is never silently
+   * ignored and a name is judged as soon as it is known.
+   */
+  exclusiveTools?: string[]
+  /**
+   * This server's own (raw) tool names whose calls may be sent again after a
+   * refusal to serve, in addition to the tools whose own annotations declare
+   * `readOnlyHint: true`. An empty list retries only those annotated read-only
+   * tools, which is the fail-safe direction: a write is repeated only when the
+   * deployment says naming it is safe, never because it was left out. Names are
+   * judged exactly like `exclusiveTools` ones — a name the server does not
+   * report fails that tool synchronization — and the two lists are independent:
+   * a read-only tool that also needs its submission order preserved belongs in
+   * both, while a tool that writes belongs in neither.
+   */
+  retryTools?: string[]
+  /**
+   * How this server's call cap behaves over time (default `adaptive`). `fixed`
+   * holds `maxConcurrentCalls` for the life of the connection; `adaptive`
+   * starts there and moves the cap down on a refusal to serve and back up while
+   * calls succeed. Adaptive is the default because a third-party server
+   * publishes no capacity to configure a correct fixed number with: too high
+   * produces refusals, too low wastes the parallelism the caller asked for, and
+   * the learned cap is bounded below by one call and above by the configured
+   * maximum, so it cannot make a working server unusable. Set `fixed` to hold a
+   * number the deployment has measured.
+   */
+  mode?: ToolConcurrencyMode
+  /**
+   * Fraction of the cap one refusal to serve keeps (default 0.5). Each refusal
+   * multiplies the current cap, and the result never drops below one slot.
+   */
+  decreaseFactor?: number
+  /** Slots added back by one recovery step (default 1). */
+  recoveryStep?: number
+  /**
+   * Milliseconds without a refusal to serve before one recovery step is taken
+   * (default 2000). A step also needs a call that completed, so an idle server
+   * does not recover the cap on its own.
+   */
+  recoveryQuietMs?: number
+  /**
+   * Whether a `tools/call` that outlived `toolCallTimeoutMs` counts as a
+   * refusal to serve (default true). A request-limited backend holds requests
+   * until the pool frees, so its overload arrives as a timeout rather than an
+   * error; a backend that is merely slow produces the same signal, and counting
+   * it lowers the cap for a server that was never overloaded.
+   */
+  countTimeouts?: boolean
+  /**
+   * Extra attempts one call may make after a refusal to serve (default 0, no
+   * retry). Retrying is what keeps a refused call from becoming a model-visible
+   * error while the cap is still learning, and it is bounded: at most
+   * `1 + retryAttempts` requests per call, each with its own `toolCallTimeoutMs`
+   * budget, and the delays in between add to the call's wall-clock time. A tool
+   * is never retried unless it advertises `readOnlyHint: true` or the deployment
+   * names it in `retryTools`.
+   */
+  retryAttempts?: number
+  /**
+   * First retry delay in milliseconds; doubles per further attempt (default
+   * 200). Queueing for a retry, like queueing for a first slot, is not charged
+   * to the per-call timeout.
+   */
+  retryBaseDelayMs?: number
+  /**
+   * Fraction the retry delay is spread by, in `0..1` (default 0.2); `0` disables
+   * jitter and makes every delay exact. Spread keeps calls refused together from
+   * returning together and producing a fresh burst.
+   */
+  retryJitterRatio?: number
+}
+
+/** How one server's tool annotations decide whether its MCP calls may overlap. */
+export type ToolConcurrencyPolicy = 'annotations' | 'parallel' | 'exclusive'
+
+/** How one server's call cap behaves over the life of the connection. */
+export type ToolConcurrencyMode = 'fixed' | 'adaptive'
 ```
 
-Source: [`packages/mcp/mcp-client/src/index.ts:98`](../packages/mcp/mcp-client/src/index.ts)
+Source: [`packages/mcp/mcp-client/src/index.ts:114`](../packages/mcp/mcp-client/src/index.ts)
 
 <a id="deepseek-aidsh-message-feedback"></a>
 
@@ -2713,6 +2812,26 @@ export interface Config {
 
 Source: [`packages/tenant/tenant-admin/src/index.ts:75`](../packages/tenant/tenant-admin/src/index.ts)
 
+<a id="deepseek-aidsh-tenant-admin-http"></a>
+
+## `@deepseek-ai/dsh-tenant-admin-http`
+
+Requires: `webServer` · `tenantAuth` · `tenantAdmin`
+
+```ts config-catalog
+/** Plugin configuration. */
+export interface Config {
+  /** OIDC scope admitting the management surface. */
+  adminScope?: string
+  /** Maximum buffered request-body bytes before the carrier answers 413. */
+  maxRequestBodyBytes?: number
+  /** Serve `GET /admin/openapi.json` (the management wire reference). */
+  openapi?: boolean
+}
+```
+
+Source: [`packages/tenant/tenant-admin-http/src/index.ts:53`](../packages/tenant/tenant-admin-http/src/index.ts)
+
 <a id="deepseek-aidsh-tenant-admin-postgres"></a>
 
 ## `@deepseek-ai/dsh-tenant-admin-postgres`
@@ -2947,7 +3066,11 @@ Source: [`packages/fs/tool-fs/src/index.ts:25`](../packages/fs/tool-fs/src/index
 Requires: `tools` · `systemPrompt` · `subprocess`
 
 ```ts config-catalog
-/** Plugin config; over-cap glob sampling is an explicit deployment choice and the remaining fields have defaults. */
+/**
+ * Plugin config; over-cap glob sampling is an explicit deployment choice, the
+ * remaining caps have defaults, and `ripgrepPath` stays unset until a deployment
+ * names the binary its execution side carries.
+ */
 export interface Config {
   /** Whether an over-cap `glob` page is sampled across top-level entries instead of taking the modification-time head. */
   sampleOverCapGlobResults: boolean
@@ -2970,10 +3093,21 @@ export interface Config {
    * `@deepseek-ai/dsh-tool-call-timeout-policy` through `exec.signal`.
    */
   timeoutMs?: number
+  /**
+   * Absolute path of the ripgrep binary every search spawns, for a deployment
+   * whose execution side is not this process: a sandbox container holds no path
+   * resolved here, so the packaged binary is unusable there. The value names a
+   * file on the execution side and is passed through unresolved — only that side
+   * can answer for it — so an unusable path fails each call as `SEARCH_FAILED`
+   * naming it. Omitted, the packaged binary is resolved lazily at the first
+   * search call (`@vscode/ripgrep`, or the executable's `-rg` sidecar in a
+   * single-file runtime), which is what a co-located execution side needs.
+   */
+  ripgrepPath?: string
 }
 ```
 
-Source: [`packages/fs/tool-fs-search/src/index.ts:73`](../packages/fs/tool-fs-search/src/index.ts)
+Source: [`packages/fs/tool-fs-search/src/index.ts:78`](../packages/fs/tool-fs-search/src/index.ts)
 
 <a id="deepseek-aidsh-tool-goal"></a>
 
@@ -3809,7 +3943,6 @@ Source: [`packages/workflow/workflow-worker-thread/src/index.ts:43`](../packages
 - `@deepseek-ai/dsh-launch-environment` ([`packages/util/launch-environment/src/index.ts`](../packages/util/launch-environment/src/index.ts))
 - `@deepseek-ai/dsh-llm-mock-server` ([`packages/test-support/llm-mock-server/src/index.ts`](../packages/test-support/llm-mock-server/src/index.ts))
 - `@deepseek-ai/dsh-loader-smoke` ([`packages/test-support/loader-smoke/src/index.ts`](../packages/test-support/loader-smoke/src/index.ts))
-- `@deepseek-ai/dsh-multi-tenant` ([`packages/bundle/multi-tenant/src/index.ts`](../packages/bundle/multi-tenant/src/index.ts))
 - `@deepseek-ai/dsh-native-command` ([`packages/util/native-command/src/index.ts`](../packages/util/native-command/src/index.ts))
 - `@deepseek-ai/dsh-output-retention` ([`packages/util/output-retention/src/index.ts`](../packages/util/output-retention/src/index.ts))
 - `@deepseek-ai/dsh-sandbox-windows-acl` ([`packages/sandbox/sandbox-windows-acl/src/index.ts`](../packages/sandbox/sandbox-windows-acl/src/index.ts))
@@ -3820,7 +3953,6 @@ Source: [`packages/workflow/workflow-worker-thread/src/index.ts:43`](../packages
 - `@deepseek-ai/dsh-session-telemetry` ([`packages/session/session-telemetry/src/index.ts`](../packages/session/session-telemetry/src/index.ts))
 - `@deepseek-ai/dsh-session-title-llm` ([`packages/session/session-title-llm/src/index.ts`](../packages/session/session-title-llm/src/index.ts))
 - `@deepseek-ai/dsh-subagent-in-process-driver` ([`packages/subagent/subagent-in-process-driver/src/index.ts`](../packages/subagent/subagent-in-process-driver/src/index.ts))
-- `@deepseek-ai/dsh-tenant-demo` ([`packages/tenant/tenant-demo/src/index.ts`](../packages/tenant/tenant-demo/src/index.ts))
 - `@deepseek-ai/dsh-timeout` ([`packages/util/timeout/src/index.ts`](../packages/util/timeout/src/index.ts))
 - `@deepseek-ai/dsh-typert-generator` ([`packages/typert/generator/src/index.ts`](../packages/typert/generator/src/index.ts))
 - `@deepseek-ai/dsh-typert-protocol` ([`packages/typert/protocol/src/index.ts`](../packages/typert/protocol/src/index.ts))

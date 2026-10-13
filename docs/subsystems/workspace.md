@@ -153,7 +153,7 @@ Source: [`packages/host/directory-picker/src/index.ts:131`](../../packages/host/
 
 ### `ctx.workspaceRegistry` — `WorkspaceRegistry`
 
-Durable workspace registry. Startup waits for `sessionPersistence`, builds one canonical-cwd header index, and completes the one-time history bootstrap before the service becomes active. The persistence dependency is mandatory so an unavailable peer can never be mistaken for an empty history and commit the initialized marker. Every partition's state is keyed by tenant id (`undefined` for the single-user partition); see the module JSDoc for the multi-tenant lazy/tenant-switch contract.
+Durable workspace registry. Startup waits for `sessionPersistence`, builds one canonical-cwd header index, and completes the one-time history bootstrap before the service becomes active. The persistence dependency is mandatory so an unavailable peer can never be mistaken for an empty history and commit the initialized marker. Every partition's state is keyed by its request-partition key (`undefined` for the partitionless state); see the module JSDoc for the partitioned lazy/partition-switch contract.
 
 ```ts cordis-catalog
 /**
@@ -170,17 +170,17 @@ Durable workspace registry. Startup waits for `sessionPersistence`, builds one c
 async create(path: string, title?: string): Promise<Workspace>
 
 /**
- * Look up a workspace by id for the ambient tenant. Uninitialized
- * partitions serve `undefined` (no cross-tenant leak).
+ * Look up a workspace by id for the ambient request partition. Uninitialized
+ * partitions serve `undefined` (no cross-partition leak).
  * @param id - Workspace id.
  * @returns the workspace, or `undefined` when unknown or uninitialized.
  */
 get(id: WorkspaceId): Workspace | undefined
 
 /**
- * Synchronous workspace projection for the ambient tenant in durable
- * registry order. An uninitialized partition (multi-tenant boot, or a
- * tenant whose domain has not yet been opened) projects as empty rather
+ * Synchronous workspace projection for the ambient request partition in
+ * durable registry order. An uninitialized partition (partitioned boot, or a
+ * partition whose domain has not yet been opened) projects as empty rather
  * than failing. Every entity's `sessionIds` getter is already filtered by the
  * startup/live canonical-cwd header index; this method performs no persistence reads.
  * @returns a fresh ordered array of workspace entities.

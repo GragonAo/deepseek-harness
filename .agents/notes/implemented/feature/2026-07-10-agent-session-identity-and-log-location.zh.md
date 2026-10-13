@@ -38,6 +38,8 @@ interface SessionPersistence {
 - 执行具有关联 agent 时，`DSH_SESSION_ID` 存在并等于 `agent.session.header.id`。
 - 内置的持久化转换层提供 `DSH_SESSION_JSONL` 的条件是 `ctx.sessionPersistence.locate(header)` 返回 `kind: 'jsonl'`。
 
+同一个注册表也为 shell 工具之外的 harness 进程组装内置变量组：[`dsh-code-runtime-container`](../../../../packages/code-runtime/code-runtime-container/README.md) 通过 `collectSession()` 把它交给每个 `run_code` 程序，会话从 ambient agent-initiator 作用域解析，而不是从 `ToolExecution`。两条入口的内置变量由同一个所有者组装；第二条路径及其边界归[沙箱环境所有权 Agent Note](../architecture/2026-10-08-one-owner-for-sandbox-dsh-environment.md)所有。
+
 会话持久化仍然是事实所有者：JSONL 不依赖 tool-bash，也不会自行注册 shell 变量；钩子继续直接使用 `locate()`。tool-bash 是把持久化事实转换为 shell 约定的转换层。其他需要向 shell 公开事实的插件依赖该注册表，并注册各自的键；它们不修改 `process.env`。
 
 bash seam 导出 `DSH_ENV_PREFIX` 作为唯一的命名空间来源，并派生 `DshEnvironmentKey`，其来源是该常量的 `typeof`。tool-bash 从该常量派生内置名称与模型指引，执行器则使用该常量过滤环境中已有的值。seam 通过 `ShellExecRequest.dshEnv`／`ShellExecSpec.dshEnv` 单独传递受管理的覆盖层：普通 `env` 仍是钩子所用的通用进程内插件接口，`dshEnv` 则以类型约束为受管理键。本地执行器移除环境中继承的全部受管理键，依次应用普通清理、终端环境和显式 `env`，最后合并受信任的 `dshEnv` 快照，因此 `env` 条目永远无法顶掉受管理的值。这保证了值缺失表示它当前确实不存在，而不是从外层或先前的 harness 继承而来。面向模型的工具仍忽略模型提供的 `env`／`stdin` 参数。

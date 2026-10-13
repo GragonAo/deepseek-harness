@@ -26,5 +26,5 @@ Pre-warm each enabled tenant's container at boot and give every tenant one stabl
 
 ### Verification
 
-- `packages/tenant/container-docker/tests/docker.spec.ts` now asserts: the pre-warm loop starts one container per enabled tenant (disabled tenants skipped) under `dsh-tenant_<id>_<hash>` and clears the same name first; the idle-reap test counts the three `rm -f` calls (clear-before-start, idle reap, clear-before-restart). 8 tests green.
+- `packages/tenant/container-docker/tests/docker.spec.ts` now asserts: the pre-warm loop starts one container per enabled tenant (disabled tenants skipped) under `dsh-tenant_<id>_<hash>` and clears the same name first, and that the idle budget reaches the container as `DSH_TOOL_EXEC_IDLE_MS`, which the container enforces itself ([why the host stopped reaping](2026-10-08-container-owned-sandbox-lifetime.md)).
 - Measured on the deployment host (`192.168.138.130`): cold start ≈ 524ms (`docker run` ≈ 351ms, port ≈ 46ms, readiness ≈ 127ms) versus ≈ 16ms for a warm exec; the pre-warm eliminates the cold path from every tenant request.

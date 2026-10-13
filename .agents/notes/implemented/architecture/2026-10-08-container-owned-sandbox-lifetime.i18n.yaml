@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-10-08-container-owned-sandbox-lifetime.md
+2026-10-08-container-owned-sandbox-lifetime.md: a168799bcf1ec49d9f59351d14857b6a6e7f0f69
+2026-10-08-container-owned-sandbox-lifetime.zh.md: 2042a73ed2322fb3a9b0b0e27a437a826e6713bc

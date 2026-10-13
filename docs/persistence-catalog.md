@@ -993,6 +993,56 @@ Source: [`packages/core/session/src/types.ts:243`](../packages/core/session/src/
 
 Source: [`packages/core/session/src/types.ts:264`](../packages/core/session/src/types.ts)
 
+### `user-question/*`
+
+<a id="user-questionasked--log-only"></a>
+
+#### `user-question/asked` — log-only
+
+```ts persistence-catalog
+/**
+ * A question was put to the tenant's business plane — log-only record,
+ * durable, replayable, never in the model transcript (like `approval/*`;
+ * NOT a surface event, carries no `surfaceOp`). `id` pairs it with the
+ * `user-question/decided` that resolves it, and `questions` is the ask
+ * exactly as the tool call submitted it, so a business subscriber renders
+ * the question from this event alone. The model learns the question from its
+ * own tool call and the answer from the tool result.
+ */
+'user-question/asked': {
+  /** Ask id, echoed by the answer and by `user-question/decided`. */
+  id: TenantQuestionId
+  /** Questions put to the business plane, in submission order. */
+  questions: AskUserQuestionItem[]
+}
+```
+
+Source: [`packages/tenant/tenant-questions/src/index.ts:91`](../packages/tenant/tenant-questions/src/index.ts)
+
+<a id="user-questiondecided--log-only"></a>
+
+#### `user-question/decided` — log-only
+
+```ts persistence-catalog
+/**
+ * How a prior `user-question/asked` (same `id`) ended — log-only, durable,
+ * never in the model transcript. Appended exactly once, when the outcome is
+ * known: `'answered'` carries the accepted answer, `'timed-out'` is this
+ * channel's configured deadline, and `'cancelled'` is a withdrawn ask (turn
+ * cancellation, or the seam's own longer deadline).
+ */
+'user-question/decided': {
+  /** Ask id this resolves. */
+  id: TenantQuestionId
+  /** How the ask ended. */
+  outcome: TenantQuestionOutcome
+  /** The accepted answer; present exactly when `outcome` is `'answered'`. */
+  answer?: AskUserQuestionAnswer
+}
+```
+
+Source: [`packages/tenant/tenant-questions/src/index.ts:104`](../packages/tenant/tenant-questions/src/index.ts)
+
 ### `web/*`
 
 <a id="webdeepseek-search-llm-request--log-only"></a>

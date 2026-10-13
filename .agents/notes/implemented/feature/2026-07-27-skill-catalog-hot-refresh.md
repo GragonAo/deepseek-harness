@@ -46,3 +46,7 @@ Registry tests pin registration-scoped invalidation, revocation, signal abort, c
 - Body-only edits produce no catalog message. A subsequent tool call sees current content, while prior tool results remain an accurate record of what the model previously loaded.
 - Missing-root polling and Chokidar add one maintained runtime dependency, host watcher resources, bounded detection latency, and deployment tunables. The bounded project set and teardown contract contain those costs.
 - Remote or future mutable providers retain their own registration-scoped invalidation closure and call it from their observation mechanism; the registry does not impose a universal watcher or TTL.
+
+## Related
+
+[Skill bundle installation and an explicit catalog refresh](2026-10-13-skill-bundle-install-and-catalog-refresh.md) keeps this decision and adds the registry-wide `ctx.skills.refresh()` for mutations no watcher observes, such as an operator's upload into an ambient tier root, plus `ctx.skillInstall` as the writer that calls it. The registration-scoped control described here is unchanged and remains the mechanism for providers that own their own observation.

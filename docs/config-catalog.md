@@ -113,8 +113,6 @@ Requires: `tenantAuth` · `tenants` · `apiProxy`
 export interface Config {
   /** Maximum buffered request body bytes before the route answers 413. */
   maxRequestBodyBytes?: number
-  /** OIDC scope admitted to the administrative surface (skips tenant membership). */
-  adminScope?: string
   /** Serve `GET /openapi.json` and the `/swagger` UI when a `webServer` is present. */
   openapi?: boolean
   /** Serve the `/console` operator page when a `webServer` is present. */
@@ -122,7 +120,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/tenant/agent-http/src/index.ts:71`](../packages/tenant/agent-http/src/index.ts)
+Source: [`packages/tenant/agent-http/src/index.ts:102`](../packages/tenant/agent-http/src/index.ts)
 
 <a id="deepseek-aidsh-agent-instructions"></a>
 
@@ -340,22 +338,6 @@ Depends on: [`ToolPresentationMode`](subsystems/tools.md)
 
 Source: [`packages/core/agent-tool-presentation/src/index.ts:38`](../packages/core/agent-tool-presentation/src/index.ts)
 
-<a id="deepseek-aidsh-api-http"></a>
-
-## `@deepseek-ai/dsh-api-http`
-
-Requires: `webServer` · `tenantAuth` · `tenants`
-
-```ts config-catalog
-/** Plugin configuration. */
-export interface Config {
-  /** Exact route pathname the operation serves. */
-  path?: string
-}
-```
-
-Source: [`packages/tenant/api-http/src/index.ts:38`](../packages/tenant/api-http/src/index.ts)
-
 <a id="deepseek-aidsh-attachment-local"></a>
 
 ## `@deepseek-ai/dsh-attachment-local`
@@ -486,7 +468,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/code-runtime/code-runtime-container/src/index.ts:24`](../packages/code-runtime/code-runtime-container/src/index.ts)
+Source: [`packages/code-runtime/code-runtime-container/src/index.ts:27`](../packages/code-runtime/code-runtime-container/src/index.ts)
 
 <a id="deepseek-aidsh-code-runtime-worker-thread"></a>
 
@@ -554,7 +536,7 @@ export interface CompactionPolicyConfig {
   summarizationModel?: string
   /** Provider generation cap for summarization. Defaults to `8192`. */
   maxTokens?: number
-  /** Extra attempts after the first compaction when pressure remains above threshold. Defaults to `1`. */
+  /** Extra attempts after the first when pressure remains above threshold or a summary truncated at `maxTokens`. Defaults to `1`. */
   compactionRetries?: number
   /** Maximum retries after canonical context overflow; `0` disables recovery. Defaults to `1`. */
   maxOverflowRetries?: number
@@ -604,7 +586,13 @@ export interface Config {
   network?: string
   /** In-container tool-exec image run as each (tenant, user)'s execution world. */
   toolExecImage?: string
-  /** Container port the tool-exec server binds (published to a random host port). */
+  /**
+   * Container port the tool-exec server binds (published to a random host port).
+   *
+   * 本 provider 把它同时用在两处：`-p` 发布的容器端口，以及镜像 entrypoint 的第一个位置参数
+   * （契约是 `entry.mjs <port> [host]`，见 `docker/entry.mjs`）。命令参数由本 provider 显式传下去，
+   * 不再依赖镜像 `CMD` 里那个 8642，因此改这个值真的会改沙箱内的监听端口。
+   */
   toolExecPort?: number
   /**
    * Host address the tool-exec port is published on. Defaults to the host
@@ -627,6 +615,20 @@ export interface Config {
    * mount is skipped (single-user deployments without a cross-case directory).
    */
   usersRoot?: string
+  /**
+   * `/shared`（案件级共享目录）是否对沙箱只读，默认只读。
+   *
+   * 它由一个案件下的所有用户共用，业务侧通过管理接口写入；沙箱可写就意味着任何用户的沙箱都能
+   * 改到别人的输入。`/shared/skills` 就在它下面，所以可写时那个只读的技能挂载形同虚设。
+   */
+  sharedReadOnly?: boolean
+  /**
+   * `/global`（该 subject 的跨案件目录）是否对沙箱只读，默认只读。
+   *
+   * 它盛放用户全局提交上来的文件与用户全局技能，由业务侧写入；`/global/skills` 同样在它下面，
+   * 可写时 `user-global` 那一层只读挂载也形同虚设。
+   */
+  usersReadOnly?: boolean
   /**
    * Host directory holding the system-wide skill tree, bind-mounted read-only at
    * the same absolute path. A skill's instructions reference companion files
@@ -660,6 +662,12 @@ export interface Config {
    */
   pythonRoot?: string
   /**
+   * `/tools` 挂载的来源，供租户记录里没有 `toolsRoot` 的租户使用。来源规则是租户记录优先：
+   * `tenant.toolsRoot` 存在时用它，缺省才回落到这里。省略本字段则这类租户的沙箱没有
+   * `/tools` 挂载。（`container-k8s` 的同名字段逐字同义。）
+   */
+  toolsRoot?: string
+  /**
    * `PATH` the tool-exec image gives its commands, used when `pythonRoot` puts
    * a mounted interpreter's `bin` directory first: `docker run -e PATH=`
    * replaces the image's value instead of extending it, so the rest of PATH has
@@ -669,8 +677,32 @@ export interface Config {
    * or the directories it adds disappear from every sandbox command.
    */
   toolExecImagePath?: string
-  /** Milliseconds of exec idleness before the container is reaped. Omit to keep. */
+  /**
+   * 空闲多久后让该主体的沙箱容器自己退出，单位毫秒：provider 把它作为 `DSH_TOOL_EXEC_IDLE_MS`
+   * 注入容器，容器据此判定「没有在途请求、且距上一次请求已超过预算」后自行退出，留下一个终态
+   * 容器由下一次启动的收尸清掉（见 `tool-exec.ts`）。宿主不自己计时：它看不见别的副本对这个
+   * 沙箱的使用，而每一个请求都要到达容器。正在执行的命令不算空闲。省略则容器永不自行退出
+   * （长期不用的主体会一直占着一份容器资源）。粒度是这个主体，不是全局。
+   */
   idleTimeoutMs?: number
+  /**
+   * 沙箱内每次 exec 里**每条输出流**最多保留多少字节：provider 把它作为
+   * `DSH_TOOL_EXEC_MAX_OUTPUT_BYTES` 注入容器，容器超过上界后继续读完这条流（停止读会让子进程
+   * 在写满管道时阻塞），只保留末尾一段，并在结果里把该流标成已截断（见 `tool-exec.ts`）。
+   * 上界只需高于宿主自己的结果上界（`ctx.subprocess` 的每条流预算），它的用处是保护沙箱自己：
+   * 原始流是容器先攒满、宿主才轮得到加界的，所以一条大输出命令能撑死沙箱。调低它会连带截断那些
+   * 本来整段读得回来的大结果（整份文件读取、`run_code` 自己 64 MiB 的载荷上界），所以它要留在
+   * 部署里那些上界之上。与 `container-k8s` 的同名字段逐字同义。默认 67108864。
+   */
+  maxOutputBytes?: number
+  /**
+   * 一个已解析的沙箱句柄在多少毫秒内可以直接复用，过后先用一次 `docker port` 向运行时确认它，
+   * 并顺手刷新发布端口（容器被 OOM 杀掉、被运维删掉、daemon 重启时句柄都会失效）。
+   * 沙箱自行退出后句柄也留在缓存里，所以这个上限是唯一约束「过期端口还能用多久」的地方：
+   * 过期后第一次 exec 会失败一次，由 exec 的重试路径重建。
+   * 与 `container-k8s` 的同名字段逐字同义。默认 5000。
+   */
+  sandboxCacheTtlMs?: number
   /**
    * Milliseconds allowed for one `docker`/`podman` invocation — the same-name
    * clear, `run`, `port`, and removal all pass through it. The CLI blocks for as
@@ -707,7 +739,187 @@ export interface Config {
 }
 ```
 
-Source: [`packages/tenant/container-docker/src/index.ts:66`](../packages/tenant/container-docker/src/index.ts)
+Source: [`packages/tenant/container-docker/src/index.ts:95`](../packages/tenant/container-docker/src/index.ts)
+
+<a id="deepseek-aidsh-container-k8s"></a>
+
+## `@deepseek-ai/dsh-container-k8s`
+
+```ts config-catalog
+/** Kubernetes 沙箱 provider 的配置。 */
+export interface Config {
+  /**
+   * 沙箱 Pod 所在的命名空间。本 provider 只在这一个命名空间里创建、读取和删除沙箱 Pod，
+   * 每一条 kubectl 调用都带着它，除此之外不碰集群里的任何对象。
+   * 没有默认值：默认值就等于把某一台集群的事实写进包里。
+   */
+  namespace?: string
+  /** 沙箱容器镜像引用；必须已经存在于节点上。 */
+  image?: string
+  /** `kubectl` 可执行文件名或绝对路径。 */
+  kubectlBinary?: string
+  /** 沙箱容器的镜像拉取策略。 */
+  imagePullPolicy?: string
+  /**
+   * 沙箱内 tool-exec 服务监听的容器端口。provider 把它同时用在两处：写进 Pod 的
+   * `containerPort`，并作为镜像 entrypoint 的第一个位置参数传给沙箱进程，
+   * 因此改这个值真的会改沙箱内的监听端口。与 `container-docker` 的同名字段同义。
+   */
+  toolExecPort?: number
+  /**
+   * 执行容器的工作目录。provider 在沙箱里把它挂成一个 `emptyDir`：容器根文件系统是只读的，
+   * 不是挂载点就不存在，而它又必须存在——会话按相对路径解析出的位置就是这里。
+   *
+   * 它不能是任何 claim 上的挂载点：模型按相对路径写出的中间产物应当随沙箱销毁而消失，
+   * 不落进用户案件的工作目录。宿主的 `sandbox.workDir` 必须是同一个值。
+   */
+  workDir?: string
+  /**
+   * `/shared`（案件级共享目录）是否对沙箱只读，默认只读。
+   *
+   * 它由一个案件下的所有用户共用，业务侧通过管理接口写入；沙箱可写就意味着任何用户的沙箱都能
+   * 改到别人的输入。`/shared/skills` 就在它下面，所以可写时那个只读的技能挂载形同虚设。
+   */
+  sharedReadOnly?: boolean
+  /**
+   * `/global`（该 subject 的跨案件目录）是否对沙箱只读，默认只读。
+   *
+   * 它盛放用户全局提交上来的文件与用户全局技能，由业务侧写入；`/global/skills` 同样在它下面，
+   * 可写时 `user-global` 那一层只读挂载也形同虚设。
+   */
+  usersReadOnly?: boolean
+  /**
+   * 与 {@link claimRoot} 对应的 PersistentVolumeClaim。两者都设置时，每个挂载都通过
+   * `subPath` 投影到这个 claim 上，沙箱不再带任何 `hostPath`，可以在任意节点启动。
+   * 不设置则每一层都从节点目录提供，这要求运行沙箱的节点上确实存在这些目录。
+   * 两者必须同时设置或同时省略：只写一个，本 provider 会在加载时报错，而不是悄悄退回 hostPath 模式。
+   */
+  workspaceClaim?: string
+  /**
+   * claim 在宿主机上的挂载点，同时也是每个 `source` 换算成 `subPath` 的根。
+   * host 进程把同一个 claim 挂在这里，因此同一路径在两侧含义一致，
+   * 两种模式之间切换时也不需要改任何已配置的根。
+   */
+  claimRoot?: string
+  /** 宿主机上按 subject 分目录的根，挂到 `/global`。不设置则跳过该挂载。 */
+  usersRoot?: string
+  /** 存放全局 skill 树的宿主机目录，以只读方式挂到同一路径。 */
+  systemRoot?: string
+  /**
+   * `/tools` 挂载的来源，供租户记录里没有 `toolsRoot` 的租户使用。来源规则是租户记录优先：
+   * `tenant.toolsRoot` 存在时用它，缺省才回落到这里。省略本字段则这类租户的沙箱没有
+   * `/tools` 挂载。（`container-docker` 的同名字段逐字同义。）
+   */
+  toolsRoot?: string
+  /**
+   * 存放 Python 运行时的宿主机目录，以只读方式挂到同一路径。tool-exec 镜像自身不带解释器，
+   * 所以这份挂载就是沙箱唯一的 Python。省略则不挂载，也不设任何 Python 变量，
+   * 沙箱里根本没有 `python3`——与 `container-docker` 省略同名 `pythonRoot` 完全一致。
+   */
+  pythonRoot?: string
+  /**
+   * 沙箱内 Python 三件套的取值，与 `container-docker` 的变量语义相同（`PATH` 前置、
+   * `VIRTUAL_ENV`、`PYTHONPATH`），差别只在取值从哪来：docker 在宿主进程里读 `pythonRoot`
+   * 的目录布局（同一个文件系统），而 k8s 的 `pythonRoot` 是节点上的目录（hostPath 模式）
+   * 或 claim 里的子路径，宿主进程通常看不到它，也没有任何东西能替它读——所以这三个值
+   * 必须由部署声明。每个字段各自独立：只给 `binDir` 的目录就只前置 `PATH`，
+   * 与 docker 那边「只有 `bin` 就只设 `PATH`」是同一条规则。
+   * 设置本字段时必须同时设置 {@link pythonRoot}：三个值描述的都是被挂载的那份运行时，
+   * 没有挂载就无处可指。省略本字段时校验结果里不会留下空对象，`undefined` 就是「没配 Python」。
+   */
+  pythonEnv?: PythonSandboxEnv
+  /**
+   * `PATH` 的沙箱镜像取值，用于 `pythonEnv.binDir` 把挂载目录前置时重述镜像其余部分的 `PATH`
+   * （Pod 的 `env` 是整体替换容器环境，不是追加）。默认取随包镜像的 Debian 基础值
+   * （`node:22-bookworm-slim`；`docker/Dockerfile` 自己没设 PATH），与 `container-docker`
+   * 的同名字段默认值相同。镜像的 PATH 不同时要一并设置，否则那个镜像追加的目录在沙箱里不再解析。
+   */
+  toolExecImagePath?: string
+  /**
+   * 每个沙箱里启动的容器命令，默认 `['node', 'entry.mjs']`——与随包镜像的
+   * `ENTRYPOINT` 一致。provider 会把 {@link toolExecPort} 追加成它的下一个位置参数，
+   * 因为镜像 entrypoint 的契约是 `entry.mjs <port> [host]`：Pod 写了 `command` 就不再使用
+   * 镜像的 `CMD`，端口只能由 provider 显式给出。镜像的 entrypoint 契约不同时，把完整命令写在这里。
+   */
+  command?: string[]
+  /**
+   * 沙箱容器的显式环境变量。身份变量（`DSH_CASE_ID`、`DSH_TENANT_ID`、`DSH_USER_ID`）
+   * 与 Python 三件套由本 provider 在它之后写入，因此部署改不了这几项：一个沙箱属于哪个案子
+   * 与哪个人，只有平台知道，不能由被注入者自己声明。
+   */
+  env?: Record<string, string>
+  /**
+   * 单次 `kubectl` 调用的时间上限，单位毫秒。kubectl 会一直阻塞到 apiserver 作答，
+   * 只有期限能终止它。默认 60000，与 `container-docker` 的同名字段同义且同默认值：
+   * 同名字段的默认值必须一致，否则同一个部署换后端就换了超时行为。
+   */
+  cliTimeoutMs?: number
+  /**
+   * 一次冷启动的总时间上限，单位毫秒：它的 kubectl 调用（建 Pod、读状态）与等待就绪一起算在内。
+   * 超过就让这次启动失败，并清掉该主体缓存的句柄与正在进行的启动记录，下一次 exec 重新冷启动，
+   * 而不是复用一个永不 settle 的 promise。默认 180000，与 `container-docker` 的同名字段
+   * 同义且同默认值；集群侧还要算上调度与拉镜像，所以这个上界不能按单次调用来估。
+   */
+  startTimeoutMs?: number
+  /**
+   * 等待 Pod 就绪期间读取集群状态的轮询间隔，单位毫秒。取值要权衡的是「多久发现沙箱起来了」
+   * 与「每次读都要花掉一个 kubectl 进程和一次 apiserver 往返」。默认 500。
+   */
+  statusPollMs?: number
+  /**
+   * Pod 报告就绪之后，再等它内部 tool-exec 服务答得上话的时间上限，单位毫秒。
+   * Pod 的 Ready 只说明容器进程起来了，而 tool-exec 服务何时开始监听端口是镜像 entrypoint
+   * 自己的事，这段空档里第一条命令会撞上连接被拒。默认 10000，与 `container-docker`
+   * 的同名字段同义。
+   */
+  readyTimeoutMs?: number
+  /** 上面那次等待每次重试之间的间隔，单位毫秒。默认 30，与 `container-docker` 的同名字段同义。 */
+  readyPollMs?: number
+  /**
+   * 一次 tool-exec HTTP 往返的时间上限，单位毫秒。它覆盖命令在沙箱内的执行，不只是连接，
+   * 因此是这几个期限里最大的那个。默认 600000，与 `container-docker` 的同名字段同义。
+   */
+  transportTimeoutMs?: number
+  /**
+   * 一次解析出的沙箱句柄在多少毫秒内可以直接复用，过后重新从集群读一次状态。
+   * 每次工具调用都要解析沙箱，不缓存的解析会在命令真正执行前先花掉一个 `kubectl` 进程和一次
+   * API server 往返；并发会话会把这份开销成倍放大。取值要短到能及时发现沙箱被替换：
+   * 过期的句柄指向一个已经不再服务的 Pod IP。默认 5000，与 `container-docker` 的同名字段同义。
+   */
+  sandboxCacheTtlMs?: number
+  /**
+   * 空闲多久后让该主体的沙箱自己退出，单位毫秒：provider 把它作为 `DSH_TOOL_EXEC_IDLE_MS`
+   * 注入沙箱，容器据此判定「没有在途请求、且距上一次请求已超过预算」后自行退出，Pod 因此进入
+   * 终态，由下一次启动的收尸清掉。宿主不自己计时：它看不见别的副本对这个沙箱的使用，而每一个
+   * 请求都要到达容器。正在执行的命令不算空闲。省略则沙箱永不自行退出。
+   * 与 `container-docker` 的同名字段同义。
+   */
+  idleTimeoutMs?: number
+  /**
+   * 沙箱内每次 exec 里**每条输出流**最多保留多少字节：provider 把它作为
+   * `DSH_TOOL_EXEC_MAX_OUTPUT_BYTES` 注入沙箱，容器超过上界后继续读完这条流（停止读会让子进程
+   * 在写满管道时阻塞），只保留末尾一段，并在结果里把该流标成已截断（见 `container-docker`
+   * 的 `src/tool-exec.ts`，两个后端跑的是同一份服务）。上界只需高于宿主自己的结果上界
+   * （`ctx.subprocess` 的每条流预算），它的用处是保护沙箱自己：原始流是容器先攒满、宿主才轮得到
+   * 加界的，所以一条大输出命令能撑死沙箱。调低它会连带截断那些本来整段读得回来的大结果
+   * （整份文件读取、`run_code` 自己 64 MiB 的载荷上界），所以它要留在部署里那些上界之上。
+   * 与 `container-docker` 的同名字段逐字同义。默认 67108864。
+   */
+  maxOutputBytes?: number
+}
+
+/** 沙箱内 Python 三件套的显式取值；每项各自独立，与 `container-docker` 按标记逐个设置的规则一致。 */
+export interface PythonSandboxEnv {
+  /** 前置到 `PATH` 的目录，通常是 `<pythonRoot>/bin`。省略则不前置，`PATH` 保持镜像自己的值。 */
+  binDir?: string
+  /** `VIRTUAL_ENV` 的取值，通常是 `pythonRoot` 自身（该目录带 `pyvenv.cfg` 时）。省略则不设。 */
+  virtualEnv?: string
+  /** `PYTHONPATH` 的取值，通常是 `<pythonRoot>/lib/python3.<minor>/site-packages`，多个目录用 `:` 连接。省略则不设。 */
+  sitePackages?: string
+}
+```
+
+Source: [`packages/tenant/container-k8s/src/index.ts:113`](../packages/tenant/container-k8s/src/index.ts)
 
 <a id="deepseek-aidsh-cordis-host-runner"></a>
 
@@ -733,12 +945,13 @@ Source: [`packages/extensions/cordis-host-runner/src/index.ts:88`](../packages/e
 /** Plugin config: file location and hot-reload behavior. */
 export interface Config {
   /**
-   * Credentials document path; defaults to `<tenant.dataRoot>/.credentials.yaml`
-   * inside a tenant scope, otherwise `.credentials.yaml` under the harness home.
-   * An explicit path is one fixed global document with no tenant scoping.
+   * Credentials document path; defaults to `<partition.dataRoot>/.credentials.yaml`
+   * inside an ambient request partition, otherwise `.credentials.yaml` under the
+   * harness home. An explicit path is one fixed global document with no
+   * partitioning.
    */
   path?: string
-  /** Harness home used when `path` is omitted and no tenant is in scope; defaults to `$DSH_HOME` or `~/.dsh`. */
+  /** Harness home used when `path` is omitted and no partition is ambient; defaults to `$DSH_HOME` or `~/.dsh`. */
   dshHome?: string
   /** Watch the document and hot-publish external edits; defaults to true. */
   watch?: boolean
@@ -1017,6 +1230,14 @@ export interface Config {
    * @default 1024
    */
   coldBlankProbeMaxBytes?: number
+  /**
+   * Whether this gateway answers user questions through its connected clients.
+   * `false` leaves the `userQuestions` seam to the other provider in this
+   * composition — the multi-tenant deployment answers through its business API
+   * — because the seam accepts exactly one provider per context.
+   * @default true
+   */
+  userQuestionsProvider?: boolean
 }
 ```
 
@@ -1569,6 +1790,8 @@ export interface StdioConfig {
   failOnStartupError: boolean
   /** Automatic reconnect policy after a lost connection; omission uses the defaults. */
   reconnect?: ReconnectConfig
+  /** Tool-call concurrency for this server; omission uses the defaults. */
+  toolConcurrency?: ToolConcurrencyConfig
 }
 
 /** Config for connecting to an MCP server over Streamable HTTP (SSE). */
@@ -1591,6 +1814,8 @@ export interface StreamableHttpConfig {
   failOnStartupError: boolean
   /** Automatic reconnect policy after a lost connection; omission uses the defaults. */
   reconnect?: ReconnectConfig
+  /** Tool-call concurrency for this server; omission uses the defaults. */
+  toolConcurrency?: ToolConcurrencyConfig
 }
 
 /** Automatic reconnect policy for one MCP server connection. */
@@ -1604,9 +1829,112 @@ export interface ReconnectConfig {
   /** Consecutive failed attempts per outage before giving up for good (default 10). */
   maxAttempts?: number
 }
+
+/** Per-server tool-call concurrency configuration. */
+export interface ToolConcurrencyConfig {
+  /**
+   * Judgement rule for this server (default `annotations`). `annotations`
+   * trusts `readOnlyHint` and `idempotentHint`; `parallel` allows every call to
+   * overlap regardless of annotations; `exclusive` allows none, which is the
+   * switch for a server whose annotations are wrong or whose tools must not
+   * overlap.
+   */
+  policy?: ToolConcurrencyPolicy
+  /**
+   * Most `tools/call` requests this server may have in flight at once (default
+   * 10, the harness-wide parallelism default). Calls beyond the cap wait in
+   * submission order.
+   */
+  maxConcurrentCalls?: number
+  /**
+   * This server's own (raw) tool names whose calls must never overlap another
+   * call, whatever `policy` says for the rest of its tools. The names are the
+   * ones `tools/list` reports, not the model-facing `mcp__<server>__<name>`
+   * form. Omission and an empty list both mean no tool is excluded — Schemastery
+   * materializes a missing array key as `[]`, so the two are the same value and
+   * an empty list names no referent to miss. Every listed name must exist in the
+   * server's tool list; a name the server does not report fails the tool
+   * synchronization that discovered the list, so a typo is never silently
+   * ignored and a name is judged as soon as it is known.
+   */
+  exclusiveTools?: string[]
+  /**
+   * This server's own (raw) tool names whose calls may be sent again after a
+   * refusal to serve, in addition to the tools whose own annotations declare
+   * `readOnlyHint: true`. An empty list retries only those annotated read-only
+   * tools, which is the fail-safe direction: a write is repeated only when the
+   * deployment says naming it is safe, never because it was left out. Names are
+   * judged exactly like `exclusiveTools` ones — a name the server does not
+   * report fails that tool synchronization — and the two lists are independent:
+   * a read-only tool that also needs its submission order preserved belongs in
+   * both, while a tool that writes belongs in neither.
+   */
+  retryTools?: string[]
+  /**
+   * How this server's call cap behaves over time (default `adaptive`). `fixed`
+   * holds `maxConcurrentCalls` for the life of the connection; `adaptive`
+   * starts there and moves the cap down on a refusal to serve and back up while
+   * calls succeed. Adaptive is the default because a third-party server
+   * publishes no capacity to configure a correct fixed number with: too high
+   * produces refusals, too low wastes the parallelism the caller asked for, and
+   * the learned cap is bounded below by one call and above by the configured
+   * maximum, so it cannot make a working server unusable. Set `fixed` to hold a
+   * number the deployment has measured.
+   */
+  mode?: ToolConcurrencyMode
+  /**
+   * Fraction of the cap one refusal to serve keeps (default 0.5). Each refusal
+   * multiplies the current cap, and the result never drops below one slot.
+   */
+  decreaseFactor?: number
+  /** Slots added back by one recovery step (default 1). */
+  recoveryStep?: number
+  /**
+   * Milliseconds without a refusal to serve before one recovery step is taken
+   * (default 2000). A step also needs a call that completed, so an idle server
+   * does not recover the cap on its own.
+   */
+  recoveryQuietMs?: number
+  /**
+   * Whether a `tools/call` that outlived `toolCallTimeoutMs` counts as a
+   * refusal to serve (default true). A request-limited backend holds requests
+   * until the pool frees, so its overload arrives as a timeout rather than an
+   * error; a backend that is merely slow produces the same signal, and counting
+   * it lowers the cap for a server that was never overloaded.
+   */
+  countTimeouts?: boolean
+  /**
+   * Extra attempts one call may make after a refusal to serve (default 0, no
+   * retry). Retrying is what keeps a refused call from becoming a model-visible
+   * error while the cap is still learning, and it is bounded: at most
+   * `1 + retryAttempts` requests per call, each with its own `toolCallTimeoutMs`
+   * budget, and the delays in between add to the call's wall-clock time. A tool
+   * is never retried unless it advertises `readOnlyHint: true` or the deployment
+   * names it in `retryTools`.
+   */
+  retryAttempts?: number
+  /**
+   * First retry delay in milliseconds; doubles per further attempt (default
+   * 200). Queueing for a retry, like queueing for a first slot, is not charged
+   * to the per-call timeout.
+   */
+  retryBaseDelayMs?: number
+  /**
+   * Fraction the retry delay is spread by, in `0..1` (default 0.2); `0` disables
+   * jitter and makes every delay exact. Spread keeps calls refused together from
+   * returning together and producing a fresh burst.
+   */
+  retryJitterRatio?: number
+}
+
+/** How one server's tool annotations decide whether its MCP calls may overlap. */
+export type ToolConcurrencyPolicy = 'annotations' | 'parallel' | 'exclusive'
+
+/** How one server's call cap behaves over the life of the connection. */
+export type ToolConcurrencyMode = 'fixed' | 'adaptive'
 ```
 
-Source: [`packages/mcp/mcp-client/src/index.ts:98`](../packages/mcp/mcp-client/src/index.ts)
+Source: [`packages/mcp/mcp-client/src/index.ts:114`](../packages/mcp/mcp-client/src/index.ts)
 
 <a id="deepseek-aidsh-message-feedback"></a>
 
@@ -1623,6 +1951,42 @@ export interface Config {
 ```
 
 Source: [`packages/feedback/message-feedback/src/index.ts:49`](../packages/feedback/message-feedback/src/index.ts)
+
+<a id="deepseek-aidsh-object-store"></a>
+
+## `@deepseek-ai/dsh-object-store`
+
+Requires: `tools`
+
+```ts config-catalog
+/** 对象存储配置。除端点、桶与对外基址外都有默认值。 */
+export interface Config {
+  /** S3 端点源（`scheme://host[:port]`），服务访问存储用的那个地址。 */
+  endpoint: string
+  /** 桶名；该桶必须是部署侧已开放匿名只读的桶。 */
+  bucket: string
+  /** 对外下载基址（`scheme://host[:port]`），用户浏览器能到达的那个地址。 */
+  publicBaseUrl: string
+  /** 签名区域；RGW 默认 zonegroup 用 `us-east-1`。 */
+  region?: string
+  /** 读取访问密钥 ID 的环境变量名。 */
+  accessKeyEnv?: string
+  /** 读取秘密访问密钥的环境变量名。 */
+  secretKeyEnv?: string
+  /** 路径式寻址；RGW 与 MinIO 用 `true`。 */
+  forcePathStyle?: boolean
+  /** 对象键前缀，用来把本部署的对象与同一个桶里的其它对象分开。 */
+  keyPrefix?: string
+  /** 单个文件的上限字节数。 */
+  maxBytes?: number
+  /** `/global` 挂载对应的宿主根；该挂载不存在时省略。 */
+  usersRoot?: string
+  /** 写完之后匿名校验一次公开地址；确认「公开可下载」这件事真的成立。 */
+  verifyPublic?: boolean
+}
+```
+
+Source: [`packages/tenant/object-store/src/index.ts:35`](../packages/tenant/object-store/src/index.ts)
 
 <a id="deepseek-aidsh-permission-presets"></a>
 
@@ -2153,7 +2517,7 @@ Source: [`packages/session/session-title-first-prompt-llm/src/index.ts:15`](../p
 ```ts config-catalog
 /** Plugin config: file location and hot-reload behavior. */
 export interface Config {
-  /** Settings document path; when set this is a fixed global file, tenant-independent. */
+  /** Settings document path; when set this is a fixed global file, independent of any request partition. */
   path?: string
   /** Harness home used when `path` is omitted; defaults to `$DSH_HOME` or `~/.dsh`. */
   dshHome?: string
@@ -2194,7 +2558,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/shell/shell-env/src/index.ts:29`](../packages/shell/shell-env/src/index.ts)
+Source: [`packages/shell/shell-env/src/index.ts:32`](../packages/shell/shell-env/src/index.ts)
 
 <a id="deepseek-aidsh-skill"></a>
 
@@ -2247,6 +2611,24 @@ export interface Config {
 ```
 
 Source: [`packages/skill/skill-filesystem/src/index.ts:49`](../packages/skill/skill-filesystem/src/index.ts)
+
+<a id="deepseek-aidsh-skill-install"></a>
+
+## `@deepseek-ai/dsh-skill-install`
+
+Requires: `skills`
+
+```ts config-catalog
+/** Skill bundle installation configuration. */
+export interface Config {
+  /** Largest accepted compressed bundle in bytes. Defaults to 16 MiB. */
+  maxBundleBytes?: number
+  /** Largest accepted total expanded size in bytes. Defaults to 64 MiB. */
+  maxExpandedBytes?: number
+}
+```
+
+Source: [`packages/skill/skill-install/src/index.ts:58`](../packages/skill/skill-install/src/index.ts)
 
 <a id="deepseek-aidsh-skill-tier"></a>
 
@@ -2689,7 +3071,7 @@ export interface TenantInput {
 }
 ```
 
-Source: [`packages/tenant/tenant/src/index.ts:147`](../packages/tenant/tenant/src/index.ts)
+Source: [`packages/tenant/tenant/src/index.ts:181`](../packages/tenant/tenant/src/index.ts)
 
 <a id="deepseek-aidsh-tenant-admin"></a>
 
@@ -2710,6 +3092,28 @@ export interface Config {
 ```
 
 Source: [`packages/tenant/tenant-admin/src/index.ts:75`](../packages/tenant/tenant-admin/src/index.ts)
+
+<a id="deepseek-aidsh-tenant-admin-http"></a>
+
+## `@deepseek-ai/dsh-tenant-admin-http`
+
+Requires: `webServer` · `tenantAuth` · `tenantAdmin`
+
+```ts config-catalog
+/** Plugin configuration. */
+export interface Config {
+  /** OIDC scope admitting the management surface. */
+  adminScope?: string
+  /** Maximum buffered request-body bytes before the carrier answers 413. */
+  maxRequestBodyBytes?: number
+  /** Maximum buffered `skills.upload` request-body bytes, which carry a base64 zip. */
+  maxUploadBodyBytes?: number
+  /** Serve `GET /admin/openapi.json` (the management wire reference). */
+  openapi?: boolean
+}
+```
+
+Source: [`packages/tenant/tenant-admin-http/src/index.ts:74`](../packages/tenant/tenant-admin-http/src/index.ts)
 
 <a id="deepseek-aidsh-tenant-admin-postgres"></a>
 
@@ -2752,6 +3156,29 @@ export interface Config {
 ```
 
 Source: [`packages/tenant/tenant-auth-jwt/src/index.ts:23`](../packages/tenant/tenant-auth-jwt/src/index.ts)
+
+<a id="deepseek-aidsh-tenant-questions"></a>
+
+## `@deepseek-ai/dsh-tenant-questions`
+
+Requires: `userQuestions`
+
+```ts config-catalog
+/**
+ * Service configuration.
+ *
+ * `answerTimeoutMs` must stay below the `user-questions` seam's own
+ * `answerTimeoutMs`: reaching the seam's deadline withdraws the ask through the
+ * provider's abort signal, so a longer window here would leave the model with the
+ * seam's generic no-answer failure instead of this channel's explicit timeout.
+ */
+export interface Config {
+  /** Milliseconds an unanswered question waits before `ask()` rejects with the timeout. */
+  answerTimeoutMs?: number
+}
+```
+
+Source: [`packages/tenant/tenant-questions/src/index.ts:131`](../packages/tenant/tenant-questions/src/index.ts)
 
 <a id="deepseek-aidsh-terminal-bash"></a>
 
@@ -2803,6 +3230,46 @@ export type ShellDialect = 'bash' | 'pwsh'
 
 Source: [`packages/terminal/terminal-bash/src/config.ts:10`](../packages/terminal/terminal-bash/src/config.ts)
 
+<a id="deepseek-aidsh-terminal-container"></a>
+
+## `@deepseek-ai/dsh-terminal-container`
+
+Requires: `terminals` · `containerRuntime`
+
+```ts config-catalog
+/** 插件公开配置。 */
+export interface Config {
+  /** 后端注册类型（默认 `shell`：终端工具与 `tool-bash-persistent` 默认要的就是这个名字）。 */
+  backendType?: string
+  /** 沙箱里的交互式 shell 可执行文件。 */
+  shellPath?: string
+  /** shell 参数。 */
+  shellArgs?: string[]
+  /** 未指定工作目录的会话在沙箱里的落地目录。 */
+  cwd?: string
+  /** 终端行数。 */
+  rows?: number
+  /** 终端列数。 */
+  cols?: number
+  /** 保留的最大逻辑行数。 */
+  scrollbackLines?: number
+  /** 保留的最大 UTF-8 字节数，同时也是容器侧保留输出的上界。 */
+  scrollbackMaxBytes?: number
+  /** 一次读或一次结算视图返回的最大字节数。 */
+  readMaxBytes?: number
+  /** 观察输出的轮询间隔（只读本地缓冲，不产生沙箱往返）。 */
+  pollIntervalMs?: number
+  /** 静默多久后判定「对方在等输入」。 */
+  idleSilenceMs?: number
+  /** 一次发送的绝对等待上界。 */
+  timeoutMs?: number
+  /** 会话结束时先 TERM、超过这个宽限才升级到 KILL 的等待时长。 */
+  disposeGraceMs?: number
+}
+```
+
+Source: [`packages/tenant/terminal-container/src/config.ts:6`](../packages/tenant/terminal-container/src/config.ts)
+
 <a id="deepseek-aidsh-time-context"></a>
 
 ## `@deepseek-ai/dsh-time-context`
@@ -2847,36 +3314,6 @@ export type TokenMeterConfig = Record<string, never>
 ```
 
 Source: [`packages/llm/token-meter/src/types.ts:12`](../packages/llm/token-meter/src/types.ts)
-
-<a id="deepseek-aidsh-tool-artifact"></a>
-
-## `@deepseek-ai/dsh-tool-artifact`
-
-Requires: `tools`
-
-```ts config-catalog
-/** Artifact delivery configuration. */
-export interface Config {
-  /** Absolute host directory the deployment's web front end serves as static files. */
-  mediaRoot: string
-  /**
-   * The web front end's origin (scheme, host, and port — no path), used only to build the absolute
-   * `url` for callers that need one (logs, curl, a non-browser client). The delivery tag never
-   * carries it.
-   */
-  publicOrigin?: string
-  /** Same-origin path prefix the front end serves {@link Config.mediaRoot} under. */
-  urlPrefix: string
-  /** Host root of the per-subject directories mounted at `/global`; omit when that mount is absent. */
-  usersRoot?: string
-  /** File published artifacts into a per-kind subdirectory instead of the case directory itself. */
-  groupByKind: boolean
-  /** Largest file this tool publishes, in bytes. */
-  maxBytes: number
-}
-```
-
-Source: [`packages/tenant/tool-artifact/src/index.ts:42`](../packages/tenant/tool-artifact/src/index.ts)
 
 <a id="deepseek-aidsh-tool-bash"></a>
 
@@ -2945,7 +3382,11 @@ Source: [`packages/fs/tool-fs/src/index.ts:25`](../packages/fs/tool-fs/src/index
 Requires: `tools` · `systemPrompt` · `subprocess`
 
 ```ts config-catalog
-/** Plugin config; over-cap glob sampling is an explicit deployment choice and the remaining fields have defaults. */
+/**
+ * Plugin config; over-cap glob sampling is an explicit deployment choice, the
+ * remaining caps have defaults, and `ripgrepPath` stays unset until a deployment
+ * names the binary its execution side carries.
+ */
 export interface Config {
   /** Whether an over-cap `glob` page is sampled across top-level entries instead of taking the modification-time head. */
   sampleOverCapGlobResults: boolean
@@ -2968,10 +3409,21 @@ export interface Config {
    * `@deepseek-ai/dsh-tool-call-timeout-policy` through `exec.signal`.
    */
   timeoutMs?: number
+  /**
+   * Absolute path of the ripgrep binary every search spawns, for a deployment
+   * whose execution side is not this process: a sandbox container holds no path
+   * resolved here, so the packaged binary is unusable there. The value names a
+   * file on the execution side and is passed through unresolved — only that side
+   * can answer for it — so an unusable path fails each call as `SEARCH_FAILED`
+   * naming it. Omitted, the packaged binary is resolved lazily at the first
+   * search call (`@vscode/ripgrep`, or the executable's `-rg` sidecar in a
+   * single-file runtime), which is what a co-located execution side needs.
+   */
+  ripgrepPath?: string
 }
 ```
 
-Source: [`packages/fs/tool-fs-search/src/index.ts:73`](../packages/fs/tool-fs-search/src/index.ts)
+Source: [`packages/fs/tool-fs-search/src/index.ts:78`](../packages/fs/tool-fs-search/src/index.ts)
 
 <a id="deepseek-aidsh-tool-goal"></a>
 
@@ -3391,6 +3843,19 @@ export interface Config {
 
 Source: [`packages/tenant/tools-manifest/src/index.ts:35`](../packages/tenant/tools-manifest/src/index.ts)
 
+<a id="deepseek-aidsh-tools-restriction"></a>
+
+## `@deepseek-ai/dsh-tools-restriction`
+
+Requires: `tools`
+
+```ts config-catalog
+/** This restriction consumer has no config; the tier roots come from `ctx.toolTiers`. */
+export type Config = Readonly<Record<string, never>>
+```
+
+Source: [`packages/tenant/tools-restriction/src/index.ts:43`](../packages/tenant/tools-restriction/src/index.ts)
+
 <a id="deepseek-aidsh-tools-tier"></a>
 
 ## `@deepseek-ai/dsh-tools-tier`
@@ -3802,14 +4267,15 @@ Imported as libraries by other packages; a `cordis.yml` cannot load them.
 - `@deepseek-ai/dsh-client-web` ([`packages/client/web/src/index.ts`](../packages/client/web/src/index.ts))
 - `@deepseek-ai/dsh-cmdline` ([`packages/boot/cmdline/src/index.ts`](../packages/boot/cmdline/src/index.ts))
 - `@deepseek-ai/dsh-code-runtime-python` ([`packages/code-runtime/code-runtime-python/src/index.ts`](../packages/code-runtime/code-runtime-python/src/index.ts))
+- `@deepseek-ai/dsh-container-transport` ([`packages/tenant/container-transport/src/index.ts`](../packages/tenant/container-transport/src/index.ts))
 - `@deepseek-ai/dsh-home-paths` ([`packages/util/home-paths/src/index.ts`](../packages/util/home-paths/src/index.ts))
 - `@deepseek-ai/dsh-hook-protocol` ([`packages/hooks/hook-protocol/src/index.ts`](../packages/hooks/hook-protocol/src/index.ts))
 - `@deepseek-ai/dsh-launch-environment` ([`packages/util/launch-environment/src/index.ts`](../packages/util/launch-environment/src/index.ts))
 - `@deepseek-ai/dsh-llm-mock-server` ([`packages/test-support/llm-mock-server/src/index.ts`](../packages/test-support/llm-mock-server/src/index.ts))
 - `@deepseek-ai/dsh-loader-smoke` ([`packages/test-support/loader-smoke/src/index.ts`](../packages/test-support/loader-smoke/src/index.ts))
-- `@deepseek-ai/dsh-multi-tenant` ([`packages/bundle/multi-tenant/src/index.ts`](../packages/bundle/multi-tenant/src/index.ts))
 - `@deepseek-ai/dsh-native-command` ([`packages/util/native-command/src/index.ts`](../packages/util/native-command/src/index.ts))
 - `@deepseek-ai/dsh-output-retention` ([`packages/util/output-retention/src/index.ts`](../packages/util/output-retention/src/index.ts))
+- `@deepseek-ai/dsh-partition-scope` ([`packages/core/partition-scope/src/index.ts`](../packages/core/partition-scope/src/index.ts))
 - `@deepseek-ai/dsh-sandbox-windows-acl` ([`packages/sandbox/sandbox-windows-acl/src/index.ts`](../packages/sandbox/sandbox-windows-acl/src/index.ts))
 - `@deepseek-ai/dsh-scope` ([`packages/core/scope/src/index.ts`](../packages/core/scope/src/index.ts))
 - `@deepseek-ai/dsh-sdk-client` ([`packages/sdk/client/src/index.ts`](../packages/sdk/client/src/index.ts))
@@ -3818,7 +4284,7 @@ Imported as libraries by other packages; a `cordis.yml` cannot load them.
 - `@deepseek-ai/dsh-session-telemetry` ([`packages/session/session-telemetry/src/index.ts`](../packages/session/session-telemetry/src/index.ts))
 - `@deepseek-ai/dsh-session-title-llm` ([`packages/session/session-title-llm/src/index.ts`](../packages/session/session-title-llm/src/index.ts))
 - `@deepseek-ai/dsh-subagent-in-process-driver` ([`packages/subagent/subagent-in-process-driver/src/index.ts`](../packages/subagent/subagent-in-process-driver/src/index.ts))
-- `@deepseek-ai/dsh-tenant-demo` ([`packages/tenant/tenant-demo/src/index.ts`](../packages/tenant/tenant-demo/src/index.ts))
+- `@deepseek-ai/dsh-tenant-app` ([`packages/tenant/tenant-app/src/index.ts`](../packages/tenant/tenant-app/src/index.ts))
 - `@deepseek-ai/dsh-timeout` ([`packages/util/timeout/src/index.ts`](../packages/util/timeout/src/index.ts))
 - `@deepseek-ai/dsh-typert-generator` ([`packages/typert/generator/src/index.ts`](../packages/typert/generator/src/index.ts))
 - `@deepseek-ai/dsh-typert-protocol` ([`packages/typert/protocol/src/index.ts`](../packages/typert/protocol/src/index.ts))

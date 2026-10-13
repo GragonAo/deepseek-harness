@@ -25,15 +25,16 @@ Ship `packages/tenant/` as a keyless end-to-end slice: bearer-JWT authentication
 | `@deepseek-ai/dsh-container-docker` | `container-docker/` | registers a provider | Docker/Podman engine lifecycle |
 | `@deepseek-ai/dsh-fs-container` | `fs-container/` | `ctx.fs` | `FileSystem` over the tenant container |
 | `@deepseek-ai/dsh-subprocess-container` | `subprocess-container/` | `ctx.subprocess` | `SubprocessRuntime` over the tenant container |
-| `@deepseek-ai/dsh-api-http` | `api-http/` | `ctx.tenantHttpApi` | stateless HTTP API + auth middleware |
-| `@deepseek-ai/dsh-tenant-demo` | `tenant-demo/` | — | keyless end-to-end assembly + isolation test |
+| `@deepseek-ai/dsh-agent-http` | `agent-http/` | `ctx.agentHttp` | business HTTP surface at `/api` over `ctx.apiProxy`, bearer-authenticated |
+| `@deepseek-ai/dsh-tenant-admin-http` | `tenant-admin-http/` | `ctx.tenantAdminHttp` | management surface at `/admin`, gated by the administrative scope |
+| `@deepseek-ai/dsh-tenant-app` | `tenant-app/` | — | the composition entry: the `dsh-tenant` bin, its typed config, and the plugin inventory |
 
 ### Deviations from the proposal, shipped as-is
 
 - **Tenant authority is module-level in `dsh-tenant`, not a `ctx.tenantContext` service.** `runWithTenant(tenant, fn)`, `requireTenant()`, and `currentTenant()` are `AsyncLocalStorage`-backed exports; `requireTenant()` throws `TenantError` `NO_TENANT_IN_SCOPE` outside a run. `TenantRegistry` is the `ctx.tenants` service.
 - **`ctx.containerRuntime` is an `exec` surface, not `acquire`/`handle`.** `ContainerRuntime.exec(command, args, opts)` returns `{ exitCode, stdout, stderr }`. `DockerContainerRuntime` lazily starts one `docker run -d … tail -f /dev/null` container per tenant partition (workspace bind-mounted at `/workspace`, optional tooling at `/tools` read-only), `docker exec -i`s each call, and `docker rm -f`s on dispose. Idle-timeout disposal is deferred.
-- **The HTTP surface is one registered operation slot, not JSON-RPC + SSE.** `TenantHttpApi` exposes one exact route (default `/v1/run`): non-POST → 405, authenticate → resolve tenant → `runWithTenant` → the registered operation → JSON. Errors map to 401 (`WWW-Authenticate: Bearer`), 403, upstream status, or 500. The JSON-RPC/`session` carrier and SSE downlink are deferred.
-- **The demo lives in `packages/tenant/tenant-demo/`, not `examples/tenant-demo/`, and runs a direct operation, not an LLM prompt turn.** `assembleDemo` wires the providers above; `makeDemoOperation` executes one container tool call (`mkdir`/`printf` a marker, read it back in-world), appends one `todo/write` session event to the tenant schema, and returns the tenant-scoped result.
+- **The HTTP face is two carriers, split by the authority each one proves.** `ctx.agentHttp` serves the business surface at `/api`: authenticate, resolve the tenant, check membership, enter `runWithTenant` + `runWithUser`, and delegate to `ctx.apiProxy`; a credential that proves no tenant is refused with 401. `ctx.tenantAdminHttp` serves the management surface at `/admin` as `POST /admin/<method>`, gated by the administrative scope alone, so an operator administers every tenant with a platform credential and needs membership in none. A JSON-RPC/`session` vocabulary with an SSE downlink remains deferred.
+- **The composition lives in `packages/tenant/tenant-app/`, not in an `examples/` bundle.** `createTenantApp` mounts the tenant stack on one Cordis context from a typed config file plus a plugin inventory, and the `dsh-tenant` bin boots it with no dsh bundle, CLI, or Loader. Its hermetic boot test serves real HTTP with every inventory row disabled and asserts the management surface refuses an unproven credential.
 
 ### Isolation invariant
 
@@ -57,7 +58,7 @@ The full set, with the reasoning each lost, is in the proposed note. The decisio
 
 **Bought:** a runnable proof that one process serves two tenants with separate containers, separate host workspaces, separate Postgres schemas, and shared-session-id opacity, behind a stateless bearer-authenticated route; the single-tenant core, the E2B-style portable-execution-world swap, and the existing backends are untouched.
 
-**Cost and deferred work:** the demo does not drive an LLM turn; the HTTP carrier is a single operation, not the JSON-RPC/`session` vocabulary with an SSE downlink; container idle-timeout disposal, all storage domains and credentials under `dataRoot`, terminal/LSP/`code-runtime` container providers, and ACP parity are explicit follow-up recorded in the proposed note's scope risk.
+**Cost and deferred work:** the boot test drives no LLM turn; the HTTP face carries no JSON-RPC/`session` vocabulary with an SSE downlink; container idle-timeout disposal, all storage domains and credentials under `dataRoot`, terminal/LSP/`code-runtime` container providers, and ACP parity are explicit follow-up recorded in the proposed note's scope risk.
 
 ### Verification
 

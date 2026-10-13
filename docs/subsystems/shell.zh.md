@@ -291,6 +291,24 @@ register(contributor: BashEnvContributor): () => void
 collect(execution: ToolExecution): DshEnvironment
 
 /**
+ * Build the trusted `DSH_*` snapshot for one harness process started outside
+ * the model shell path — the container code runtime, which runs a `run_code`
+ * program in the tenant sandbox — so both entry points into that sandbox
+ * inject the group {@link composeDshEnvironment} owns instead of two subsets.
+ *
+ * Built-ins only: a {@link BashEnvContributor} resolves from a
+ * {@link ToolExecution}, which this path has none of, so contributor-owned
+ * variables (`DSH_SESSION_JSONL`) stay absent here.
+ *
+ * The session comes from the ambient agent-initiator scope — the authority
+ * the agent loop establishes for the current driver chain — never from the
+ * process environment. Outside that boundary, or once the agent service is
+ * disposed, the variable is absent rather than guessed.
+ * @returns an immutable environment overlay containing the built-ins.
+ */
+collectSession(): DshEnvironment
+
+/**
  * Enumerate plugin-contributed variables without executing their resolvers.
  * @returns declarations sorted by environment variable name.
  */
@@ -299,5 +317,5 @@ list(): BashEnvVariableInfo[]
 
 Types: [DshEnvironment](subprocess.md) · [ToolExecution](tools.md)
 
-Source: [`packages/shell/shell-env/src/index.ts:89`](../../packages/shell/shell-env/src/index.ts)
+Source: [`packages/shell/shell-env/src/index.ts:129`](../../packages/shell/shell-env/src/index.ts)
 <!-- END GENERATED cordis-surface -->

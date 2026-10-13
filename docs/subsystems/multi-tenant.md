@@ -10,7 +10,7 @@ The multi-tenant subsystem overlays tenant isolation on the single-tenant harnes
 
 ## Authentication
 
-[`dsh-tenant-auth`](../../packages/tenant/tenant-auth) defines the `ctx.tenantAuth` seam: `authenticate(credential)` verifies a bearer credential and returns a `TenantPrincipal` (`tenantId`, `subject`, optional scopes). The shipped [`dsh-tenant-auth-jwt`](../../packages/tenant/tenant-auth-jwt) provider verifies RS256 JWKS or HS256 shared-secret tokens, pinning the algorithm per mode.
+[`dsh-tenant-auth`](../../packages/tenant/tenant-auth) defines the `ctx.tenantAuth` seam: `authenticate(credential)` verifies a bearer credential and returns a `TenantPrincipal` (`subject`, optional `tenantId`, optional scopes). `tenantId` is absent for a platform credential, and the seam admits one: a carrier that serves a tenant refuses a principal without a tenant, while the tenant-management carrier admits it on an administrative scope alone. The shipped [`dsh-tenant-auth-jwt`](../../packages/tenant/tenant-auth-jwt) provider verifies RS256 JWKS or HS256 shared-secret tokens, pinning the algorithm per mode, and treats a token with no `tenantId` claim as a platform principal.
 
 ## Tenant-scoped state
 
@@ -20,9 +20,9 @@ Two Postgres providers — [`dsh-storage-postgres`](../../packages/tenant/storag
 
 [`dsh-container`](../../packages/tenant/container) defines the `ctx.containerRuntime` seam. The [`dsh-container-docker`](../../packages/tenant/container-docker) provider starts one container per tenant (workspace bind-mounted at `/workspace`, tooling read-only at `/tools`), and the [`dsh-subprocess-container`](../../packages/tenant/subprocess-container) and [`dsh-fs-container`](../../packages/tenant/fs-container) providers delegate process and file operations into that same world.
 
-## HTTP surface
+## HTTP surfaces
 
-[`dsh-api-http`](../../packages/tenant/api-http) exposes one route (`ctx.tenantHttpApi`): authenticate, resolve the tenant, enter `runWithTenant`, and run the registered operation.
+Two carriers split the HTTP face by the authority each one proves. [`dsh-agent-http`](../../packages/tenant/agent-http) serves the business surface at `/api`: authenticate, resolve the tenant, check membership, enter `runWithTenant` + `runWithUser`, and delegate to the single-user gateway — a credential that proves no tenant is refused. [`dsh-tenant-admin-http`](../../packages/tenant/tenant-admin-http) serves the management surface at `/admin` as `POST /admin/<method>`: authenticate, enter the principal's scopes, and run the tenant-management method the payload names, so an operator administers every tenant with a platform credential and needs membership in none. The methods themselves belong to [`dsh-tenant-admin`](../../packages/tenant/tenant-admin), which re-checks the same administrative scope before it touches a record.
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 
@@ -41,15 +41,17 @@ Multi-tenant carrier registered as `ctx.agentHttp`.
 ```ts cordis-catalog
 /**
  * Authenticate one request and answer it through the shared gateway under
- * the resolved tenant's authority. Authentication and tenant resolution fail
- * closed before any method runs.
+ * the resolved tenant's authority. Authentication, tenant resolution, and
+ * membership fail closed before any method runs, with no exception for an
+ * administrative token: tenant administration is served by
+ * `@deepseek-ai/dsh-tenant-admin-http` at its own prefix.
  * @param request - the incoming Fetch request (unary RPC or SSE channel).
  * @returns the gateway's response, or a 401/403/500 fail-closed rejection.
  */
 async fetch(request: Request): Promise<Response>
 ```
 
-Source: [`packages/tenant/agent-http/src/index.ts:83`](../../packages/tenant/agent-http/src/index.ts)
+Source: [`packages/tenant/agent-http/src/index.ts:112`](../../packages/tenant/agent-http/src/index.ts)
 
 <a id="ctxcontainerruntime--containerruntime-abstract-seam"></a>
 
@@ -67,9 +69,26 @@ Abstract container runtime (`ctx.containerRuntime`). A provider runs commands in
  * @throws `TenantError` code `NO_TENANT_IN_SCOPE` outside an authenticated request.
  */
 abstract exec( command: string, args: readonly string[], opts?: ContainerExecOptions, ): Promise<ContainerCommandResult>
+
+/**
+ * Open one interactive session in the ambient tenant's container, over a
+ * terminal allocated by the container runtime itself.
+ *
+ * `exec` cannot serve this: it captures a completed command's streams and has
+ * no way to keep stdin open, to size a terminal, or to signal a process that
+ * is still running. A session opened here is live until it is closed or its
+ * process ends, and it outlives the call that opened it.
+ *
+ * @param options - command line, terminal size, retained-output bound, cancellation.
+ * @returns a live session holding the returned terminal.
+ * @throws `TenantError` code `NO_TENANT_IN_SCOPE` outside an authenticated
+ * request, and the provider's own failure when the container cannot be
+ * reached or the command never took over the terminal.
+ */
+abstract openPty(options: ContainerPtyOptions): Promise<ContainerPtySession>
 ```
 
-Source: [`packages/tenant/container/src/index.ts:45`](../../packages/tenant/container/src/index.ts)
+Source: [`packages/tenant/container/src/index.ts:162`](../../packages/tenant/container/src/index.ts)
 
 <a id="ctxtenantadmin--tenantadmin"></a>
 
@@ -166,6 +185,14 @@ async usersEnsure(subject: string): Promise<{ root: string }>
 
 Source: [`packages/tenant/tenant-admin/src/index.ts:112`](../../packages/tenant/tenant-admin/src/index.ts)
 
+<a id="ctxtenantadminhttp--tenantadminhttp"></a>
+
+### `ctx.tenantAdminHttp` — `TenantAdminHttp`
+
+Tenant-administration carrier. Load it beside `ctx.tenantAuth` and `ctx.tenantAdmin`; it registers its `/admin` prefix route and, unless disabled, its wire reference.
+
+Source: [`packages/tenant/tenant-admin-http/src/index.ts:156`](../../packages/tenant/tenant-admin-http/src/index.ts)
+
 <a id="ctxtenantauth--tenantauthenticator-abstract-seam"></a>
 
 ### `ctx.tenantAuth` — `TenantAuthenticator` (abstract seam)
@@ -185,24 +212,58 @@ Abstract tenant authenticator (`ctx.tenantAuth`). Subclass, implement authentica
 abstract authenticate(credential: string): Promise<TenantPrincipal>
 ```
 
-Source: [`packages/tenant/tenant-auth/src/index.ts:52`](../../packages/tenant/tenant-auth/src/index.ts)
+Source: [`packages/tenant/tenant-auth/src/index.ts:59`](../../packages/tenant/tenant-auth/src/index.ts)
 
-<a id="ctxtenanthttpapi--tenanthttpapi"></a>
+<a id="ctxtenantquestions--tenantquestionservice"></a>
 
-### `ctx.tenantHttpApi` — `TenantHttpApi`
+### `ctx.tenantQuestions` — `TenantQuestionService`
 
-Stateless tenant HTTP API registered as `ctx.tenantHttpApi`.
+Tenant question channel: the user-questions provider a multi-tenant deployment mounts, plus the business-plane methods that answer it.
+
+It owns one ask's whole lifecycle: this service appends the audit pair, holds the pending ask, and settles it — the first of answer, deadline, abort, or disposal to claim an ask wins, and every other path then finds no ask.
 
 ```ts cordis-catalog
 /**
- * Register the single request operation and its HTTP route.
- * @param operation - the tenant-scoped request operation.
- * @returns the disposer removing both the operation and its route.
+ * The asks the ambient subject may still answer, oldest first.
+ *
+ * Wire method `tenantQuestion.list`: `POST /api/tenantQuestion.list` with an
+ * empty payload. It is the recovery path for a business subscriber that missed
+ * the `user-question/asked` event — the durable record of what was asked is the
+ * session log, not this table.
+ *
+ * @returns one view per live ask of the ambient (tenant, subject); questions a
+ *   different subject owns are never listed.
+ * @throws {TenantError} `NO_TENANT_IN_SCOPE` or `NO_USER_IN_SCOPE` outside a
+ *   request that proved both (the carrier enters both before calling this).
  */
-register(operation: TenantOperation): () => void
+list(): TenantPendingQuestion[]
+
+/**
+ * Accept one answer and wake the tool call that asked.
+ *
+ * Wire method `tenantQuestion.answer`: `POST /api/tenantQuestion.answer` with
+ * the payload `{ sessionId, questionId, answer }`, where `answer` is
+ * `{ answers: [{ id, selected, custom? }] }` carrying one item per question of
+ * that ask. The payload is accepted only when it names an ask still waiting for
+ * the ambient (tenant, subject) in that same session, and when every item
+ * answers one of that ask's questions with labels the question itself offered —
+ * so a stale id, another subject's question, or another session's ask cannot be
+ * answered here.
+ *
+ * @param payload - the request payload, unvalidated: which answers are
+ *   acceptable depends on the ambient subject's live asks, so the schema is
+ *   built per call rather than declared.
+ * @returns the ask that was resolved and the session whose tool call it woke.
+ * @throws {ZodError} when the payload names no answerable ask, or its answer
+ *   does not answer that ask (the carrier answers `bad-request` with the
+ *   issues).
+ * @throws when the `user-question/decided` append fails: an answer is reported
+ *   accepted only once its resolution is logged.
+ */
+async answer(payload: unknown): Promise<TenantQuestionAnswerReceipt>
 ```
 
-Source: [`packages/tenant/api-http/src/index.ts:73`](../../packages/tenant/api-http/src/index.ts)
+Source: [`packages/tenant/tenant-questions/src/index.ts:194`](../../packages/tenant/tenant-questions/src/index.ts)
 
 <a id="ctxtenantrecordstore--tenantrecordstore"></a>
 
@@ -301,7 +362,7 @@ resolveMember(id: TenantId, subject: UserId): Tenant
 list(): Tenant[]
 ```
 
-Source: [`packages/tenant/tenant/src/index.ts:324`](../../packages/tenant/tenant/src/index.ts)
+Source: [`packages/tenant/tenant/src/index.ts:358`](../../packages/tenant/tenant/src/index.ts)
 
 <a id="ctxtenantschemalifecycle--tenantschemalifecycle"></a>
 

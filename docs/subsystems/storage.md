@@ -184,7 +184,7 @@ The mounted domain facility. Opens declared domains over routed backends; one fa
 async open<S extends DomainSpec>(spec: S): Promise<Domain<S>>
 
 /**
- * Look up an open domain by name for the ambient tenant, untyped.
+ * Look up an open domain by name for the ambient partition, untyped.
  * Diagnostic surface (the package invariant cross-checks change events
  * against live domain state); typed consumers hold the handle returned by
  * {@link open}.
@@ -202,7 +202,7 @@ get(name: string): DomainImpl | undefined
 async closeAll(): Promise<void>
 ```
 
-Source: [`packages/storage/storage-domain/src/index.ts:88`](../../packages/storage/storage-domain/src/index.ts)
+Source: [`packages/storage/storage-domain/src/index.ts:89`](../../packages/storage/storage-domain/src/index.ts)
 
 <a id="domain-events"></a>
 

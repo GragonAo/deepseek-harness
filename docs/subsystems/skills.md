@@ -242,6 +242,45 @@ The model-facing `skill({ name })` tool validates the kebab-case name, finds the
 
 Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnpm run verify-cordis-catalog` in doc-sync; regenerate with `pnpm run gen-cordis-catalog`) — this section is byte-identical in both language sides of the page. Signature blocks use a `ts cordis-catalog` fence and keep the original source JSDoc; dispatch modes are defined in the [primer](../cordis-primer.md#dispatch-modes), and the framework-inherited `ctx` API lives in [cordis-api/inherited.md](../cordis-api/inherited.md).
 
+<a id="ctxskillinstall--skillinstallservice"></a>
+
+### `ctx.skillInstall` — `SkillInstallService`
+
+`ctx.skillInstall` service: installs, replaces, and removes skill bundles in an ambient tier.
+
+```ts cordis-catalog
+/**
+ * Install one skill bundle into an ambient tier, replacing any existing skill
+ * of the same name when the request allows it. The bundle is validated in
+ * full before the tier directory changes at all, and the refreshed catalog is
+ * read afterwards so the result reports whether the skill is now discoverable.
+ * @param request - tier, zip bytes, and whether replacement is allowed.
+ * @returns the installed skill and whether the refreshed catalog lists it.
+ * @throws SkillInstallError when the tier, the archive, or the skill document is refused.
+ */
+async install(request: SkillInstallRequest): Promise<SkillInstallResult>
+
+/**
+ * Remove one skill from an ambient tier, accepting either its frontmatter
+ * name or the directory name holding it, and refresh every cached catalog.
+ * @param request - tier and the skill to remove.
+ * @returns the removed directory and whether the refreshed catalog still lists the name.
+ * @throws SkillInstallError when the tier is unavailable, the skill is absent, or two directories claim the name.
+ */
+async remove(request: SkillRemoveRequest): Promise<SkillRemoveResult>
+
+/**
+ * List one tier directory with each entry's loadability, so a skill placed by
+ * hand is reported with the coded reasons it never reaches the catalog.
+ * @param request - tier to inspect.
+ * @returns the tier directory and its entries.
+ * @throws SkillInstallError when the tier is unavailable.
+ */
+async list(request: SkillListRequest): Promise<SkillTierListing>
+```
+
+Source: [`packages/skill/skill-install/src/index.ts:199`](../../packages/skill/skill-install/src/index.ts)
+
 <a id="ctxskills--skillregistry"></a>
 
 ### `ctx.skills` — `SkillRegistry`
@@ -291,6 +330,18 @@ async list(options: SkillViewOptions = {}): Promise<SkillSummary[]>
  * @returns sorted summaries plus discovery-completeness state.
  */
 async snapshot(options: SkillViewOptions = {}): Promise<SkillCatalogSnapshot>
+
+/**
+ * Drop every completed catalog so the next read re-discovers from every
+ * provider, and notify catalog observers. Any mutation of a provider's
+ * backing store calls this once instead of pushing per-provider
+ * notifications: providers are re-asked on the next read, so discovery
+ * results that were cached before the mutation can never be served again.
+ * The call is synchronous and touches no provider, so a caller holding the
+ * mutation's own completion guarantee does not wait on discovery.
+ * @returns the catalog revision now in effect; entries cached under any earlier revision are gone.
+ */
+refresh(): SkillRefreshReport
 
 /**
  * Load and validate the winning candidate, passing its opaque discovery locator back to the
