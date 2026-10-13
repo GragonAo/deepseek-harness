@@ -17,6 +17,15 @@ The registry is host+per-scope layered over [`@deepseek-ai/dsh-scope`](../../cor
 - `ctx.skills.list({ cwd?, signal?, scope? })` Borrows the readonly view options, then returns every winning summary for the current workspace, merged across the global layer and the viewing scope's chain and sorted by name. Consumers apply `isModelInvocable(skill)` or `isUserInvocable(skill)` at their own boundary.
 - `ctx.skills.get(name, { cwd?, signal?, scope? })` Uses the same readonly options and winning candidate for discovery and loading, rechecks cancellation after discovery or a cache hit, races provider loading against the signal, validates the loaded definition, then returns it regardless of invocation policy.
 - `ctx.skills.register(skill): () => void` Registers a readonly runtime embedded skill into the calling context's layer, adding the all-invocable policy and `provider: "runtime"` when omitted. Same-name runtime registrations in one layer are first-wins: a duplicate logs a warning and gets a no-op disposer. Successful registrations return the exact Cordis disposer for ordered composite teardown.
+- `ctx.skills.refresh(): { revision }` Drops every completed catalog and returns the revision now in effect, synchronously and without re-reading anything. The next read asks every provider again. A provider whose backing store changed without going through this registry — files placed in a tier directory the host does not watch, a remote catalog that was published — is invisible until something calls this, so every mutation path that writes skills owns the call.
+
+### Skill document format
+
+`readSkillDocument(raw)` reads and validates one `SKILL.md`: YAML frontmatter fenced by lines of exactly `---`, with `name` (`^[a-z0-9]+(?:-[a-z0-9]+)*$`) and `description` as the only keys that register a skill; `whenToUse`, `invocation`, and `metadata` are recognized optional keys. It returns `{ ok: true, document }` or `{ ok: false, issues }`, where each issue carries a `code` and, when the line is known, a 1-based `line`.
+
+The runtime discovery path and any upload or installation path share this one reader, so a document the runtime skips and a document an importer rejects are judged by the same rules. `isSkillName(name)` is the same grammar check those paths use. The codes are `frontmatter-missing`, `frontmatter-unterminated`, `frontmatter-invalid-yaml`, `frontmatter-not-mapping`, `name-missing`, `name-invalid`, `description-missing`, `unsupported-field`, and `field-not-boolean`.
+
+`SKILL_TIER_KINDS` is the ambient tier list (`case`, `user-global`, `system`) as a runtime value, so a wire schema can publish the same vocabulary [`SkillTierKind`] names.
 
 ### Events
 

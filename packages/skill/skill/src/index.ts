@@ -16,8 +16,8 @@ import { NamedEntries, ScopedLayers, scopeChainOf, scopeOf } from '@deepseek-ai/
 import type { ScopeKey, ScopeLayer } from '@deepseek-ai/dsh-scope'
 import z from '@deepseek-ai/schemastery'
 import type Schema from '@deepseek-ai/schemastery'
+import { isSkillName } from './document.ts'
 
-const SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const DEFAULT_COLLECT_CACHE_ENTRIES = 128
 const MAX_COLLECT_ATTEMPTS = 2
 const RUNTIME_PROVIDER = 'runtime'
@@ -38,15 +38,6 @@ export const CASE_SKILL_RANK = 30
 export const USER_GLOBAL_SKILL_RANK = 40
 /** Precedence rank of the ambient system tier, above every static provider rank. */
 export const SYSTEM_SKILL_RANK = 50
-
-/**
- * Return whether a string is a valid kebab-case skill name.
- * @param name - candidate skill name to validate.
- * @returns whether the name matches the public skill-name grammar.
- */
-export function isSkillName(name: string): boolean {
-  return SKILL_NAME.test(name)
-}
 
 /** Origin bucket for a skill contribution. The value is prompt-visible metadata, not precedence by itself. */
 export type SkillSource = 'project-dsh' | 'project-agents' | 'runtime' | 'user-dsh' | 'user-agents' | 'custom' | 'bundled' | (string & {})
@@ -132,8 +123,11 @@ export interface SkillViewOptions extends SkillLookupOptions {
   readonly scope?: ScopeKey | undefined
 }
 
+/** Every ambient skill tier, nearest tier first. */
+export const SKILL_TIER_KINDS = ['case', 'user-global', 'system'] as const
+
 /** Ambient tier a filesystem tier root belongs to. */
-export type SkillTierKind = 'case' | 'user-global' | 'system'
+export type SkillTierKind = (typeof SKILL_TIER_KINDS)[number]
 
 /**
  * One ambient multi-tenant skill tier root resolved by the carrier for the
@@ -273,6 +267,12 @@ export interface SkillCatalogSnapshot {
   readonly skills: SkillSummary[]
   /** Whether every registered provider completed without a concurrent catalog revision. */
   readonly complete: boolean
+}
+
+/** Outcome of dropping every cached catalog. */
+export interface SkillRefreshReport {
+  /** Catalog revision now in effect; entries cached under any earlier revision are gone. */
+  readonly revision: number
 }
 
 /** Provider candidates plus whether the current discovery is authoritative. */
@@ -531,6 +531,21 @@ export class SkillRegistry extends Service {
   }
 
   /**
+   * Drop every completed catalog so the next read re-discovers from every
+   * provider, and notify catalog observers. Any mutation of a provider's
+   * backing store calls this once instead of pushing per-provider
+   * notifications: providers are re-asked on the next read, so discovery
+   * results that were cached before the mutation can never be served again.
+   * The call is synchronous and touches no provider, so a caller holding the
+   * mutation's own completion guarantee does not wait on discovery.
+   * @returns the catalog revision now in effect; entries cached under any earlier revision are gone.
+   */
+  refresh(): SkillRefreshReport {
+    this.invalidateCache()
+    return { revision: this.revision }
+  }
+
+  /**
    * Load and validate the winning candidate, passing its opaque discovery locator back to the
    * provider. Cancellation is rechecked after selection, including cache hits, and raced against
    * loading so an uncooperative provider cannot hang the caller.
@@ -750,7 +765,7 @@ function validateCandidate(candidate: SkillCandidate, providerName: string): voi
   if (typeof candidate.name !== 'string') {
     throw new TypeError(`skill provider "${providerName}" returned a non-string skill name`)
   }
-  if (!SKILL_NAME.test(candidate.name)) {
+  if (!isSkillName(candidate.name)) {
     throw new Error(`skill provider "${providerName}" returned invalid skill name "${candidate.name}"`)
   }
   if (typeof candidate.description !== 'string') {
@@ -781,7 +796,7 @@ function validateCandidate(candidate: SkillCandidate, providerName: string): voi
 }
 
 function validateRuntimeSkill(skill: SkillRegistration): void {
-  if (!SKILL_NAME.test(skill.name)) throw new Error(`invalid skill name "${skill.name}"`)
+  if (!isSkillName(skill.name)) throw new Error(`invalid skill name "${skill.name}"`)
   if (skill.description.length === 0) throw new Error(`skill "${skill.name}" requires a description`)
   validateInvocation(skill.invocation, `runtime skill "${skill.name}"`)
 }
@@ -797,7 +812,7 @@ function validateDefinition(skill: SkillDefinition): void {
   const content = skill.content
   const path = skill.path
   if (typeof name !== 'string') throw new TypeError('loaded skill name must be a string')
-  if (!SKILL_NAME.test(name)) throw new Error(`loaded skill has invalid name "${name}"`)
+  if (!isSkillName(name)) throw new Error(`loaded skill has invalid name "${name}"`)
   if (typeof description !== 'string') throw new TypeError(`loaded skill "${name}" description must be a string`)
   if (description.length === 0) throw new Error(`loaded skill "${name}" requires a description`)
   validateInvocation(invocation, `loaded skill "${name}"`)
@@ -905,5 +920,13 @@ function errorMessage(error: unknown): string {
     return '[unrenderable thrown value]'
   }
 }
+
+export { isSkillName, readSkillDocument } from './document.ts'
+export type {
+  SkillDocument,
+  SkillDocumentIssue,
+  SkillDocumentIssueCode,
+  SkillDocumentResult,
+} from './document.ts'
 
 export default SkillRegistry

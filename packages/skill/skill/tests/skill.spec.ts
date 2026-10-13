@@ -1269,3 +1269,41 @@ describe('SkillRegistry scoped layers', () => {
     await preset.dispose()
   })
 })
+
+describe('SkillRegistry.refresh', () => {
+  it('drops the cached catalog so the next read re-discovers from every provider', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SkillRegistry)
+    const provider = new MemoryProvider([memorySkill('alpha', 'Alpha', 100)])
+    registerProvider(ctx, provider)
+
+    expect((await ctx.skills.list()).map(skill => skill.name)).toEqual(['alpha'])
+    const cachedCalls = provider.listCalls
+    provider.replace([memorySkill('alpha', 'Alpha', 100), memorySkill('beta', 'Beta', 100)])
+
+    // The second read of the same view is served from the cache: a provider that
+    // changed its backing store behind the registry is invisible until a refresh.
+    expect((await ctx.skills.list()).map(skill => skill.name)).toEqual(['alpha'])
+    expect(provider.listCalls).toBe(cachedCalls)
+
+    expect(ctx.skills.refresh().revision).toBeGreaterThan(0)
+
+    expect((await ctx.skills.list()).map(skill => skill.name)).toEqual(['alpha', 'beta'])
+    expect(provider.listCalls).toBe(cachedCalls + 1)
+  })
+
+  it('notifies catalog observers once per refresh', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SkillRegistry)
+    registerProvider(ctx, new MemoryProvider([]))
+    let changes = 0
+    ctx.on('skills/change', () => {
+      changes += 1
+    })
+
+    ctx.skills.refresh()
+    ctx.skills.refresh()
+
+    expect(changes).toBe(2)
+  })
+})
