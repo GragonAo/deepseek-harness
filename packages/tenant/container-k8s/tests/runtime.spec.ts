@@ -535,7 +535,6 @@ class FakePtyRunner implements ContainerPtyRunner {
 
   async start(args: readonly string[], spec: { rows: number; cols: number; graceMs: number }): Promise<ContainerPtyTransport> {
     this.starts.push({ args, ...spec })
-    const runner = this
     const listeners = new Set<(data: string) => void>()
     const done = new Promise<ContainerPtyOutcome>((resolve) => { this.ended = resolve })
     return {
@@ -550,8 +549,8 @@ class FakePtyRunner implements ContainerPtyRunner {
         for (const listener of listeners) listener('DSH_PTY_SESSION 42\r\nbash-5.2# ')
       },
       // CLI 随会话结束而退出：假的也照这条结算 `done`，否则等它的关闭方会一直等下去。
-      async terminate(): Promise<void> {
-        runner.kill()
+      terminate: async (): Promise<void> => {
+        this.kill()
       },
     }
   }

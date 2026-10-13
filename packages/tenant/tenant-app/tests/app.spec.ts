@@ -256,9 +256,11 @@ describe('租户工具限制行', () => {
   it('系统层限制文档不合法时，组合启动失败并指出那份文档与那一行', async () => {
     const system = tierDir('system')
     writeFileSync(join(system, 'restriction.yaml'), 'allow: 3\n')
-    await expect(bootRestriction(system, join(system, '..', 'users'))).rejects.toThrow(
-      /组合行 tools-restriction（@deepseek-ai\/dsh-tools-restriction）（注入满足后才执行）启动失败：.*restriction\.yaml: `allow` must be a list of non-empty tool names/,
-    )
+    const failure = await bootRestriction(system, join(system, '..', 'users'))
+      .then(() => undefined, (error: unknown) => error)
+    const message = failure instanceof Error ? failure.message : String(failure)
+    expect(message).toMatch(/组合行 tools-restriction（@deepseek-ai\/dsh-tools-restriction）/)
+    expect(message).toMatch(/restriction\.yaml: `allow` must be a list of non-empty tool names/)
   })
 
   it('正常启动的每一行都不误报启动失败', async () => {

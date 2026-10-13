@@ -12,7 +12,6 @@
  */
 
 import { join } from 'node:path'
-import { SPINE_MODULES } from './deps.ts'
 import type { SpineModule } from './deps.ts'
 import type { TenantAppConfig } from './types.ts'
 
@@ -20,7 +19,7 @@ import type { TenantAppConfig } from './types.ts'
 export interface SpineRow {
   /** 行标识，也是配置里 `plugins` 的键。 */
   readonly id: string
-  /** 要挂载的模块名，只能取自 {@link SPINE_MODULES}。 */
+  /** 要挂载的模块名，只能取自 `./deps.ts` 声明的模块清单。 */
   readonly module: SpineModule
   /** 由租户配置推导出的默认配置。 */
   readonly config?: (config: TenantAppConfig) => Record<string, unknown>

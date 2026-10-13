@@ -185,7 +185,9 @@ describe('expandRestriction', () => {
   it('fails when a prefix matches nothing, naming the file and the pattern', () => {
     const document = parseRestriction('allow: [mcp__icac-blll__*]\n', 'case/tools/restriction.yaml')
     expect(() => expandRestriction(document, held, 'case/tools/restriction.yaml'))
-      .toThrow(/case\/tools\/restriction\.yaml: `mcp__icac-blll__\*` matches none of the 4 registered global tools \(mcp__icac-bill__get, mcp__icac-bill__list, mcp__icac-case__search, plain\)/)
+      .toThrow(/case\/tools\/restriction\.yaml: `mcp__icac-blll__\*` matches none of the 4/)
+    expect(() => expandRestriction(document, held, 'case/tools/restriction.yaml'))
+      .toThrow(/registered global tools \(mcp__icac-bill__get, mcp__icac-bill__list, mcp__icac-case__search, plain\)/)
   })
 
   it('fails when one entry expands past the bound instead of applying a shortened prefix', () => {
