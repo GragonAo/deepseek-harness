@@ -66,7 +66,7 @@ import * as ToolWeb from '@deepseek-ai/dsh-tool-web'
 import VmWorkflowEngine from '@deepseek-ai/dsh-workflow-worker-thread'
 import * as ToolRalph from '@deepseek-ai/dsh-tool-ralph'
 import * as ToolWorkflow from '@deepseek-ai/dsh-tool-workflow'
-import * as ToolArtifact from '@deepseek-ai/dsh-tool-artifact'
+import * as ObjectStore from '@deepseek-ai/dsh-object-store'
 import { githubSlug } from './verify-md-links.ts'
 
 /** Attachment seam marker that makes the attachments-conditional `read_image` schema harvestable. */
@@ -608,26 +608,27 @@ const TOOL_PACKAGES: ToolPackage[] = [
       'web_search and web_fetch keep provider selection behind ctx.web so model-visible schemas stay stable across backend swaps.',
   },
   {
-    pkg: '@deepseek-ai/dsh-tool-artifact',
-    dir: 'tool-artifact',
-    source: 'packages/tenant/tool-artifact/src/index.ts',
+    pkg: '@deepseek-ai/dsh-object-store',
+    dir: 'object-store',
+    source: 'packages/tenant/object-store/src/index.ts',
     requires: ['ctx.tools', 'the authenticated (tenant, user) request scope at call time'],
     writes: ['tool/call', 'tool/result'],
     async mount(ctx) {
-      // Both tools read the case and the subject from the request scope, so the
-      // harvest needs no tenant record. The package's Config type requires its
-      // defaulted fields too; none of them reaches a harvested schema, and no
-      // harvest-time call resolves a path beneath mediaRoot.
-      await ctx.plugin(ToolArtifact, {
-        mediaRoot: resolve(root, '.tmp/tool-catalog/media'),
-        urlPrefix: '/media',
-        groupByKind: true,
-        maxBytes: 100 * 1024 * 1024,
+      // 收割只取工具 schema，不会真的签名或上传，因此这里给的是占位凭据：本插件的实际部署必须
+      // 从环境变量读到一对密钥，缺失时它在启动阶段就报错。
+      process.env.DSH_OBJECT_ACCESS_KEY ??= 'catalog-harvest'
+      process.env.DSH_OBJECT_SECRET_KEY ??= 'catalog-harvest'
+      await ctx.plugin(ObjectStore, {
+        endpoint: 'http://rgw.invalid:80',
+        bucket: 'catalog',
+        publicBaseUrl: 'http://rgw.invalid:80',
+        usersRoot: resolve(root, '.tmp/tool-catalog/users'),
+        verifyPublic: false,
       })
     },
     note:
-      'Both tools resolve the case and the subject from the authenticated request scope rather than from arguments, so a call outside a case-scoped request fails instead of falling back to a shared directory. '
-      + 'artifact_publish returns the delivery tag the web front end parses out of the reply; the front end matches those exact literals, so the tag is a fixed protocol rather than deployment configuration.',
+      'object_publish resolves the case and the subject from the authenticated request scope, and the file from the mounts that scope allows, so no argument can address another subject\'s file. '
+      + 'The endpoint, the bucket and the public base URL are deployment configuration; the tool\'s own result carries the address the user downloads from.',
   },
 ]
 

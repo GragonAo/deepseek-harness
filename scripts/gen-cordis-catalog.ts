@@ -111,11 +111,13 @@ export const SERVICE_PAGE: Record<string, string> = {
   agentHttp: 'multi-tenant.md',
   containerRuntime: 'multi-tenant.md',
   tenantAuth: 'multi-tenant.md',
-  tenantHttpApi: 'multi-tenant.md',
   tenants: 'multi-tenant.md',
   tenantAdmin: 'multi-tenant.md',
+  tenantAdminHttp: 'multi-tenant.md',
   tenantRecordStore: 'multi-tenant.md',
   tenantSchemaLifecycle: 'multi-tenant.md',
+  tenantQuestions: 'multi-tenant.md',
+  skillInstall: 'skills.md',
 }
 
 /**
@@ -167,6 +169,7 @@ export const SERVICE_WALK_EXEMPTIONS: Record<string, string> = {
   settingsTiers: 'optional tier-carrier accessor (SettingsTierProvider | undefined) read by the settings Service Definition — packages/settings/settings/README.md owns the API',
   skillTiers: 'optional tier-carrier accessor (SkillTierProvider | undefined) read by the skill filesystem provider — packages/skill/skill/README.md owns the API',
   toolTiers: 'optional tier-carrier accessor (ToolTierProvider | undefined) read by the tool-manifest loader — packages/core/tools/README.md owns the API',
+  partitionScope: 'optional partition accessor (PartitionScope | undefined) read through currentPartition(ctx) — packages/core/partition-scope/README.md owns the API',
 }
 
 /**
@@ -558,6 +561,19 @@ export const TYPE_LINK_EXEMPTIONS: Readonly<Record<string, string>> = {
   CordisInspectQueryResolution: 'Cordis inspect query result is owned by packages/extensions/cordis-host-runner/src/types.ts',
   CordisInspectQueryResolved: 'Cordis inspect transport payload is owned by packages/extensions/cordis-host-runner/src/types.ts',
   CordisInspectRequestId: 'Cordis inspect request identity is owned by packages/extensions/cordis-host-runner/src/types.ts',
+  SkillInstallRequest: 'bundle installation request is owned by packages/skill/skill-install/README.md',
+  SkillInstallResult: 'bundle installation outcome is owned by packages/skill/skill-install/README.md',
+  SkillRemoveRequest: 'skill removal request is owned by packages/skill/skill-install/README.md',
+  SkillRemoveResult: 'skill removal outcome is owned by packages/skill/skill-install/README.md',
+  SkillListRequest: 'tier listing request is owned by packages/skill/skill-install/README.md',
+  SkillTierListing: 'tier listing outcome is owned by packages/skill/skill-install/README.md',
+  SkillTierEntry: 'tier listing row is owned by packages/skill/skill-install/README.md',
+  SkillInstallErrorCode: 'bundle refusal vocabulary is owned by packages/skill/skill-install/README.md',
+  SkillRefreshReport: 'catalog refresh outcome is owned by packages/skill/skill/README.md',
+  ContainerPtyOptions: 'PTY open options are owned by packages/tenant/container/README.md',
+  ContainerPtySession: 'PTY session handle is owned by packages/tenant/container/README.md',
+  TenantPendingQuestion: 'pending question record is owned by packages/tenant/tenant-questions/README.md',
+  TenantQuestionAnswerReceipt: 'answer receipt is owned by packages/tenant/tenant-questions/README.md',
   CordisInspectResolveAck: 'Cordis inspect resolution acknowledgement is owned by packages/extensions/cordis-host-runner/src/types.ts',
   CordisDynamicPackageId: 'dynamic Package identity is owned by packages/extensions/cordis-host-runner/src/types.ts',
   CordisDynamicPluginId: 'dynamic Plugin identity is owned by packages/extensions/cordis-host-runner/src/types.ts',
@@ -613,7 +629,6 @@ export const TYPE_LINK_EXEMPTIONS: Readonly<Record<string, string>> = {
   UserId: 'user identity is owned by packages/tenant/tenant/README.md',
   Tenant: 'resolved tenant record is owned by packages/tenant/tenant/README.md',
   TenantPrincipal: 'authenticated tenant principal is owned by packages/tenant/tenant-auth/README.md',
-  TenantOperation: 'tenant HTTP operation contract is owned by packages/tenant/api-http/README.md',
   ContainerCommandResult: 'container command result is owned by packages/tenant/container/README.md',
   ContainerExecOptions: 'container exec options are owned by packages/tenant/container/README.md',
   CreateTenantRequest: 'tenant-admin create contract is owned by packages/tenant/tenant-admin/README.md',

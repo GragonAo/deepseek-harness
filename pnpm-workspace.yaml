@@ -27,6 +27,10 @@ linkWorkspacePackages: true
 overrides:
   '@deepseek-ai/cosmokit': 'link:vendor/cosmokit'
   '@deepseek-ai/schemastery': 'link:vendor/schemastery'
+  # mdast 与 micromark 两处依赖各自解析到 micromark-util-types 2.0.2 与 2.0.3，同一份类型
+  # 定义因此成为两个不同模块，ui-primitives 的 markdown 解析层随即无法通过类型检查。
+  # 三处声明都是 ^2.0.0，收到同一个 minor 上即可。
+  'micromark-util-types': '^2.0.3'
 
 peerDependencyRules:
   allowedVersions:

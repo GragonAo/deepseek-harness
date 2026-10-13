@@ -1,36 +1,29 @@
 #!/bin/bash
-# Build every image the multi-tenant deployment runs. All downloading and building
-# happens here, at build time — the running containers fetch nothing.
+# 构建租户栈用到的两个镜像。所有下载与编译都在这里、在构建期完成 —— 运行中的容器不联网取任何东西。
 #
 #   docker/build-images.sh
 #   NPM_REGISTRY=https://registry.npmjs.org docker/build-images.sh
 #   NODE_IMAGE=node:22-bookworm TOOL_EXEC_NODE_IMAGE=node:22-bookworm-slim docker/build-images.sh
 #
-# dsh-tool-exec is the per-(tenant,user) sandbox the host spawns at runtime;
-# dsh-multi-tenant is the host that compose starts directly.
+# dsh-tool-exec 是宿主运行时按 (租户,用户) 拉起的沙箱；dsh-tenant 是租户服务宿主本身，
+# 生产由 k8s 的 Deployment 起（docker/k8s/tenant-host.yaml），本地开发由
+# docker/docker-compose.tenant.yml 起。两个镜像的基座必须不同，所以各用一个变量。
 #
-# The two images need different base images, so they take different variables.
+# dsh-tool-exec 里没有任何 Python 运行时：沙箱用的解释器与全部依赖都来自宿主目录挂载进来的
+# /opt/.dsh/pyenv，由构建之外维护（packages/tenant/container-docker/README.md）。所以它的基座
+# 是 slim —— 也是那个 Dockerfile 自己的默认值。完整基座是 buildpack-deps，自带 python3-minimal，
+# 用它构建沙箱会把第二个、无关的解释器塞进镜像，在 PATH 上遮蔽挂载进来的那个，静默废掉整套安排。
+# TOOL_EXEC_NODE_IMAGE 默认 slim，必须保持 slim。直接 `docker build` 那个 Dockerfile 是安全的
+# （它的 ARG 默认值就是 slim），所以这个变量与脚本末尾的自检是给脚本这条路兜底，而不是修 Dockerfile。
 #
-# dsh-tool-exec carries no Python runtime at all: the interpreter and every package the
-# sandboxes run come from the host directory compose mounts at /opt/.dsh/pyenv, maintained
-# outside this build (packages/tenant/container-docker/README.md). Its base is therefore the
-# slim image, which is also the Dockerfile's own default. The full base is buildpack-deps and
-# ships python3-minimal, so building the sandbox on it puts a second, unrelated interpreter
-# inside the image, shadows the mounted one on PATH, and silently defeats the arrangement.
-# TOOL_EXEC_NODE_IMAGE defaults to slim and must stay slim. A `docker build` straight from
-# that Dockerfile is safe on its own — its own ARG default is already slim — so this variable
-# and the check at the end of this script backstop the script path rather than repair the
-# Dockerfile.
+# dsh-tenant 要从源码编译整个仓库，需要完整基座的工具链，所以 NODE_IMAGE 默认完整镜像。
 #
-# dsh-multi-tenant compiles the harness from source and needs the full base's toolchain,
-# so NODE_IMAGE defaults to the full image.
-#
-# One variable for both is the mistake this split prevents: it built a sandbox image with
-# /usr/bin/python3 next to the mounted /opt/.dsh/pyenv. Every run re-checks with
+# 两个镜像共用一个变量就是这套拆分要避免的错误：它曾构建出 /usr/bin/python3 与挂载的
+# /opt/.dsh/pyenv 并存的沙箱镜像。每次构建都重新自检：
 #
 #   docker run --rm --entrypoint sh dsh-tool-exec:latest -c 'command -v python3 || echo NO-PYTHON'
 #
-# which must print NO-PYTHON.
+# 必须打印 NO-PYTHON。
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 NPM_REGISTRY=${NPM_REGISTRY:-https://registry.npmmirror.com}
@@ -39,8 +32,8 @@ TOOL_EXEC_NODE_IMAGE=${TOOL_EXEC_NODE_IMAGE:-docker.m.daocloud.io/library/node:2
 DOCKER_CLI_IMAGE=${DOCKER_CLI_IMAGE:-docker.m.daocloud.io/library/docker:27-cli}
 cd "$ROOT"
 
-# The build context excludes .git, so pass the source commit explicitly: the build
-# records it in client artifacts and would otherwise fail on `git rev-parse HEAD`.
+# 构建上下文排除了 .git，所以显式传入源码提交：镜像据此记录自己的来源，否则构建会在
+# `git rev-parse HEAD` 上失败。
 DSH_COMMIT=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo 0000000)
 echo "== 源码提交 $DSH_COMMIT"
 
@@ -50,13 +43,13 @@ docker build -f packages/tenant/container-docker/docker/Dockerfile \
   --build-arg "NPM_REGISTRY=$NPM_REGISTRY" \
   -t dsh-tool-exec:latest .
 
-echo "== dsh-multi-tenant:latest（多租户宿主，compose 直接用这个镜像）"
-docker build -f Dockerfile.multi-tenant \
+echo "== dsh-tenant:latest（租户服务宿主）"
+docker build -f Dockerfile.tenant \
   --build-arg "NODE_IMAGE=$NODE_IMAGE" \
   --build-arg "DOCKER_CLI_IMAGE=$DOCKER_CLI_IMAGE" \
   --build-arg "NPM_REGISTRY=$NPM_REGISTRY" \
   --build-arg "DSH_COMMIT=$DSH_COMMIT" \
-  -t dsh-multi-tenant:latest .
+  -t dsh-tenant:latest .
 
 echo "== 自检：沙箱镜像不含 Python（解释器由挂载的 /opt/.dsh/pyenv 提供）"
 if docker run --rm --entrypoint sh dsh-tool-exec:latest -c 'command -v python3' >/dev/null 2>&1; then

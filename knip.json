@@ -238,6 +238,18 @@
         "debug"
       ]
     },
+    "packages/tenant/agent-http": {
+      "entry": [
+        "tests/**/*.spec.ts"
+      ],
+      "project": [
+        "src/**/*.ts",
+        "tests/**/*.ts"
+      ],
+      "ignoreDependencies": [
+        "swagger-ui-dist"
+      ]
+    },
     "packages/*/*": {
       "entry": [
         "tests/**/*.spec.ts"
@@ -795,7 +807,14 @@
         "@deepseek-ai/dsh-code-runtime-worker-thread"
       ]
     },
-    "packages/bundle/multi-tenant": {
+    "packages/tenant/tenant-app": {
+      "entry": [
+        "tests/**/*.spec.ts"
+      ],
+      "project": [
+        "src/**/*.ts",
+        "tests/**/*.ts"
+      ],
       "ignoreDependencies": [
         "@deepseek-ai/.+"
       ]

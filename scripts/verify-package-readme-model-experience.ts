@@ -15,6 +15,7 @@ const LIMITATIONS_HEADING = '## Known Limitations and Deferred Work'
 const MODEL_VIEW_HEADING = '#### What the model sees'
 const TOKEN_EFFECT_HEADING = '#### Token effect'
 const KV_CACHE_EFFECT_HEADING = '#### KV Cache effect'
+
 const FIELD_HEADINGS = [MODEL_VIEW_HEADING, TOKEN_EFFECT_HEADING, KV_CACHE_EFFECT_HEADING] as const
 
 type SentenceKind = 'none' | 'indirect'
@@ -34,6 +35,7 @@ const NO_MODEL_EXPERIENCE_SECTION: Readonly<Record<string, string>> = {
   'packages/util/brand': 'The package is a type-only primitive erased at compile time.',
   'packages/util/home-paths': 'The package only resolves harness-owned host paths; model-facing consumers own any rendered use.',
   'packages/util/launch-environment': 'The package only resolves host environment values; model-facing consumers own any rendered use.',
+  'packages/core/partition-scope': 'The package is a model-agnostic partition-identity seam (types, one optional-service reader, one error predicate); model-facing consumers own any rendered use.',
 }
 
 /**
@@ -42,6 +44,9 @@ const NO_MODEL_EXPERIENCE_SECTION: Readonly<Record<string, string>> = {
  * blocks. A package moves on or off this list with its context behavior.
  */
 const SENTENCE_MODEL_EXPERIENCE: Readonly<Record<string, SentenceContract>> = {
+  'packages/tenant/container-k8s': { kind: 'none', reason: 'The provider moves commands into a Pod and returns their stdout, stderr, and exit code; it registers no token, tool, or prompt content.' },
+  'packages/tenant/tenant-app': { kind: 'none', reason: 'The tenant boot entry resolves configuration and mounts the spine; every model-facing registration belongs to the plugin a row mounts.' },
+  'packages/tenant/container-transport': { kind: 'none', reason: 'The transport seams run a container CLI and one tool-exec HTTP round trip; the runtime provider that calls them owns any model-visible result.' },
   'packages/attachment/attachment': { kind: 'indirect', reason: 'The storage seam delegates model request rendering to provider adapters.' },
   'packages/attachment/attachment-local': { kind: 'indirect', reason: 'The local backend delegates model request rendering to provider adapters.' },
   'packages/shell/shell': { kind: 'indirect', reason: 'The service interface delegates all model rendering to dsh-tool-bash.' },
@@ -114,8 +119,9 @@ const SENTENCE_MODEL_EXPERIENCE: Readonly<Record<string, SentenceContract>> = {
   'packages/host/plugin-inventory': { kind: 'none', reason: 'Host-side read-only Loader projection; registers nothing model-facing.' },
   'packages/bundle/base': { kind: 'indirect', reason: 'The bundle is a patch-list carrier; each inserted row\'s package owns its model-facing behavior.' },
   'packages/bundle/headless': { kind: 'none', reason: 'The one-shot runner submits the task as an ordinary user message; prompts and tools belong to the composed base and headless bundles.' },
-  'packages/bundle/multi-tenant': { kind: 'indirect', reason: 'The bundle is a patch-list carrier; each inserted row\'s package owns its model-facing behavior.' },
+
   'packages/tenant/agent-http': { kind: 'none', reason: 'The HTTP carrier authenticates and scopes one gateway request; hosted services own any model-facing effect.' },
+  'packages/tenant/tenant-admin-http': { kind: 'none', reason: 'The management carrier answers HTTP requests over ctx.tenantAdmin; neither it nor the operations it serves reaches a model request.' },
   'packages/tenant/skill-tier': { kind: 'indirect', reason: 'The tier service only extends which skill directories dsh-skill-filesystem discovers; dsh-tool-skill owns the model-visible rendering.' },
   'packages/tenant/tools-tier': { kind: 'indirect', reason: 'The tier service only supplies tool-manifest directories; the declarative tool loader and tool registry own the model-visible rendering.' },
   'packages/llm/llm': { kind: 'none', reason: 'The adapter registry forwards already-assembled requests unchanged.' },
@@ -148,6 +154,7 @@ const SENTENCE_MODEL_EXPERIENCE: Readonly<Record<string, SentenceContract>> = {
   'packages/skill/skill': { kind: 'indirect', reason: 'The provider registry delegates model rendering to dsh-tool-skill.' },
   'packages/skill/skill-badge': { kind: 'indirect', reason: 'The bundled provider delegates model rendering to dsh-tool-skill.' },
   'packages/skill/skill-filesystem': { kind: 'indirect', reason: 'The provider backend delegates model rendering to dsh-tool-skill.' },
+  'packages/skill/skill-install': { kind: 'none', reason: 'The installer writes skill bundles for an operator-facing surface; discovery, loading, and rendering of the installed skills stay in dsh-skill.' },
   'packages/spill/spill': { kind: 'indirect', reason: 'The storage seam delegates model rendering to spill consumers.' },
   'packages/spill/spill-local': { kind: 'indirect', reason: 'The storage backend delegates model rendering to spill consumers.' },
   'packages/test-support/acp-snapshot': { kind: 'none', reason: 'The test harness observes and normalizes transcripts without changing live requests.' },
