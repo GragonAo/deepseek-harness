@@ -24,6 +24,9 @@
       "path": "../../runtime-diagnostics/invariants"
     },
     {
+      "path": "../../shell/shell-env"
+    },
+    {
       "path": "../../util/timeout"
     },
     {

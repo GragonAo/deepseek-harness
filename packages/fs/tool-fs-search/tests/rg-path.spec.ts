@@ -34,4 +34,10 @@ describe('lazy packaged-ripgrep resolution', () => {
     await expect(resolveRgPath()).rejects.toThrow(/platform package/)
     await expect(resolveRgPath()).rejects.toThrow(/platform package/)
   })
+
+  it('returns a configured path without evaluating the packaged module', async () => {
+    // A deployment whose execution side is a container never uses the packaged
+    // binary, so its path must not depend on this process resolving one.
+    await expect(resolveRgPath('/usr/local/bin/rg')).resolves.toBe('/usr/local/bin/rg')
+  })
 })

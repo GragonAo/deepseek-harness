@@ -9,8 +9,8 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import { currentPartition } from '@deepseek-ai/dsh-partition-scope'
 import { storageBackendServiceKey } from '@deepseek-ai/dsh-storage'
-import { currentTenant, currentUser, tenantPartitionName, userPartitionName } from '@deepseek-ai/dsh-tenant'
 import { DomainError } from './error.ts'
 import { descriptorOf } from './spec.ts'
 import type { DomainSpec } from './spec.ts'
@@ -63,21 +63,22 @@ export const Config: z<Config> = z.object({
 })
 
 /**
- * Derive the facility's single-open key for one domain name. A tenant and
- * user in scope partitions the guard so the same declared domain (e.g.
- * `workspace`) opens once per (tenant, user) and never leaks a projection
- * across tenants or users; outside either scope the bare name is the key
- * (single-user deployments and anonymous opens). The partition names match
- * `UNIT_NAME_RE` and the name cannot contain `.`, so the composite is
+ * Derive the facility's single-open key for one domain name. An ambient
+ * request partition partitions the guard so the same declared domain (e.g.
+ * `workspace`) opens once per partition and never leaks a projection across
+ * tenants or users; outside a partition the bare name is the key
+ * (single-partition deployments and anonymous opens). The partition names
+ * match `UNIT_NAME_RE` and the name cannot contain `.`, so the composite is
  * unambiguous.
+ * @param ctx - Context carrying the optional ambient-partition provider.
  * @param name - the declared domain name.
  * @returns the facility key for the open-domain guard.
  */
-function partitionKey(name: string): string {
-  const tenant = currentTenant()
-  const user = currentUser()
-  if (tenant === undefined || user === undefined) return name
-  return `${tenantPartitionName(tenant.id)}.${userPartitionName(user)}.${name}`
+function partitionKey(ctx: Context, name: string): string {
+  const partition = currentPartition(ctx)
+  const user = partition?.userName
+  if (partition === undefined || user === undefined) return name
+  return `${partition.tenantName}.${user}.${name}`
 }
 
 /**
@@ -88,7 +89,7 @@ function partitionKey(name: string): string {
 export class DomainFacility {
   /** Open domains by {@link partitionKey}; presence is the single-open guard. */
   private readonly domains = new Map<string, DomainImpl>()
-  /** Keys reserved by an in-flight or completed open, so concurrent opens of one (tenant, user, domain) fail loud. */
+  /** Keys reserved by an in-flight or completed open, so concurrent opens of one (partition, domain) fail loud. */
   private readonly reserved = new Set<string>()
 
   /**
@@ -118,7 +119,7 @@ export class DomainFacility {
    * @returns the opened domain handle, typed by the spec.
    */
   async open<S extends DomainSpec>(spec: S): Promise<Domain<S>> {
-    const key = partitionKey(spec.name)
+    const key = partitionKey(this.ctx, spec.name)
     if (this.reserved.has(key)) {
       throw new DomainError('already-open', `domain '${spec.name}' is already open`)
     }
@@ -156,8 +157,8 @@ export class DomainFacility {
         // stays resolvable (the package invariant cross-checks each event)
         // until fully closed — only then does the key free up for reopening.
         // It closes over the open-time key: teardown can run outside any
-        // tenant scope, so the key must not be re-derived from the ambient
-        // tenant here.
+        // request partition, so the key must not be re-derived from the
+        // ambient partition here.
         const domain: DomainImpl = new DomainImpl(this.ctx, spec, unit, tables, globalValue, () => {
           this.domains.delete(key)
           this.reserved.delete(key)
@@ -180,7 +181,7 @@ export class DomainFacility {
   }
 
   /**
-   * Look up an open domain by name for the ambient tenant, untyped.
+   * Look up an open domain by name for the ambient partition, untyped.
    * Diagnostic surface (the package invariant cross-checks change events
    * against live domain state); typed consumers hold the handle returned by
    * {@link open}.
@@ -188,7 +189,7 @@ export class DomainFacility {
    * @returns the open domain runtime, or `undefined` when not open.
    */
   get(name: string): DomainImpl | undefined {
-    return this.domains.get(partitionKey(name))
+    return this.domains.get(partitionKey(this.ctx, name))
   }
 
   /**

@@ -20,7 +20,7 @@ import Storage, { storageBackendServiceKey } from '@deepseek-ai/dsh-storage'
 import { PostgresStorageBackend } from '@deepseek-ai/dsh-storage-postgres'
 import type { SqlExecutor } from '@deepseek-ai/dsh-storage-postgres'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
-import { TenantId, UserId, runWithTenant, runWithUser, tenantPartitionName } from '@deepseek-ai/dsh-tenant'
+import TenantRegistry, { TenantId, UserId, runWithTenant, runWithUser, tenantPartitionName } from '@deepseek-ai/dsh-tenant'
 import type { Tenant } from '@deepseek-ai/dsh-tenant'
 import PostgresSettingsProvider from '../src/index.ts'
 
@@ -80,6 +80,8 @@ async function loadComposition(): Promise<{ ctx: Context; executor: RecordingExe
 
   const configPath = join(root, 'cordis.yml')
   await writeFile(configPath, [
+    '- id: tenant',
+    "  name: '@deepseek-ai/dsh-tenant'",
     '- id: storage',
     "  name: '@deepseek-ai/dsh-storage'",
     '- id: test-postgres',
@@ -98,6 +100,7 @@ async function loadComposition(): Promise<{ ctx: Context; executor: RecordingExe
     version: 'v2',
     async import(specifier: string) {
       const modules = new Map<string, unknown>([
+        ['@deepseek-ai/dsh-tenant', TenantRegistry],
         ['@deepseek-ai/dsh-storage', Storage],
         ['test-postgres-backend', stubPostgres],
         ['@deepseek-ai/dsh-settings-postgres', PostgresSettingsProvider],

@@ -3,16 +3,16 @@
  * stable registry order, and header-validated session membership over the
  * domain data form.
  *
- * Under multi-tenancy the registry is (tenant, user)-keyed: `[Service.init]`
- * runs outside any request and leaves the registry lazily-uninitialized when
- * the ambient tenant is absent (the `tenant_…` storage backend rejects a
- * tenantless open, and that is the expected fail-closed boot signal). The
- * first access inside a tenant + user scope opens that (tenant, user)'s domain,
- * runs the one-time history bootstrap, and rebuilds that partition's projected
- * cache; a later access under a different tenant or user switches to that
- * partition's own state, so two tenants or two users of one tenant never share
- * a projection. Single-user deployments still initialize eagerly at boot under
- * a single no-tenant partition.
+ * A partitioned deployment keys the registry by request partition:
+ * `[Service.init]` runs outside any request and leaves the registry
+ * lazily-uninitialized when no partition is ambient (a partition-keyed storage
+ * backend rejects the partitionless open, and that is the expected fail-closed
+ * boot signal). The first access inside a partition carrying a tenant and a
+ * user opens that partition's domain, runs the one-time history bootstrap, and
+ * rebuilds that partition's projected cache; a later access under a different
+ * tenant or user switches to that partition's own state, so two tenants or two
+ * users of one tenant never share a projection. Single-partition deployments
+ * still initialize eagerly at boot under one partitionless state.
  * @module @deepseek-ai/dsh-workspace
  */
 
@@ -23,7 +23,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import type { SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type { DomainGlobal, KvTable } from '@deepseek-ai/dsh-storage-domain'
-import { currentTenant, currentUser, TenantError, tenantPartitionName, userPartitionName } from '@deepseek-ai/dsh-tenant'
+import { currentPartition, isPartitionlessFailure } from '@deepseek-ai/dsh-partition-scope'
 import { WorkspaceEntity } from './entity.ts'
 import type { WorkspaceEntityHost } from './entity.ts'
 
@@ -87,8 +87,8 @@ interface BootstrapGroup {
   readonly newestAt: number
 }
 
-/** The registry's mutable state for one (tenant, user) partition (or the single-user partition). */
-interface TenantState {
+/** The registry's mutable state for one request partition (or the partitionless state). */
+interface PartitionState {
   table: KvTable<WorkspaceId, WorkspaceRecord>
   global: DomainGlobal<WorkspaceDomainState>
   state: WorkspaceDomainState
@@ -112,16 +112,16 @@ const compareHeaders = (left: SessionHeader, right: SessionHeader): number =>
  * bootstrap before the service becomes active. The persistence dependency is
  * mandatory so an unavailable peer can never be mistaken for an empty
  * history and commit the initialized marker. Every partition's state is keyed
- * by tenant id (`undefined` for the single-user partition); see the module
- * JSDoc for the multi-tenant lazy/tenant-switch contract.
+ * by its request-partition key (`undefined` for the partitionless state); see
+ * the module JSDoc for the partitioned lazy/partition-switch contract.
  */
 export class WorkspaceRegistry extends Service {
   static inject = ['storageDomain', 'sessionPersistence']
 
-  /** Per-partition registry state, keyed by (tenant, user) partition (`undefined` for single-user). */
-  private readonly tenants = new Map<string | undefined, TenantState>()
+  /** Per-partition registry state, keyed by request-partition key (`undefined` for the partitionless state). */
+  private readonly partitions = new Map<string | undefined, PartitionState>()
   /** In-flight per-partition initializations, memoized so concurrent first accesses share one open. */
-  private readonly pending = new Map<string | undefined, Promise<TenantState>>()
+  private readonly pending = new Map<string | undefined, Promise<PartitionState>>()
   /** Set once `[Service.init]` completes; a registry that never started rejects like before. */
   private started = false
 
@@ -130,18 +130,18 @@ export class WorkspaceRegistry extends Service {
   }
 
   /**
-   * Initialize the boot-time partition. Outside a tenant scope a
-   * tenant-keyed backend rejects the open with `NO_TENANT_IN_SCOPE`, which is
-   * the expected multi-tenant boot signal: stay lazily-uninitialized with an
-   * empty projection instead of writing an initialized marker with no tenant.
-   * Any other failure (including single-user bootstrap failures) propagates.
+   * Initialize the boot-time partition. Outside a request partition a
+   * partition-keyed backend rejects the open with `NO_TENANT_IN_SCOPE`, which is
+   * the expected partitioned-boot signal: stay lazily-uninitialized with an
+   * empty projection instead of writing an initialized marker with no partition.
+   * Any other failure (including single-partition bootstrap failures) propagates.
    */
   protected async [Service.init](): Promise<void> {
     this.started = true
     try {
-      await this.initializeTenant(this.currentKey())
+      await this.initializePartition(this.currentKey())
     } catch (error) {
-      if (error instanceof TenantError && error.code === 'NO_TENANT_IN_SCOPE') return
+      if (isPartitionlessFailure(error)) return
       throw error
     }
   }
@@ -163,7 +163,7 @@ export class WorkspaceRegistry extends Service {
   // drop the parameter with its @param clause and the `create(path, title?)`
   // lines in this package's README pair.
   async create(path: string, title?: string): Promise<Workspace> {
-    const state = await this.ensureTenantState()
+    const state = await this.ensurePartitionState()
     const canonical = await realpathNormalize(path)
     if (!(await stat(canonical)).isDirectory()) {
       throw new Error(`cannot create a workspace at '${canonical}': path is not a directory`)
@@ -172,8 +172,8 @@ export class WorkspaceRegistry extends Service {
   }
 
   /**
-   * Look up a workspace by id for the ambient tenant. Uninitialized
-   * partitions serve `undefined` (no cross-tenant leak).
+   * Look up a workspace by id for the ambient request partition. Uninitialized
+   * partitions serve `undefined` (no cross-partition leak).
    * @param id - Workspace id.
    * @returns the workspace, or `undefined` when unknown or uninitialized.
    */
@@ -182,9 +182,9 @@ export class WorkspaceRegistry extends Service {
   }
 
   /**
-   * Synchronous workspace projection for the ambient tenant in durable
-   * registry order. An uninitialized partition (multi-tenant boot, or a
-   * tenant whose domain has not yet been opened) projects as empty rather
+   * Synchronous workspace projection for the ambient request partition in
+   * durable registry order. An uninitialized partition (partitioned boot, or a
+   * partition whose domain has not yet been opened) projects as empty rather
    * than failing. Every entity's `sessionIds` getter is already filtered by the
    * startup/live canonical-cwd header index; this method performs no persistence reads.
    * @returns a fresh ordered array of workspace entities.
@@ -213,7 +213,7 @@ export class WorkspaceRegistry extends Service {
    * @returns `true` when a record was deleted, `false` when it was unknown.
    */
   async delete(id: WorkspaceId): Promise<boolean> {
-    const state = await this.ensureTenantState()
+    const state = await this.ensurePartitionState()
     return this.enqueueOperation(state, () => this.deleteKnown(state, id))
   }
 
@@ -225,7 +225,7 @@ export class WorkspaceRegistry extends Service {
    * @returns the complete committed workspace order.
    */
   async insertBefore(id: WorkspaceId, beforeId?: WorkspaceId): Promise<readonly WorkspaceId[]> {
-    const state = await this.ensureTenantState()
+    const state = await this.ensurePartitionState()
     return this.enqueueOperation(state, async () => {
       const current = state.state
       if (!current.workspaceIds.includes(id)) throw new WorkspaceOrderInvalidError(id)
@@ -243,7 +243,7 @@ export class WorkspaceRegistry extends Service {
   }
 
   /**
-   * The ambient tenant's registry-global archive set: sessions hidden from
+   * The ambient request partition's registry-global archive set: sessions hidden from
    * every grouping surface. Archiving never touches workspace accounting — an
    * archived session keeps its `sessionIds` slot so unarchiving restores its
    * position. An uninitialized partition projects empty.
@@ -266,7 +266,7 @@ export class WorkspaceRegistry extends Service {
    * @returns resolution after durability.
    */
   async archiveSession(sessionId: SessionId): Promise<void> {
-    const state = await this.ensureTenantState()
+    const state = await this.ensurePartitionState()
     return this.enqueueOperation(state, async () => {
       // The chain slot serializes against every other registry write, so this
       // check-then-write pair cannot interleave with another archive.
@@ -287,7 +287,7 @@ export class WorkspaceRegistry extends Service {
    * @returns the workspace owning the canonical path, when one exists.
    */
   async resolveByPath(path: string): Promise<Workspace | undefined> {
-    const state = await this.ensureTenantState()
+    const state = await this.ensurePartitionState()
     const canonical = await realpathNormalize(path)
     for (const entity of state.entities.values()) {
       if (entity.path === canonical) return entity
@@ -301,24 +301,24 @@ export class WorkspaceRegistry extends Service {
    * `sessionPersistence.list()` propagates so storage faults never
    * masquerade as an unknown session.
    */
-  private async sessionKnown(state: TenantState, id: SessionId): Promise<boolean> {
+  private async sessionKnown(state: PartitionState, id: SessionId): Promise<boolean> {
     if (this.ctx.get('sessions')?.get(id) !== undefined) return true
     if (state.headers.has(id)) return true
     await this.indexHeaders(state, await this.ctx.sessionPersistence.list())
     return state.headers.has(id)
   }
 
-  /** Resolve the ambient (tenant, user) partition key (`undefined` for single-user). */
+  /** Resolve the ambient request-partition key (`undefined` for a single-partition deployment). */
   private currentKey(): string | undefined {
-    const tenant = currentTenant()
-    const user = currentUser()
-    if (tenant === undefined || user === undefined) return undefined
-    return `${tenantPartitionName(tenant.id)}.${userPartitionName(user)}`
+    const partition = currentPartition(this.ctx)
+    const user = partition?.userName
+    if (partition === undefined || user === undefined) return undefined
+    return `${partition.tenantName}.${user}`
   }
 
-  /** The ambient tenant's registry state, or `undefined` when not yet opened. */
-  private currentState(): TenantState | undefined {
-    return this.tenants.get(this.currentKey())
+  /** The ambient partition's registry state, or `undefined` when not yet opened. */
+  private currentState(): PartitionState | undefined {
+    return this.partitions.get(this.currentKey())
   }
 
   /** Throw the pre-init error only for a registry that never started. */
@@ -327,17 +327,17 @@ export class WorkspaceRegistry extends Service {
   }
 
   /**
-   * Resolve (opening, memoizing, and bootstrapping) the ambient tenant's state.
-   * @returns the ambient tenant's initialized registry state.
+   * Resolve (opening, memoizing, and bootstrapping) the ambient partition's state.
+   * @returns the ambient partition's initialized registry state.
    */
-  private async ensureTenantState(): Promise<TenantState> {
+  private async ensurePartitionState(): Promise<PartitionState> {
     const key = this.currentKey()
-    const existing = this.tenants.get(key)
+    const existing = this.partitions.get(key)
     if (existing !== undefined) return existing
     if (!this.started) throw new Error('workspace registry is not started yet')
     const inflight = this.pending.get(key)
     if (inflight !== undefined) return await inflight
-    const init = this.initializeTenant(key)
+    const init = this.initializePartition(key)
     this.pending.set(key, init)
     try {
       return await init
@@ -347,14 +347,14 @@ export class WorkspaceRegistry extends Service {
   }
 
   /**
-   * Open one (tenant, user) domain and complete its history bootstrap. The
+   * Open one request partition's domain and complete its history bootstrap. The
    * opened domain, its table/global handles, the projected entity cache,
    * header index, and the host are all stored under that partition key.
    */
-  private async initializeTenant(key: string | undefined): Promise<TenantState> {
+  private async initializePartition(key: string | undefined): Promise<PartitionState> {
     const domain = await this.ctx.storageDomain.open(workspaceDomainSpec)
     this.ctx.effect(() => () => domain.close(), 'workspace.domainClose')
-    const state: TenantState = {
+    const state: PartitionState = {
       table: domain.table('workspaces'),
       global: domain.global,
       state: domain.global.get(),
@@ -373,7 +373,7 @@ export class WorkspaceRegistry extends Service {
       },
       operationTail: Promise.resolve(),
     }
-    this.tenants.set(key, state)
+    this.partitions.set(key, state)
     try {
       await this.recoverPendingMutation(state)
       this.validateStoredState(state)
@@ -391,12 +391,12 @@ export class WorkspaceRegistry extends Service {
       this.reportFilteredCandidates(state)
       return state
     } catch (error) {
-      this.tenants.delete(key)
+      this.partitions.delete(key)
       throw error
     }
   }
 
-  private async createCanonical(state: TenantState, canonical: string, title?: string): Promise<WorkspaceEntity> {
+  private async createCanonical(state: PartitionState, canonical: string, title?: string): Promise<WorkspaceEntity> {
     for (const entity of state.entities.values()) {
       if (entity.path === canonical) return entity
     }
@@ -469,7 +469,7 @@ export class WorkspaceRegistry extends Service {
     return entity
   }
 
-  private async deleteKnown(state: TenantState, id: WorkspaceId): Promise<boolean> {
+  private async deleteKnown(state: PartitionState, id: WorkspaceId): Promise<boolean> {
     const entity = state.entities.get(id)
     if (entity === undefined) return false
     const current = state.state
@@ -519,7 +519,7 @@ export class WorkspaceRegistry extends Service {
    * order/table divergence still reaches {@link validateStoredState} and
    * fails loud; this path never guesses which operation created a row from its shape alone.
    */
-  private async recoverPendingMutation(state: TenantState): Promise<void> {
+  private async recoverPendingMutation(state: PartitionState): Promise<void> {
     const current = state.state
     const pending = current.pendingMutation
     if (pending === undefined) return
@@ -537,7 +537,7 @@ export class WorkspaceRegistry extends Service {
     })
   }
 
-  private async bootstrap(state: TenantState, headers: readonly SessionHeader[]): Promise<void> {
+  private async bootstrap(state: PartitionState, headers: readonly SessionHeader[]): Promise<void> {
     const table = state.table
     const current = state.state
     const groupsByPath = new Map<string, SessionHeader[]>()
@@ -621,7 +621,7 @@ export class WorkspaceRegistry extends Service {
     await this.setState(state, { initialized: true, workspaceIds, archivedSessionIds: current.archivedSessionIds })
   }
 
-  private validateStoredState(state: TenantState): void {
+  private validateStoredState(state: PartitionState): void {
     const table = state.table
     const order = new Set<WorkspaceId>()
     for (const id of state.state.workspaceIds) {
@@ -664,7 +664,7 @@ export class WorkspaceRegistry extends Service {
     }
   }
 
-  private rebuildEntities(state: TenantState): void {
+  private rebuildEntities(state: PartitionState): void {
     state.entities.clear()
     for (const id of state.state.workspaceIds) {
       const record = state.table.get(id) as WorkspaceRecord
@@ -672,18 +672,18 @@ export class WorkspaceRegistry extends Service {
     }
   }
 
-  private async replaceHeaderIndex(state: TenantState, headers: readonly SessionHeader[]): Promise<void> {
+  private async replaceHeaderIndex(state: PartitionState, headers: readonly SessionHeader[]): Promise<void> {
     state.headers.clear()
     state.sessionPaths.clear()
     state.invalidSessionPaths.clear()
     await this.indexHeaders(state, headers)
   }
 
-  private async indexHeaders(state: TenantState, headers: readonly SessionHeader[]): Promise<void> {
+  private async indexHeaders(state: PartitionState, headers: readonly SessionHeader[]): Promise<void> {
     for (const header of headers) await this.indexHeader(state, header)
   }
 
-  private async indexHeader(state: TenantState, header: SessionHeader): Promise<void> {
+  private async indexHeader(state: PartitionState, header: SessionHeader): Promise<void> {
     state.headers.set(header.id, header)
     state.sessionPaths.delete(header.id)
     if (header.cwd === undefined) {
@@ -703,13 +703,13 @@ export class WorkspaceRegistry extends Service {
     }
   }
 
-  private async indexLiveSessions(state: TenantState): Promise<void> {
+  private async indexLiveSessions(state: PartitionState): Promise<void> {
     const sessions = this.ctx.get('sessions')
     if (sessions === undefined) return
     await this.indexHeaders(state, sessions.list().map(session => session.header))
   }
 
-  private reportFilteredCandidates(state: TenantState): void {
+  private reportFilteredCandidates(state: PartitionState): void {
     for (const entity of state.entities.values()) {
       const record = state.table.get(entity.id) as WorkspaceRecord
       for (const sessionId of record.sessionIds) {
@@ -726,7 +726,7 @@ export class WorkspaceRegistry extends Service {
     }
   }
 
-  private async readSessionHeader(state: TenantState, id: SessionId): Promise<SessionHeader> {
+  private async readSessionHeader(state: PartitionState, id: SessionId): Promise<SessionHeader> {
     const live = this.ctx.get('sessions')?.get(id)
     if (live !== undefined) {
       state.headers.set(id, live.header)
@@ -751,12 +751,12 @@ export class WorkspaceRegistry extends Service {
     return state.entities
   }
 
-  private async setState(state: TenantState, value: WorkspaceDomainState): Promise<void> {
+  private async setState(state: PartitionState, value: WorkspaceDomainState): Promise<void> {
     await state.global.set(value)
     state.state = value
   }
 
-  private enqueueOperation<T>(state: TenantState, operation: () => Promise<T>): Promise<T> {
+  private enqueueOperation<T>(state: PartitionState, operation: () => Promise<T>): Promise<T> {
     const result = state.operationTail.then(async () => {
       // A committed delete may leave only its marker cleanup pending. Retry
       // recovery before another create/delete can overwrite that pending operation record.

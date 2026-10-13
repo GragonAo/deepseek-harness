@@ -65,19 +65,6 @@ import {
 } from '../api/credentials.schema.ts'
 import { llmDiscoverModelsRequestSchema, llmModelsRequestSchema, llmProvidersRequestSchema } from '../api/llm.schema.ts'
 import {
-  tenantAdminCreateRequestSchema,
-  tenantAdminDisableRequestSchema,
-  tenantAdminEnableRequestSchema,
-  tenantAdminGetRequestSchema,
-  tenantAdminListRequestSchema,
-  tenantAdminMembersAddRequestSchema,
-  tenantAdminMembersListRequestSchema,
-  tenantAdminMembersRemoveRequestSchema,
-  tenantAdminRemoveRequestSchema,
-  tenantAdminUpdateRequestSchema,
-  tenantAdminUsersEnsureRequestSchema,
-} from '../api/tenant-admin.schema.ts'
-import {
   subagentHistoryRequestSchema,
   subagentInterruptRequestSchema,
   subagentListRequestSchema,
@@ -154,17 +141,6 @@ export const UNARY_ROUTES: UnaryRoutes = {
   'llm.providers': { schema: llmProvidersRequestSchema, invoke: (api, r) => api.llm.providers(r) },
   'llm.models': { schema: llmModelsRequestSchema, invoke: (api, r) => api.llm.models(r) },
   'llm.discoverModels': { schema: llmDiscoverModelsRequestSchema, invoke: (api, r, signal) => api.llm.discoverModels(r, signal) },
-  'tenant.admin.list': { schema: tenantAdminListRequestSchema, invoke: (api, r) => api.tenantAdmin.list(r) },
-  'tenant.admin.get': { schema: tenantAdminGetRequestSchema, invoke: (api, r) => api.tenantAdmin.get(r) },
-  'tenant.admin.create': { schema: tenantAdminCreateRequestSchema, invoke: (api, r) => api.tenantAdmin.create(r) },
-  'tenant.admin.update': { schema: tenantAdminUpdateRequestSchema, invoke: (api, r) => api.tenantAdmin.update(r) },
-  'tenant.admin.enable': { schema: tenantAdminEnableRequestSchema, invoke: (api, r) => api.tenantAdmin.enable(r) },
-  'tenant.admin.disable': { schema: tenantAdminDisableRequestSchema, invoke: (api, r) => api.tenantAdmin.disable(r) },
-  'tenant.admin.remove': { schema: tenantAdminRemoveRequestSchema, invoke: (api, r) => api.tenantAdmin.remove(r) },
-  'tenant.admin.members.list': { schema: tenantAdminMembersListRequestSchema, invoke: (api, r) => api.tenantAdmin.membersList(r) },
-  'tenant.admin.members.add': { schema: tenantAdminMembersAddRequestSchema, invoke: (api, r) => api.tenantAdmin.membersAdd(r) },
-  'tenant.admin.members.remove': { schema: tenantAdminMembersRemoveRequestSchema, invoke: (api, r) => api.tenantAdmin.membersRemove(r) },
-  'tenant.admin.users.ensure': { schema: tenantAdminUsersEnsureRequestSchema, invoke: (api, r) => api.tenantAdmin.usersEnsure(r) },
 }
 
 /** Route lookup that narrows an arbitrary path segment to a map key (single cast point for the string→key refinement). */

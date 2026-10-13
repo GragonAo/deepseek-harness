@@ -60,6 +60,7 @@ vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => ({
 // mocked SDK even through a static import.
 import { apply } from '@deepseek-ai/dsh-mcp-client/src/index.ts'
 import { RECONNECT_DEFAULTS, resolveReconnectPolicy, startConnection } from '@deepseek-ai/dsh-mcp-client/src/connection.ts'
+import { resolveToolConcurrencyPolicy } from '@deepseek-ai/dsh-mcp-client/src/concurrency.ts'
 
 // ---- Helpers ----
 
@@ -92,7 +93,10 @@ function captureLogs(ctx: Context): { warns: string[]; errors: string[]; infos: 
   return { warns, errors, infos }
 }
 
-function stdioConfig(reconnect?: Config['reconnect']): Config {
+function stdioConfig(
+  reconnect?: Config['reconnect'],
+  toolConcurrency?: Config['toolConcurrency'],
+): Config {
   return {
     transport: 'stdio',
     serverName: 'srv',
@@ -103,8 +107,12 @@ function stdioConfig(reconnect?: Config['reconnect']): Config {
     toolCallTimeoutMs: 60_000,
     failOnStartupError: false,
     ...reconnect === undefined ? {} : { reconnect },
+    ...toolConcurrency === undefined ? {} : { toolConcurrency },
   }
 }
+
+/** The default tool-call concurrency policy, for the hosts that do not vary it. */
+const defaultConcurrency = resolveToolConcurrencyPolicy(undefined, 'toolConcurrency')
 
 /** The tool list the mock server advertises after a successful (re)connect. */
 function listing(...names: string[]): { tools: { name: string; inputSchema: { type: string } }[]; nextCursor: undefined } {
@@ -262,7 +270,7 @@ describe('reconnect supervisor', () => {
     const { warns } = captureLogs(ctx)
     const gate: PromiseWithResolvers<void> = Promise.withResolvers()
     mockConnect.mockImplementation(() => gate.promise)
-    const handle = startConnection(ctx, stdioConfig(), resolveReconnectPolicy(undefined, 'reconnect'))
+    const handle = startConnection(ctx, stdioConfig(), resolveReconnectPolicy(undefined, 'reconnect'), defaultConcurrency)
     await vi.waitFor(() => { expect(instances).toHaveLength(1) })
 
     const disposing = handle.dispose()
@@ -281,7 +289,7 @@ describe('reconnect supervisor', () => {
       const gate: PromiseWithResolvers<void> = Promise.withResolvers()
       mockConnect.mockImplementation(() => gate.promise)
       mockClose.mockResolvedValue(undefined)
-      const handle = startConnection(ctx, stdioConfig(), resolveReconnectPolicy(undefined, 'reconnect'))
+      const handle = startConnection(ctx, stdioConfig(), resolveReconnectPolicy(undefined, 'reconnect'), defaultConcurrency)
       await vi.advanceTimersByTimeAsync(0)
 
       const disposing = handle.dispose()
@@ -320,6 +328,37 @@ describe('reconnect supervisor', () => {
     await sleep(30)
     expect(instances).toHaveLength(1)
     expect(mockConnect).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects a call queued behind the per-server cap when the plugin is disposed', async () => {
+    const held: PromiseWithResolvers<void> = Promise.withResolvers()
+    mockCallTool.mockImplementation(() => held.promise)
+    const fiber = ctx.plugin(
+      { name: 'mcp-client', inject: ['tools'], apply },
+      stdioConfig(undefined, { maxConcurrentCalls: 1 }),
+    )
+    await vi.waitFor(() => { expect(ctx.tools.get('mcp__srv__remote')).toBeDefined() })
+
+    const inFlight = ctx.tools.execute({
+      signal: testToolSignal,
+      callId: nextCallId(), name: 'mcp__srv__remote', arguments: {},
+    })
+    await vi.waitFor(() => { expect(mockCallTool).toHaveBeenCalledTimes(1) })
+    const queued = ctx.tools.execute({
+      signal: testToolSignal,
+      callId: nextCallId(), name: 'mcp__srv__remote', arguments: {},
+    })
+
+    // The queued call never reaches the server: it fails on disposal instead of
+    // waiting for a slot this generation can no longer hand over.
+    await fiber.dispose()
+    const failed = await queued
+    expect(mockCallTool).toHaveBeenCalledTimes(1)
+    expect(failed.isError).toBe(true)
+    expect(failed.error?.message).toContain('the connection was disposed before this call reached the server')
+
+    held.resolve()
+    await inFlight
   })
 
   it('reconnect disabled keeps the registered tools and reports manual recovery', async () => {

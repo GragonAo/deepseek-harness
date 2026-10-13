@@ -8,7 +8,7 @@
 
 import { Context, Service } from '@deepseek-ai/cordis'
 import type z from '@deepseek-ai/schemastery'
-import { currentTenant, currentUser } from '@deepseek-ai/dsh-tenant'
+import { currentPartition } from '@deepseek-ai/dsh-partition-scope'
 import { redactSecrets } from './redact.ts'
 import type { RedactedSecret } from './redact.ts'
 import type { SettingsNamespace, SettingsUpdateSource } from './types.ts'
@@ -707,10 +707,10 @@ export abstract class SettingsProvider extends Service {
   }
 
   /**
-   * Whether this provider stores one document per ambient tenant. Tenant-keyed
-   * providers override this to `true`; a fixed-document provider (one document
-   * shared by every tenant) keeps `false`, which is also the single-user
-   * behavior.
+   * Whether this provider stores one document per ambient request partition.
+   * Partition-keyed providers override this to `true`; a fixed-document provider
+   * (one document shared by every tenant) keeps `false`, which is also the
+   * single-partition behavior.
    */
   protected get tenantScoped(): boolean {
     return false
@@ -718,25 +718,23 @@ export abstract class SettingsProvider extends Service {
 
   /**
    * Whether this provider stores one document per ambient user, nested inside
-   * the tenant's document set. User-scoped providers are necessarily
-   * tenant-scoped; non-user-scoped providers keep `false`. The per-user key is
-   * only formed while both a tenant and a user are ambient.
+   * the partition's document set. User-scoped providers are necessarily
+   * partition-scoped; non-user-scoped providers keep `false`. The per-user key
+   * is only formed while the ambient partition carries both a tenant and a user.
    */
   protected get userScoped(): boolean {
     return false
   }
 
-  /** The (tenant, user) scope key of the ambient scope: a composite, or '' without one. */
+  /** The (tenant, user) scope key of the ambient request partition: a composite, or '' without one. */
   protected scopeKey(): string {
+    const partition = currentPartition(this.ctx)
     if (this.userScoped) {
-      const tenant = currentTenant()
-      const user = currentUser()
-      if (tenant === undefined || user === undefined) return ''
-      return `${tenant.id}\u0000${user}`
+      if (partition?.user === undefined) return ''
+      return `${partition.tenant}\u0000${partition.user}`
     }
     if (!this.tenantScoped) return ''
-    const tenant = currentTenant()
-    return tenant === undefined ? '' : tenant.id
+    return partition?.tenant ?? ''
   }
 
   /** The raw document currently backing namespace resolution. */

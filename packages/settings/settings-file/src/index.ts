@@ -4,8 +4,8 @@
  * through the seam, and every write re-reads the document under a
  * cross-process writer lock before patching it as a comment-preserving
  * leaf-level diff. Without an explicit `path`, the document lives under the
- * ambient tenant's `dataRoot` (or the harness home outside any tenant scope),
- * so each tenant stores its own `settings.yaml`.
+ * ambient request partition's `dataRoot` (or the harness home outside any
+ * partition), so each partition stores its own `settings.yaml`.
  * @module @deepseek-ai/dsh-settings-file
  */
 
@@ -17,12 +17,12 @@ import { dirname, extname, join, resolve } from 'node:path'
 import { Document, parseDocument } from 'yaml'
 import { withFileLock, writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { canonicalizeWatchPath, resolveDshHome } from '@deepseek-ai/dsh-home-paths'
-import { currentTenant } from '@deepseek-ai/dsh-tenant'
+import { currentPartition } from '@deepseek-ai/dsh-partition-scope'
 import { SettingsProvider, deepEqualJson, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
 
 /** Plugin config: file location and hot-reload behavior. */
 export interface Config {
-  /** Settings document path; when set this is a fixed global file, tenant-independent. */
+  /** Settings document path; when set this is a fixed global file, independent of any request partition. */
   path?: string
   /** Harness home used when `path` is omitted; defaults to `$DSH_HOME` or `~/.dsh`. */
   dshHome?: string
@@ -43,9 +43,9 @@ const FORMATS: Record<string, SettingsFormat> = {
 
 /** Fully resolved provider parameters; defaulting happens here, never inline. */
 interface ResolvedSpec {
-  /** Fixed document path when `config.path` was set; `undefined` scopes per tenant. */
+  /** Fixed document path when `config.path` was set; `undefined` scopes per request partition. */
   explicitPath: string | undefined
-  /** Resolved harness home; the non-tenant fallback root when no explicit path. */
+  /** Resolved harness home; the partitionless fallback root when no explicit path. */
   home: string
   watch: boolean
   debounceMs: number
@@ -53,8 +53,8 @@ interface ResolvedSpec {
 
 /**
  * Resolve the runtime spec from plugin config: an explicit `path` wins,
- * otherwise the document lives at `<tenant dataRoot>/settings.yaml` inside a
- * tenant scope and `<harness home>/settings.yaml` outside one.
+ * otherwise the document lives at `<partition dataRoot>/settings.yaml` inside
+ * an ambient request partition and `<harness home>/settings.yaml` outside one.
  * @param config - raw plugin config.
  * @returns the resolved location flags and watch behavior.
  */
@@ -73,14 +73,15 @@ export function resolveSpec(config: Config): ResolvedSpec {
 
 /**
  * Resolve the active document filename for one call: a fixed `config.path`
- * when set, otherwise `<tenant.dataRoot>/settings.yaml` inside a tenant scope
- * and `<harness home>/settings.yaml` outside one.
+ * when set, otherwise `<partition.dataRoot>/settings.yaml` inside an ambient
+ * request partition and `<harness home>/settings.yaml` outside one.
+ * @param ctx - Context carrying the optional ambient-partition provider.
  * @param config - raw plugin config.
  * @returns the absolute active document path.
  */
-export function resolveActiveFilename(config: Config): string {
+export function resolveActiveFilename(ctx: Context, config: Config): string {
   if (config.path !== undefined) return resolve(config.path)
-  return resolve(join(currentTenant()?.dataRoot ?? resolveDshHome(config.dshHome), 'settings.yaml'))
+  return resolve(join(currentPartition(ctx)?.dataRoot ?? resolveDshHome(config.dshHome), 'settings.yaml'))
 }
 
 /** Derive the document format from a filename's extension, failing loud. */
@@ -127,7 +128,7 @@ function isEEXIST(error: unknown): boolean {
   return (error as NodeJS.ErrnoException | null)?.code === 'EEXIST'
 }
 
-/** File-backed settings provider (`settings.yaml`/`.json`), tenant-scoped by default. */
+/** File-backed settings provider (`settings.yaml`/`.json`), partition-scoped by default. */
 export class FileSettingsProvider extends SettingsProvider {
   static Config: z<Config> = z.object({
     path: z.string(),
@@ -168,7 +169,7 @@ export class FileSettingsProvider extends SettingsProvider {
     this.spec = resolveSpec(config)
   }
 
-  /** Whether this provider resolves one document per ambient tenant. */
+  /** Whether this provider resolves one document per ambient request partition. */
   override get tenantScoped(): boolean {
     return this.spec.explicitPath === undefined
   }
@@ -178,18 +179,18 @@ export class FileSettingsProvider extends SettingsProvider {
     return true
   }
 
-  /** The document path for the ambient tenant (or the harness home), exposed to surfaces. */
+  /** The document path for the ambient request partition (or the harness home), exposed to surfaces. */
   override get documentPath(): string {
     return this.activeFilename()
   }
 
-  /** Resolve the document filename for the ambient scope at this instant. */
+  /** Resolve the document filename for the ambient partition at this instant. */
   private activeFilename(): string {
     if (this.spec.explicitPath !== undefined) return this.spec.explicitPath
-    return resolve(join(currentTenant()?.dataRoot ?? this.spec.home, 'settings.yaml'))
+    return resolve(join(currentPartition(this.ctx)?.dataRoot ?? this.spec.home, 'settings.yaml'))
   }
 
-  /** The active document filename and the tenant key it belongs to. */
+  /** The active document filename and the partition key it belongs to. */
   private activeTarget(): { filename: string; key: string } {
     return { filename: this.activeFilename(), key: this.scopeKey() }
   }
@@ -260,10 +261,10 @@ export class FileSettingsProvider extends SettingsProvider {
 
   /**
    * Lazily create (or reuse) the watcher for one document filename. The
-   * `key` binds later events to the tenant that filename belongs to, even
-   * though a detached watcher event fires outside any request scope.
+   * `key` binds later events to the partition that filename belongs to, even
+   * though a detached watcher event fires outside any request partition.
    * @param filename - absolute document path to watch.
-   * @param key - the tenant key the filename is scoped to ('' = global).
+   * @param key - the partition key the filename is scoped to ('' = global).
    */
   private async watchFile(filename: string, key: string): Promise<void> {
     if (!this.spec.watch || this.closed || this.watchers.has(filename)) return

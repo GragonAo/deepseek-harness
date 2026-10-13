@@ -1,9 +1,11 @@
 /**
- * Tool-independent shell environment plugin: owns the `ctx.shellEnv` registry of
- * trusted, per-execution `DSH_*` variables consumed by the model-facing shell
- * tools (`dsh-tool-bash`, `dsh-tool-pwsh`). Built-in shell facts are owned by
- * the registry itself while plugins can register additional, enumerable facts
- * with effect-scoped disposal.
+ * Tool-independent managed environment plugin: owns the `ctx.shellEnv` registry
+ * of trusted, per-execution `DSH_*` variables, and is the single composer every
+ * harness process started in a tenant sandbox receives that group from — the
+ * model-facing shell tools (`dsh-tool-bash`, `dsh-tool-pwsh`) and the container
+ * code runtime. Built-in shell facts are owned by the registry itself while
+ * plugins can register additional, enumerable facts with effect-scoped
+ * disposal.
  *
  * @module @deepseek-ai/dsh-shell-env
  */
@@ -15,6 +17,7 @@ import type { DshEnvironment, DshEnvironmentKey } from '@deepseek-ai/dsh-shell'
 import { DSH_HOME_ENV, resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-session-persistence'
+import type {} from '@deepseek-ai/dsh-agent'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -77,6 +80,43 @@ const RESERVED_BASH_ENV_KEYS = new Set<DshEnvironmentKey>([
   DSH_SESSION_ID_KEY,
 ])
 const BASH_ENV_KEY_SUFFIX = /^[A-Z][A-Z0-9_]*$/
+
+/** The facts one managed `DSH_*` snapshot is composed from. */
+export interface DshEnvironmentFacts {
+  /** Absolute DeepSeek Harness home, exposed as `DSH_HOME`. */
+  dshHome: string
+  /**
+   * Session this process belongs to, exposed as `DSH_SESSION_ID`. Absent when
+   * the caller holds no authoritative session, which omits the variable rather
+   * than substituting a value.
+   */
+  sessionId?: string
+}
+
+/**
+ * Compose the built-in part of the managed `DSH_*` group from explicit facts.
+ *
+ * This function is the only place the built-in keys are named, so every entry
+ * point into a tenant sandbox injects one group instead of its own subset: the
+ * model shell tools through {@link ShellEnvRegistry.collect} and a program the
+ * container code runtime starts through
+ * {@link ShellEnvRegistry.collectSession}.
+ * @param facts - the home and session this process belongs to.
+ * @returns a frozen snapshot sorted by variable name.
+ */
+export function composeDshEnvironment(facts: DshEnvironmentFacts): DshEnvironment {
+  const values: Record<DshEnvironmentKey, string> = {
+    [DSH_HOME_ENV]: facts.dshHome,
+    [DSH_SHELL_KEY]: '1',
+  }
+  if (facts.sessionId !== undefined) values[DSH_SESSION_ID_KEY] = facts.sessionId
+  return sortedSnapshot(values)
+}
+
+/** Freeze one overlay in the name-sorted order every collected snapshot is presented in. */
+function sortedSnapshot(values: Record<DshEnvironmentKey, string>): DshEnvironment {
+  return Object.freeze(Object.fromEntries(Object.entries(values).sort(([left], [right]) => left.localeCompare(right))))
+}
 
 /**
  * Registry (`ctx.shellEnv`) for trusted, per-execution `DSH_*` variables.
@@ -151,11 +191,10 @@ export class ShellEnvRegistry extends Service {
    */
   collect(execution: ToolExecution): DshEnvironment {
     const values: Record<DshEnvironmentKey, string> = {
-      [DSH_HOME_ENV]: this.dshHome,
-      [DSH_SHELL_KEY]: '1',
-    }
-    if (execution.agent !== undefined) {
-      values[DSH_SESSION_ID_KEY] = execution.agent.session.header.id
+      ...composeDshEnvironment({
+        dshHome: this.dshHome,
+        ...execution.agent !== undefined ? { sessionId: execution.agent.session.header.id } : {},
+      }),
     }
 
     for (const contributor of [...this.contributors.values()].sort((left, right) => left.name.localeCompare(right.name))) {
@@ -172,7 +211,44 @@ export class ShellEnvRegistry extends Service {
       }
     }
 
-    return Object.freeze(Object.fromEntries(Object.entries(values).sort(([left], [right]) => left.localeCompare(right))))
+    return sortedSnapshot(values)
+  }
+
+  /**
+   * Build the trusted `DSH_*` snapshot for one harness process started outside
+   * the model shell path — the container code runtime, which runs a `run_code`
+   * program in the tenant sandbox — so both entry points into that sandbox
+   * inject the group {@link composeDshEnvironment} owns instead of two subsets.
+   *
+   * Built-ins only: a {@link BashEnvContributor} resolves from a
+   * {@link ToolExecution}, which this path has none of, so contributor-owned
+   * variables (`DSH_SESSION_JSONL`) stay absent here.
+   *
+   * The session comes from the ambient agent-initiator scope — the authority
+   * the agent loop establishes for the current driver chain — never from the
+   * process environment. Outside that boundary, or once the agent service is
+   * disposed, the variable is absent rather than guessed.
+   * @returns an immutable environment overlay containing the built-ins.
+   */
+  collectSession(): DshEnvironment {
+    const sessionId = this.ambientSessionId()
+    return composeDshEnvironment(
+      sessionId === undefined ? { dshHome: this.dshHome } : { dshHome: this.dshHome, sessionId },
+    )
+  }
+
+  /** The ambient initiator's session id, or `undefined` without a live authority to read it from. */
+  private ambientSessionId(): string | undefined {
+    const agents = this.ctx.get('agents')
+    if (agents === undefined) return undefined
+    try {
+      return agents.currentInitiator()?.session.header.id
+    } catch {
+      // A disposed agent registry rejects every ambient read. A missing
+      // environment fact must not fail the caller's run, and `DSH_SESSION_ID`
+      // stays absent exactly as it is outside any initiator boundary.
+      return undefined
+    }
   }
 
   // TODO(bash-env-list-builtins): Include registry-owned built-ins before diagnostics,

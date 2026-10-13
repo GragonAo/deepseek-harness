@@ -24,10 +24,10 @@
       "path": "../../util/home-paths"
     },
     {
-      "path": "../settings"
+      "path": "../../core/partition-scope"
     },
     {
-      "path": "../../tenant/tenant"
+      "path": "../settings"
     },
     {
       "path": "../../runtime-diagnostics/invariants"

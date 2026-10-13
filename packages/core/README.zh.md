@@ -7,6 +7,7 @@
 | 包 | 职责 | ctx key |
 |---|---|---|
 | [`scope/`](scope/README.md) | 作用域上下文注册原语 | 库，不使用 ctx key |
+| [`partition-scope/`](partition-scope/README.md) | 环境请求分区 seam（部署据以分区状态的租户与主体身份） | `ctx.partitionScope`（可选） |
 | [`session/`](session/README.md) | 事件溯源会话日志和内存存储 | `ctx.sessions` |
 | [`system-prompt/`](system-prompt/README.md) | 提示词和工具 schema 组装注册表 | `ctx.systemPrompt` |
 | [`tools/`](tools/README.md) | 作用域工具注册表和执行流水线 | `ctx.tools` |
@@ -14,7 +15,7 @@
 | [`agent-default-model/`](agent-default-model/README.md) | 各 Agent 入口共享的默认模型选择 | `ctx.agentDefaultModel` |
 | [`agent-loop/`](agent-loop/README.md) | 默认具体 agent 驱动器 | `ctx.agentLoop` |
 
-`scope` 提供共享作用域原语。`agent` 负责公开约定，`agent-loop` 是其默认实现；扩展插件依赖该 seam，从而保持驱动器可替换。`agent-default-model` 负责部署选择，Agent 入口仅在会话自身没有选择时使用它。
+`scope` 提供共享作用域原语，`partition-scope` 则提供分区化部署所挂载的 seam，使持有状态的消费方无需依赖某个多租户实现即可分区。`agent` 负责公开约定，`agent-loop` 是其默认实现；扩展插件依赖该 seam，从而保持驱动器可替换。`agent-default-model` 负责部署选择，Agent 入口仅在会话自身没有选择时使用它。
 
 可运行组合属于 [`examples/agent-spine-demo`](../examples/agent-spine-demo/README.md)；该分组只负责可替换的主干组件。
 

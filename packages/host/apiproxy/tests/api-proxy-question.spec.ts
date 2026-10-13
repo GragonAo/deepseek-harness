@@ -6,6 +6,18 @@ import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import type { ApiProxy, MuxFrame, RpcRequest } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api/rpc'
 import { createApiProxy } from '../src/api-proxy.ts'
+import ApiProxyService from '../src/index.ts'
+
+describe('question provider switch', () => {
+  const parse = ApiProxyService.Config as unknown as (input: unknown) => { userQuestionsProvider?: boolean }
+
+  it('defaults to providing questions and keeps an explicit false', () => {
+    // 缺省保留单主机形态：网关就是提供者。显式 false 必须活着穿过校验——被 schema 丢掉的话，
+    // 多租户清单里那一行会静默失效，两个提供者又会在启动时撞重复注册。
+    expect(parse({})).toMatchObject({ userQuestionsProvider: true })
+    expect(parse({ userQuestionsProvider: false })).toMatchObject({ userQuestionsProvider: false })
+  })
+})
 
 async function harness(): Promise<{ ctx: Context; api: ApiProxy }> {
   const ctx = new Context()

@@ -18,10 +18,10 @@
       "path": "../../../vendor/schemastery"
     },
     {
-      "path": "../storage"
+      "path": "../../core/partition-scope"
     },
     {
-      "path": "../../tenant/tenant"
+      "path": "../storage"
     },
     {
       "path": "../../runtime-diagnostics/invariants"

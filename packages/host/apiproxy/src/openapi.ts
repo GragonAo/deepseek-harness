@@ -154,7 +154,7 @@ export function generateOpenApiDocument(): OpenApiDocument {
     info: {
       title: 'DeepSeek Harness RPC API',
       version: '0',
-      description: 'Unary JSON-RPC surface over POST /api/<method>. Authenticate with a bearer JWT; the `tenant.admin.*` group additionally requires the `dsh:tenant-admin` scope.',
+      description: 'Unary JSON-RPC surface over POST /api/<method>. Authenticate with a bearer JWT proving one tenant and one subject; tenant administration is served separately by the tenant-management carrier.',
     },
     paths,
     components: {

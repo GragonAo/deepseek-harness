@@ -30,7 +30,7 @@
       "path": "../../session/session-persistence"
     },
     {
-      "path": "../../tenant/tenant"
+      "path": "../../core/partition-scope"
     },
     {
       "path": "../../util/brand"

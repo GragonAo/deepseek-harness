@@ -1,11 +1,13 @@
 /**
  * The model-facing `glob` tool: discover files whose paths match a glob
- * pattern, sorted by modification time. Execution spawns the packaged
- * ripgrep binary (`@vscode/ripgrep`) directly through the subprocess seam
- * with a plain argv vector — this module owns the model-facing schema,
- * argument validation, argv construction, result parsing, inline sampling,
- * and formatting; process concerns (spawn execution, tree termination,
- * environment scrubbing, output capture) stay behind `ctx.subprocess`.
+ * pattern, sorted by modification time. Execution spawns a ripgrep binary
+ * directly through the subprocess seam with a plain argv vector — the packaged
+ * `@vscode/ripgrep` binary, or the deployment's configured `ripgrepPath` when
+ * the spawn runs in another filesystem — and this module owns the model-facing
+ * schema, argument validation, argv construction, result parsing, inline
+ * sampling, and formatting; process concerns (spawn execution, tree
+ * termination, environment scrubbing, output capture) stay behind
+ * `ctx.subprocess`.
  * @module @deepseek-ai/dsh-tool-fs-search/glob
  */
 
@@ -53,6 +55,8 @@ export interface GlobToolCaps {
   stderrMaxBytes: number
   /** Cooperative tool-call budget (ms) attached as `ToolDefinition.timeoutMs`. */
   timeoutMs: number
+  /** Binary path on the execution side to spawn instead of the packaged one (the `ripgrepPath` config). */
+  ripgrepPath?: string
 }
 
 /** Validated `glob` arguments. */
@@ -341,7 +345,7 @@ export function applyGlobTool(ctx: Context, caps: GlobToolCaps): void {
     },
     async execute(args, exec) {
       const input = parseGlobArgs(args)
-      const run = await runRipgrep(ctx, exec, 'glob', buildGlobCommand(input), caps.rawOutputMaxBytes, caps.graceMs, caps.stderrMaxBytes)
+      const run = await runRipgrep(ctx, exec, 'glob', buildGlobCommand(input), caps.rawOutputMaxBytes, caps.graceMs, caps.stderrMaxBytes, caps.ripgrepPath)
       const root = input.path === undefined ? '.' : toWorkdirRelative(input.path, run.workdir)
       if (run.noMatches) return { root, paths: [] }
 

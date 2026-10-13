@@ -4,14 +4,14 @@
 
 基于文件的设置提供方。一个 YAML 或 JSON 文档承载全部 namespace 分节；外部编辑经 `ctx.settings` 热发布，`update()` 在写锁下先重读文档再原子写回，保留用户的 YAML 注释、当前未加载插件所拥有的分节，以及任何本进程尚未观察到的磁盘变更。
 
-未设置显式 `path` 时文档按租户隔离：租户作用域内位于 `<tenant.dataRoot>/settings.yaml`，租户作用域之外回退到 `<harness home>/settings.yaml`。显式 `path` 始终是各租户共享的固定全局文档；单用户（无租户）路径保持不变。
+未设置显式 `path` 时文档按分区隔离：环境请求分区内位于 `<partition.dataRoot>/settings.yaml`，分区之外回退到 `<harness home>/settings.yaml`。显式 `path` 始终是各租户共享的固定全局文档；单分区路径保持不变。分区经 [`@deepseek-ai/dsh-partition-scope`](../../core/partition-scope/README.md) 读取，因此本包不依赖任何多租户实现。
 
 ## 配置
 
 | 字段 | 含义 | 默认 |
 |---|---|---|
-| `path` | 固定设置文档路径（各租户共享）；扩展名决定格式（`.yaml`/`.yml`/`.json`） | 未设置（按租户隔离） |
-| `dshHome` | `path` 省略且无租户作用域时使用的 harness home 回退 | `$DSH_HOME` 或 `~/.dsh` |
+| `path` | 固定设置文档路径（各租户共享）；扩展名决定格式（`.yaml`/`.yml`/`.json`） | 未设置（按分区隔离） |
+| `dshHome` | `path` 省略且无环境分区时使用的 harness home 回退 | `$DSH_HOME` 或 `~/.dsh` |
 | `watch` | 监听文档并热发布外部编辑 | `true` |
 | `debounceMs` | watcher 写入稳定窗口（毫秒） | `100` |
 

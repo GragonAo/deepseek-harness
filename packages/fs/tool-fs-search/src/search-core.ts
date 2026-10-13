@@ -1,14 +1,15 @@
 /**
  * Shared execution plumbing for the `glob` / `grep` search tools: the
- * package-owned `SEARCH_*` error vocabulary, one spawn helper that runs the
- * PACKAGED ripgrep binary (`@vscode/ripgrep`) with a plain argv vector and
- * returns complete raw stdout, the best-effort formatted-result spill handoff,
- * and workdir-relative path display.
+ * package-owned `SEARCH_*` error vocabulary, one spawn helper that runs a
+ * ripgrep binary with a plain argv vector and returns complete raw stdout, the
+ * best-effort formatted-result spill handoff, and workdir-relative path display.
  *
  * Both tools execute as ordinary foreground spawns through `ctx.subprocess` —
  * never `ctx.shell`, never `ctx.shell.start()`, never a model-visible background
- * task. The ripgrep binary ships inside the npm package, so no system `rg`
- * install is required, and no shell layer exists between the argv vector and
+ * task. The binary is the PACKAGED one (`@vscode/ripgrep`, an npm dependency, so
+ * no system `rg` install is required) unless the deployment set `ripgrepPath`
+ * for an execution side whose filesystem this process cannot name
+ * ({@link resolveRgPath}), and no shell layer exists between the argv vector and
  * ripgrep, so no shell quoting is involved. Raw `rg` stdout is an internal
  * transport detail: the tools request a per-run stdout capture budget from the
  * subprocess seam, parse only complete in-memory stdout within
@@ -157,18 +158,28 @@ function completeStdout(toolName: string, stdout: SubprocessOutputRead, rawOutpu
 let rgPathPromise: Promise<string> | undefined
 
 /**
- * The packaged ripgrep binary path, resolved lazily once per process.
+ * The ripgrep binary path a search spawns.
  *
- * A single-file runtime uses the executable's `-rg` sidecar because a native
- * helper cannot be spawned from pkg's virtual filesystem. Node-mode builds
- * fall back to the platform package selected by `@vscode/ripgrep`. Resolving
- * at the call boundary keeps a missing or corrupt binary at the first search
- * call as `SEARCH_FAILED`, rather than failing the Loader composition.
+ * A configured path is returned unchanged, without a packaged resolution and
+ * without an existence probe: it names a file on the EXECUTION side, which for a
+ * sandboxed deployment is a container filesystem this process cannot inspect —
+ * the absolute path resolved here would not exist there. An unusable path
+ * therefore surfaces at the spawn as `SEARCH_FAILED` naming it
+ * ({@link runRipgrep}), not at load.
  *
- * @returns the packaged binary's absolute path; the memoized promise rejects
- *   when the platform package cannot be resolved.
+ * Without one, the packaged binary resolves lazily once per process. A
+ * single-file runtime uses the executable's `-rg` sidecar because a native
+ * helper cannot be spawned from pkg's virtual filesystem; Node-mode builds fall
+ * back to the platform package selected by `@vscode/ripgrep`. Resolving at the
+ * call boundary keeps a missing or corrupt binary at the first search call as
+ * `SEARCH_FAILED`, rather than failing the Loader composition.
+ *
+ * @param configuredPath - the deployment's `ripgrepPath`, when it set one.
+ * @returns the binary path to spawn; the memoized packaged promise rejects when
+ *   the platform package cannot be resolved.
  */
-export function resolveRgPath(): Promise<string> {
+export function resolveRgPath(configuredPath?: string): Promise<string> {
+  if (configuredPath !== undefined) return Promise.resolve(configuredPath)
   rgPathPromise ??= Promise.resolve().then(async () => {
     const executableSidecar = `${process.execPath}-rg`
     if ('pkg' in process && existsSync(executableSidecar)) return executableSidecar
@@ -178,7 +189,24 @@ export function resolveRgPath(): Promise<string> {
 }
 
 /**
- * Run the packaged ripgrep binary with a plain argv vector and return its
+ * The `SEARCH_FAILED` message for a run that never started. A configured
+ * `ripgrepPath` is named: it is the deployment's own binary, and naming the path
+ * is what separates a report about it from one about the packaged binary. A run
+ * that resolved the packaged binary keeps the launch-failure message that
+ * resolution has always produced.
+ *
+ * @param toolName - `glob` or `grep`.
+ * @param configuredPath - the deployment's `ripgrepPath`, when it set one.
+ * @returns the model-facing error message.
+ */
+function rgLaunchFailure(toolName: string, configuredPath: string | undefined): string {
+  return configuredPath === undefined
+    ? `${toolName} could not start its search command (ripgrep launch failed)`
+    : `${toolName} could not start its search command (ripgrep launch failed at ${configuredPath})`
+}
+
+/**
+ * Run the resolved ripgrep binary with a plain argv vector and return its
  * complete raw stdout. The working directory is the calling agent's session
  * cwd (`exec.agent.session.header.cwd`) when available, else
  * `process.cwd()`. `exec.signal` is forwarded so the cooperative tool timeout
@@ -210,6 +238,7 @@ export function resolveRgPath(): Promise<string> {
  * @param rawOutputMaxBytes - cap on the complete raw stdout the tool will parse.
  * @param graceMs - the seam's terminate-escalation grace period.
  * @param stderrMaxBytes - cap on the retained stderr diagnostic tail.
+ * @param ripgrepPath - the deployment's binary path on the execution side, when set (see {@link resolveRgPath}).
  * @returns the complete stdout, the zero-result flag, and the resolved workdir.
  */
 export async function runRipgrep(
@@ -220,6 +249,7 @@ export async function runRipgrep(
   rawOutputMaxBytes: number,
   graceMs: number,
   stderrMaxBytes: number,
+  ripgrepPath?: string,
 ): Promise<RipgrepRun> {
   if (exec.signal.aborted) {
     throw new SearchError(`${toolName} was aborted before completion (tool timeout or caller cancellation)`, 'SEARCH_ABORTED')
@@ -228,8 +258,9 @@ export async function runRipgrep(
   const workdir = cwd ?? process.cwd()
   let handle: SubprocessHandle
   try {
+    const rgPath = await resolveRgPath(ripgrepPath)
     handle = ctx.subprocess.spawn({
-      argv: [await resolveRgPath(), '--no-config', ...argv],
+      argv: [rgPath, '--no-config', ...argv],
       cwd: workdir,
       stdio: {
         stdin: 'ignore',
@@ -249,13 +280,13 @@ export async function runRipgrep(
     if (exec.signal.aborted) {
       throw new SearchError(`${toolName} was aborted before completion (tool timeout or caller cancellation)`, 'SEARCH_ABORTED')
     }
-    throw new SearchError(`${toolName} could not start its search command (ripgrep launch failed)`, 'SEARCH_FAILED', { cause: error })
+    throw new SearchError(rgLaunchFailure(toolName, ripgrepPath), 'SEARCH_FAILED', { cause: error })
   }
   let outcome: SubprocessOutcome
   try {
     outcome = await handle.done
   } catch (error: unknown) {
-    throw new SearchError(`${toolName} could not start its search command (ripgrep launch failed)`, 'SEARCH_FAILED', { cause: error })
+    throw new SearchError(rgLaunchFailure(toolName, ripgrepPath), 'SEARCH_FAILED', { cause: error })
   }
   const stdout = handle.collected.stdout?.readFrom(0)
   const stderr = handle.collected.stderr?.readFrom(0)

@@ -16,6 +16,7 @@ import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js'
+import type { Tool } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import type { Context } from '@deepseek-ai/cordis'
 import { isImageAdmissionError } from '@deepseek-ai/dsh-attachment'
@@ -24,6 +25,9 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { ToolDefinition, ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import { assertSupportedJsonSchema } from '@deepseek-ai/dsh-tools'
 import type { JsonSchemaNode, JsonValue } from '@deepseek-ai/dsh-tools'
+import { allowsAutomaticRetry, allowsConcurrentCalls, retryDelayMs, unknownListedTools, waitBeforeRetry } from './concurrency.ts'
+import type { ConcurrencyLimiter, ResolvedToolConcurrencyPolicy } from './concurrency.ts'
+import { isOverloadSignal } from './overload.ts'
 
 /** Resolved options relevant to tool bridging. */
 export interface ToolBridgeOptions {
@@ -31,6 +35,14 @@ export interface ToolBridgeOptions {
   registrationFailure: 'contain' | 'throw'
   serverName: string
   toolCallTimeoutMs: number
+  /** Resolved policy deciding which of this server's calls may overlap. */
+  concurrency: ResolvedToolConcurrencyPolicy
+  /**
+   * This server's call cap, built from the same resolved policy's
+   * `maxConcurrentCalls`; one limiter per server, shared by every generation, so
+   * a reconnect keeps the cap adaptive mode already learned.
+   */
+  limiter: ConcurrencyLimiter
 }
 
 /** State for one sync generation: the current set of disposers keyed by public name. */
@@ -123,8 +135,9 @@ export function publicToolName(serverName: string, rawName: string): string {
  *
  * 1. Fetch: drain uncached `tools/list` pagination and build the full next
  *    generation of `ToolDefinition`s under public names. Any failure here
- *    (network error, duplicate raw name in the server's list) rejects and
- *    leaves the previous generation registered untouched.
+ *    (network error, duplicate raw name in the server's list, an
+ *    `exclusiveTools` or `retryTools` name the list does not contain) rejects
+ *    and leaves the previous generation registered untouched.
  * 2. Swap: dispose the previous generation, register the new one. A registry
  *    conflict here can only mean a foreign registration squats on this
  *    server's `mcp__<serverName>__` namespace — the partial generation is
@@ -132,9 +145,17 @@ export function publicToolName(serverName: string, rawName: string): string {
  *    synchronization may propagate the conflict so its parent transaction
  *    rejects; ordinary clients and later re-syncs return an empty map.
  *
+ * `exclusiveTools` and `retryTools` are judged here because this is the first
+ * point where the names they refer to exist: configuration loads before the
+ * server is asked for its tool list, so a name can be neither checked at load
+ * nor ignored after discovery. The rejection is unconditional — a configured
+ * name that the server does not report is a configuration error, not a
+ * registration conflict, so `registrationFailure` does not soften it.
+ *
  * @param client - Connected MCP Client instance used to list and call tools.
  * @param ctx - Cordis context providing the `tools` service for registration.
- * @param opts - Bridge options: server namespace and per-call timeout.
+ * @param opts - Bridge options: server namespace, per-call timeout, and this
+ *   server's concurrency policy and call cap.
  * @param previous - Disposer map from the prior sync generation; disposed
  *   during the swap phase (only after the fetch phase succeeded).
  * @returns A map of registered public tool names to their unregister
@@ -148,6 +169,7 @@ export async function syncTools(
 ): Promise<ToolDisposers> {
   // Phase 1: fetch and build the next generation without touching the registry.
   const definitions = new Map<string, ToolDefinition>()
+  const listed = new Set<string>()
   let cursor: string | undefined
   do {
     const response = await listToolsUncached(client, cursor)
@@ -158,20 +180,25 @@ export async function syncTools(
           `mcp-client(${opts.serverName}): server listed tool "${tool.name}" more than once — invalid tool list`,
         )
       }
-      definitions.set(publicName, createDefinition(
-        client,
-        ctx,
-        publicName,
-        tool.name,
-        tool.description ?? '',
-        tool.inputSchema,
-        supportedOutputSchema(tool.outputSchema),
-        tool.execution?.taskSupport === 'required',
-        opts,
-      ))
+      definitions.set(publicName, createDefinition(client, ctx, publicName, tool, opts))
+      listed.add(tool.name)
     }
     cursor = response.nextCursor
   } while (cursor)
+
+  const unknown = unknownListedTools(opts.concurrency, listed)
+  if (unknown.length > 0) {
+    // One sentence per list, so a diagnostic names the field whose entry is wrong.
+    const byField = new Map<string, string[]>()
+    for (const { field, name } of unknown) byField.set(field, [...byField.get(field) ?? [], name])
+    const reported = [...byField].map(([field, names]) =>
+      `toolConcurrency.${field} names unknown tool${names.length > 1 ? 's' : ''}`
+      + ` ${names.map(name => `"${name}"`).join(', ')}`)
+    throw new Error(
+      `mcp-client(${opts.serverName}): ${reported.join(', ')};`
+      + ` this server lists: ${[...listed].sort().join(', ') || '(none)'}`,
+    )
+  }
 
   // Phase 2: swap generations.
   for (const dispose of previous.values()) dispose()
@@ -230,35 +257,46 @@ function supportedOutputSchema(candidate: unknown): JsonSchemaNode | undefined {
 
 /**
  * Build one generation-local tool definition and its execution-local rich projections.
+ *
+ * `isConcurrencySafe` answers from the server's raw name for the tool (its
+ * `exclusiveTools` membership) and the tool's own annotations under the
+ * server's resolved policy, so every call to this tool classifies alike and no
+ * argument is inspected: both inputs make a claim about the tool, not about one
+ * call. Annotations absent or false stay exclusive.
+ *
+ * The retry budget is resolved once, here, from that same tool-level evidence —
+ * `readOnlyHint` or `retryTools` membership — so the execute path never
+ * re-decides whether repeating this tool is safe.
+ *
  * @param client - connected MCP client used for calls.
  * @param ctx - plugin context carrying optional attachment and model services.
  * @param publicName - registry-qualified public tool name.
- * @param rawName - MCP wire tool name.
- * @param description - model-facing tool description.
- * @param parameters - MCP input schema.
- * @param structuredSchema - supported structured-output schema, when advertised.
- * @param taskRequired - whether this MCP tool requires unsupported task execution.
- * @param opts - bridge timeout and namespace options.
+ * @param tool - the MCP tool as the server listed it, including its annotations.
+ * @param opts - bridge timeout, namespace, and concurrency options.
  * @returns a complete ToolRuntime definition.
  */
 function createDefinition(
   client: Client,
   ctx: Context,
   publicName: string,
-  rawName: string,
-  description: string,
-  parameters: Record<string, unknown>,
-  structuredSchema: JsonSchemaNode | undefined,
-  taskRequired: boolean,
+  tool: Tool,
   opts: ToolBridgeOptions,
 ): ToolDefinition {
+  const rawName = tool.name
   const projections = new WeakMap<ToolExecution, PreparedProjection>()
+  const retries = allowsAutomaticRetry(opts.concurrency, tool.annotations, rawName)
+    ? opts.concurrency.retryAttempts
+    : 0
   return {
     name: publicName,
-    description,
-    parameters,
-    output: createOutput(rawName, structuredSchema),
-    execute: createExecutor(client, ctx, rawName, taskRequired, opts, projections),
+    description: tool.description ?? '',
+    parameters: tool.inputSchema,
+    output: createOutput(rawName, supportedOutputSchema(tool.outputSchema)),
+    execute: createExecutor(client, ctx, rawName, {
+      taskRequired: tool.execution?.taskSupport === 'required',
+      retries,
+    }, opts, projections),
+    isConcurrencySafe: () => allowsConcurrentCalls(opts.concurrency, tool.annotations, rawName),
     finalizeContent(exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>) {
       const projection = projections.get(exec)
       if (projection === undefined) return undefined
@@ -291,6 +329,106 @@ function createOutput(rawName: string, structuredSchema: JsonSchemaNode | undefi
 }
 
 /**
+ * What one attempt at the server produced: the raw result, or the rejection
+ * together with whether it was a refusal to serve.
+ */
+type CallAttempt =
+  | { readonly kind: 'served'; readonly result: Record<string, unknown> }
+  | { readonly kind: 'refused'; readonly error: unknown; readonly overload: boolean }
+
+/**
+ * Send one `tools/call` under this server's call cap. The slot is held only
+ * across the request itself: mapping the response, image admission, and
+ * materialization do not load the server. Every settled attempt is reported to
+ * the limiter, which is how the adaptive cap learns — including a rejection
+ * that is not a refusal to serve, because the server answered that one.
+ *
+ * @param client - connected MCP client.
+ * @param rawName - MCP wire tool name.
+ * @param args - parsed arguments, already normalized to an object.
+ * @param exec - the harness execution carrying cancellation.
+ * @param opts - bridge options owning the limiter and call timeout.
+ * @returns The attempt's outcome.
+ */
+async function attemptToolCall(
+  client: Client,
+  rawName: string,
+  args: Record<string, unknown>,
+  exec: ToolExecution,
+  opts: ToolBridgeOptions,
+): Promise<CallAttempt> {
+  const release = await opts.limiter.acquire(exec.signal)
+  let attempt: CallAttempt
+  try {
+    attempt = { kind: 'served', result: await callToolUncached(client, rawName, args, exec, opts) }
+  } catch (error: unknown) {
+    attempt = {
+      kind: 'refused',
+      error,
+      overload: isOverloadSignal({
+        error,
+        aborted: exec.signal.aborted,
+        countTimeouts: opts.concurrency.countTimeouts,
+      }),
+    }
+  } finally {
+    release()
+  }
+  opts.limiter.report(attempt.kind === 'served' ? 'served' : attempt.overload ? 'overload' : 'served')
+  return attempt
+}
+
+/**
+ * Send one `tools/call` under this server's call cap, retrying a refusal to
+ * serve within the budget the policy allows.
+ *
+ * The number of requests the server handles at once never exceeds the cap, which
+ * adaptive mode moves between attempts. A retried call acquires a new slot per
+ * attempt, so neither the queue nor the backoff delay is charged to the
+ * per-call timeout: that budget starts inside the SDK request each attempt
+ * makes. `retries` is the budget `createDefinition` resolved for this tool, and
+ * it is zero unless the tool is read-only by its own annotation or the
+ * deployment listed it in `retryTools`, so a refused write fails immediately
+ * instead of risking a repeat.
+ *
+ * @param client - connected MCP client.
+ * @param rawName - MCP wire tool name.
+ * @param args - parsed arguments, already normalized to an object.
+ * @param exec - the harness execution carrying cancellation.
+ * @param opts - bridge options owning the limiter and call timeout.
+ * @param retries - Extra attempts this tool may make after a refusal to serve.
+ * @returns The raw MCP call result.
+ */
+async function callToolWithinCap(
+  client: Client,
+  rawName: string,
+  args: Record<string, unknown>,
+  exec: ToolExecution,
+  opts: ToolBridgeOptions,
+  retries: number,
+): Promise<Record<string, unknown>> {
+  for (let attempt = 0; ; attempt += 1) {
+    const outcome = await attemptToolCall(client, rawName, args, exec, opts)
+    if (outcome.kind === 'served') return outcome.result
+    if (!outcome.overload || attempt >= retries) throw outcome.error
+    const delayMs = retryDelayMs(opts.concurrency, attempt + 1, Math.random)
+    if (!await waitBeforeRetry(delayMs, exec.signal)) {
+      throw new Error('the tool call was canceled while waiting to retry a refused call', { cause: exec.signal.reason })
+    }
+  }
+}
+
+/**
+ * Per-tool facts discovery already decided and the executor acts on.
+ */
+interface ToolCallTraits {
+  /** The server requires task-based execution, which this bridge does not support. */
+  readonly taskRequired: boolean
+  /** Extra attempts a refused call to this tool may make (zero when it may not be retried). */
+  readonly retries: number
+}
+
+/**
  * Create an execute function for one MCP tool. The executor closes over the
  * raw MCP tool name and sends an uncached `tools/call` request with it (never
  * the public name), with abort signal and timeout, then maps the result to
@@ -304,12 +442,12 @@ function createExecutor(
   client: Client,
   ctx: Context,
   rawName: string,
-  taskRequired: boolean,
+  traits: ToolCallTraits,
   opts: ToolBridgeOptions,
   projections: WeakMap<ToolExecution, PreparedProjection>,
 ): ToolDefinition['execute'] {
   return async (args: unknown, exec: ToolExecution) => {
-    if (taskRequired) {
+    if (traits.taskRequired) {
       throw new Error(`Tool "${rawName}" requires task-based execution, which this bridge does not support`)
     }
     // The agent loop passes `JSON.parse(model_arguments)` which is usually an
@@ -317,7 +455,7 @@ function createExecutor(
     // string/number/null). Fallback to {} lets the MCP server produce a
     // specific "missing required param" error the model can learn from.
     const argsObj = (typeof args === 'object' && args !== null ? args : {}) as Record<string, unknown>
-    const result = await callToolUncached(client, rawName, argsObj, exec, opts)
+    const result = await callToolWithinCap(client, rawName, argsObj, exec, opts, traits.retries)
 
     // The SDK may return a legacy `toolResult` shape; normalize to content array.
     if (!Array.isArray(result.content)) {

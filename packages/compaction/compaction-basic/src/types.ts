@@ -20,7 +20,7 @@ export interface CompactionPolicyConfig {
   summarizationModel?: string
   /** Provider generation cap for summarization. Defaults to `8192`. */
   maxTokens?: number
-  /** Extra attempts after the first compaction when pressure remains above threshold. Defaults to `1`. */
+  /** Extra attempts after the first when pressure remains above threshold or a summary truncated at `maxTokens`. Defaults to `1`. */
   compactionRetries?: number
   /** Maximum retries after canonical context overflow; `0` disables recovery. Defaults to `1`. */
   maxOverflowRetries?: number

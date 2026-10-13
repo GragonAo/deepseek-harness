@@ -1,8 +1,9 @@
 /**
- * The model-facing filesystem discovery tool suite (`glob`, `grep`) over the
- * packaged ripgrep binary (`@vscode/ripgrep`). This single plugin registers
- * both tools; the binary ships inside the npm dependency, so no system `rg`
- * install and no shell layer is involved.
+ * The model-facing filesystem discovery tool suite (`glob`, `grep`) over
+ * ripgrep. This single plugin registers both tools; the binary is the packaged
+ * `@vscode/ripgrep` one by default, so no system `rg` install is involved, and
+ * a deployment whose execution side is a separate filesystem names its own
+ * binary with `ripgrepPath` (`Config`). No shell layer is involved either way.
  *
  * ## Spawn-backed, not a `ctx.fs` provider method
  *
@@ -69,7 +70,11 @@ export const name = 'tool-fs-search'
 /** Services required by the search tool suite (`spillStore` is optional, read via `ctx.get()`). */
 export const inject = ['tools', 'systemPrompt', 'subprocess']
 
-/** Plugin config; over-cap glob sampling is an explicit deployment choice and the remaining fields have defaults. */
+/**
+ * Plugin config; over-cap glob sampling is an explicit deployment choice, the
+ * remaining caps have defaults, and `ripgrepPath` stays unset until a deployment
+ * names the binary its execution side carries.
+ */
 export interface Config {
   /** Whether an over-cap `glob` page is sampled across top-level entries instead of taking the modification-time head. */
   sampleOverCapGlobResults: boolean
@@ -92,6 +97,17 @@ export interface Config {
    * `@deepseek-ai/dsh-tool-call-timeout-policy` through `exec.signal`.
    */
   timeoutMs?: number
+  /**
+   * Absolute path of the ripgrep binary every search spawns, for a deployment
+   * whose execution side is not this process: a sandbox container holds no path
+   * resolved here, so the packaged binary is unusable there. The value names a
+   * file on the execution side and is passed through unresolved — only that side
+   * can answer for it — so an unusable path fails each call as `SEARCH_FAILED`
+   * naming it. Omitted, the packaged binary is resolved lazily at the first
+   * search call (`@vscode/ripgrep`, or the executable's `-rg` sidecar in a
+   * single-file runtime), which is what a co-located execution side needs.
+   */
+  ripgrepPath?: string
 }
 
 export const Config: z<Config> = z.object({
@@ -104,10 +120,11 @@ export const Config: z<Config> = z.object({
   graceMs: z.number().default(SEARCH_GRACE_MS),
   stderrMaxBytes: z.number().default(SEARCH_STDERR_MAX_BYTES),
   timeoutMs: z.number().default(SEARCH_TIMEOUT_MS),
+  ripgrepPath: z.string(),
 })
 
-/** The shape after schemastery applied the defaults. */
-type ResolvedConfig = Required<Config>
+/** The shape after schemastery applied the defaults; `ripgrepPath` has no default, so it stays unset when the deployment omits it. */
+type ResolvedConfig = Required<Omit<Config, 'ripgrepPath'>> & Pick<Config, 'ripgrepPath'>
 
 /** Every search cap counts items/bytes/milliseconds — a positive integer, or retention and timeout arithmetic misbehaves silently. */
 function assertPositiveInteger(name: string, value: number): void {
@@ -117,9 +134,11 @@ function assertPositiveInteger(name: string, value: number): void {
 }
 
 /**
- * Register the `glob`/`grep` filesystem discovery tool suite. The packaged
- * ripgrep binary is always available (an npm dependency), so registration is
- * unconditional.
+ * Register the `glob`/`grep` filesystem discovery tool suite. Registration is
+ * unconditional and probes nothing: the packaged ripgrep binary is an npm
+ * dependency, and a deployment that sets `ripgrepPath` names a binary its own
+ * execution side carries. A binary missing from either place fails the search
+ * call as `SEARCH_FAILED`, not the Loader composition.
  *
  * @param ctx - plugin context; registrations are effects scoped to this plugin.
  * @param config - resolved plugin configuration from schemastery.
@@ -139,6 +158,12 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   }
   assertPositiveInteger('stderrMaxBytes', resolved.stderrMaxBytes)
   assertPositiveInteger('timeoutMs', resolved.timeoutMs)
+  const ripgrepPath = resolved.ripgrepPath
+  // Emptiness is the only check made here: whether a path is usable belongs to
+  // the execution side's filesystem, which this process cannot inspect.
+  if (ripgrepPath !== undefined && ripgrepPath.trim().length === 0) {
+    throw new Error('tool-fs-search: ripgrepPath must be a non-empty path when set')
+  }
   applyGlobTool(ctx, {
     sampleOverCapGlobResults: resolved.sampleOverCapGlobResults,
     maxResults: resolved.globMaxResults,
@@ -147,6 +172,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     graceMs: resolved.graceMs,
     stderrMaxBytes: resolved.stderrMaxBytes,
     timeoutMs: resolved.timeoutMs,
+    ...ripgrepPath !== undefined ? { ripgrepPath } : {},
   })
   applyGrepTool(ctx, {
     maxMatches: resolved.grepMaxMatches,
@@ -156,5 +182,6 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     graceMs: resolved.graceMs,
     stderrMaxBytes: resolved.stderrMaxBytes,
     timeoutMs: resolved.timeoutMs,
+    ...ripgrepPath !== undefined ? { ripgrepPath } : {},
   })
 }

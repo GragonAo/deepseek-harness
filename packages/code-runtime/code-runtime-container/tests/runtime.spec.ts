@@ -1,11 +1,19 @@
 import { spawn } from 'node:child_process'
+import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { ContainerRuntime } from '@deepseek-ai/dsh-container'
-import type { ContainerCommandResult, ContainerExecOptions } from '@deepseek-ai/dsh-container'
+import type {
+  ContainerCommandResult,
+  ContainerExecOptions,
+  ContainerPtyOptions,
+  ContainerPtySession,
+} from '@deepseek-ai/dsh-container'
 import { ContainerCodeRuntime } from '@deepseek-ai/dsh-code-runtime-container'
 import type { Config } from '@deepseek-ai/dsh-code-runtime-container'
 import type { CodeBindingFunction, CodeBindingNamespace } from '@deepseek-ai/dsh-code-runtime'
+import { composeDshEnvironment } from '@deepseek-ai/dsh-shell-env'
+import * as BashEnvPlugin from '@deepseek-ai/dsh-shell-env'
 
 /**
  * Integration suite over a REAL in-process host bridge plus a LOCAL exec
@@ -15,7 +23,11 @@ import type { CodeBindingFunction, CodeBindingNamespace } from '@deepseek-ai/dsh
  * round-trip, frame emission, host parse — runs end to end without Docker.
  */
 class LocalExecRuntime extends ContainerRuntime {
+  /** The exec environment of every call, in order: what the process starts from. */
+  readonly environments: (Readonly<Record<string, string>> | undefined)[] = []
+
   async exec(command: string, args: readonly string[], opts?: ContainerExecOptions): Promise<ContainerCommandResult> {
+    this.environments.push(opts?.env)
     return new Promise((resolve, reject) => {
       const child = spawn(command, [...args], {
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -40,6 +52,10 @@ class LocalExecRuntime extends ContainerRuntime {
       child.stdin.end()
     })
   }
+
+  async openPty(_options: ContainerPtyOptions): Promise<ContainerPtySession> {
+    throw new Error('LocalExecRuntime: no interactive session')
+  }
 }
 
 async function setup(config: Config = {}) {
@@ -47,6 +63,20 @@ async function setup(config: Config = {}) {
   await ctx.plugin(LocalExecRuntime, undefined)
   await ctx.plugin(ContainerCodeRuntime, { hostBridge: '127.0.0.1', ...config })
   return { ctx, runtime: ctx.codeRuntime as ContainerCodeRuntime }
+}
+
+/** Setup with the real owner of the managed `DSH_*` group mounted beside the runtime. */
+async function setupManaging(config: Config = {}) {
+  const ctx = new Context()
+  await ctx.plugin(LocalExecRuntime, undefined)
+  await ctx.plugin(BashEnvPlugin, { dshHome: './test-dsh-home' })
+  await ctx.plugin(ContainerCodeRuntime, { hostBridge: '127.0.0.1', ...config })
+  return { ctx, runtime: ctx.codeRuntime as ContainerCodeRuntime, exec: ctx.containerRuntime as LocalExecRuntime }
+}
+
+/** The `DSH_*` entries of one recorded exec environment. */
+function dshEntries(env: Readonly<Record<string, string>> | undefined): Record<string, string> {
+  return Object.fromEntries(Object.entries(env ?? {}).filter(([key]) => key.startsWith('DSH_')))
 }
 
 function tools(functions: Record<string, (args: unknown) => Promise<unknown>>): CodeBindingNamespace[] {
@@ -138,6 +168,10 @@ describe('ContainerCodeRuntime — programs and bindings over the bridge', () =>
       async exec(): Promise<ContainerCommandResult> {
         return { exitCode: 1, stdout: '', stderr: 'segfault' }
       }
+
+      async openPty(_options: ContainerPtyOptions): Promise<ContainerPtySession> {
+        throw new Error('BrokenRuntime: no interactive session')
+      }
     }
     await ctx.plugin(BrokenRuntime, undefined)
     await ctx.plugin(ContainerCodeRuntime, { hostBridge: '127.0.0.1' })
@@ -145,5 +179,26 @@ describe('ContainerCodeRuntime — programs and bindings over the bridge', () =>
     const result = await runtime.run({ program: "console.log('hi')", bindings: [] })
     expect(result.error?.kind).toBe('worker-exit')
     expect(result.error?.message).toContain('segfault')
+  })
+})
+
+describe('ContainerCodeRuntime — the managed DSH_* group', () => {
+  it('injects exactly the group its sole owner composes, and the program reads it', async () => {
+    const { runtime, exec } = await setupManaging()
+    const result = await runtime.run({ program: 'return process.env.DSH_HOME', bindings: [] })
+
+    expect(result.value).toBe(resolve('./test-dsh-home'))
+    expect(dshEntries(exec.environments[0])).toEqual({
+      ...composeDshEnvironment({ dshHome: resolve('./test-dsh-home') }),
+      DSH_CODE_BRIDGE: expect.any(String),
+    })
+  })
+
+  it('injects no managed variable of its own without the shell-env registry', async () => {
+    const { ctx, runtime } = await setup()
+    await runtime.run({ program: 'return 1', bindings: [] })
+
+    expect(dshEntries((ctx.containerRuntime as LocalExecRuntime).environments[0]))
+      .toEqual({ DSH_CODE_BRIDGE: expect.any(String) })
   })
 })

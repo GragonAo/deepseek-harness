@@ -26,8 +26,8 @@ describe('generateOpenApiDocument', () => {
     expect(doc.openapi).toBe('3.1.0')
     const routes = Object.keys(doc.paths)
     // session.* + subagent.* + host.* + workspace.* + skill.list + agentPreset.* +
-    // goal.* + settings.* + credentials.* + llm.* + tenant.admin.* = 63 routes.
-    expect(routes).toHaveLength(63)
+    // goal.* + settings.* + credentials.* + llm.* = 52 routes.
+    expect(routes).toHaveLength(52)
     for (const route of routes) {
       const operation = (doc.paths[route] as Json).post as Json
       expect(operation.security).toEqual([{ bearerAuth: [] }])
@@ -37,25 +37,22 @@ describe('generateOpenApiDocument', () => {
   })
 
   it('pins the method and narrows payload in the request envelope', () => {
-    const body = (path('tenant.admin.create').requestBody as Json).content as Json
+    const body = (path('credentials.set').requestBody as Json).content as Json
     const schema = (body['application/json'] as Json).schema as Json
     expect(schema.required).toEqual(['type', 'rpcId', 'method', 'payload'])
     expect((schema.properties as Json).type).toEqual({ const: 'client-request' })
-    expect((schema.properties as Json).method).toEqual({ const: 'tenant.admin.create' })
-    expect((schema.properties as Json).payload).toEqual({ $ref: '#/components/schemas/tenant_admin_createRequestPayload' })
+    expect((schema.properties as Json).method).toEqual({ const: 'credentials.set' })
+    expect((schema.properties as Json).payload).toEqual({ $ref: '#/components/schemas/credentials_setRequestPayload' })
   })
 
-  it('projects the tenant.admin.create payload schema', () => {
-    const payload = schemas.tenant_admin_createRequestPayload as Json
-    expect(payload.required).toEqual(['id', 'name', 'dataRoot', 'workspaceRoot'])
-    expect(payload.properties).toHaveProperty('id')
-    expect((payload.properties as Json).network).toEqual({
-      anyOf: [{ type: 'string', const: 'none' }, { type: 'string', const: 'internal' }],
-    })
+  it('projects the credentials.set payload schema', () => {
+    const payload = schemas.credentials_setRequestPayload as Json
+    expect(payload.required).toEqual(['ref', 'value'])
+    expect(payload.properties).toHaveProperty('ref')
   })
 
   it('splits the response result into ok/value and ok/error', () => {
-    const body = (path('tenant.admin.list').responses as Record<string, unknown>)['200'] as Json
+    const body = (path('credentials.describe').responses as Record<string, unknown>)['200'] as Json
     const schema = ((body.content as Json)['application/json'] as Json).schema as Json
     const result = (schema.properties as Json).result as Json
     expect(result.oneOf).toHaveLength(2)

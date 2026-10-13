@@ -18,11 +18,23 @@ import z from '@deepseek-ai/schemastery'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { RECONNECT_DEFAULTS, resolveReconnectPolicy, startConnection } from './connection.ts'
 import type { ReconnectConfig } from './connection.ts'
+import { TOOL_CONCURRENCY_DEFAULTS, resolveToolConcurrencyPolicy } from './concurrency.ts'
+import type { ToolConcurrencyConfig, ToolConcurrencyInternals } from './concurrency.ts'
 // Side-effect type import: declaration-merges `ctx.tools` onto Context.
 import type {} from '@deepseek-ai/dsh-tools'
 
 export type { McpResult } from './tools.ts'
 export type { ReconnectConfig, ResolvedReconnectPolicy } from './connection.ts'
+export type {
+  ConcurrencyLimiter,
+  ResolvedToolConcurrencyPolicy,
+  ToolCallOutcome,
+  ToolConcurrencyConfig,
+  ToolConcurrencyInternals,
+  ToolConcurrencyMode,
+  ToolConcurrencyPolicy,
+  UnknownListedTool,
+} from './concurrency.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'mcp-client'
@@ -70,6 +82,8 @@ export interface StdioConfig {
   failOnStartupError: boolean
   /** Automatic reconnect policy after a lost connection; omission uses the defaults. */
   reconnect?: ReconnectConfig
+  /** Tool-call concurrency for this server; omission uses the defaults. */
+  toolConcurrency?: ToolConcurrencyConfig
 }
 
 /** Config for connecting to an MCP server over Streamable HTTP (SSE). */
@@ -92,6 +106,8 @@ export interface StreamableHttpConfig {
   failOnStartupError: boolean
   /** Automatic reconnect policy after a lost connection; omission uses the defaults. */
   reconnect?: ReconnectConfig
+  /** Tool-call concurrency for this server; omission uses the defaults. */
+  toolConcurrency?: ToolConcurrencyConfig
 }
 
 /** Configuration for one stdio or Streamable HTTP MCP server. */
@@ -102,6 +118,34 @@ const Reconnect: z<ReconnectConfig> = z.object({
   initialDelayMs: z.number().min(1).max(MAX_TIMER_DELAY_MS).default(RECONNECT_DEFAULTS.initialDelayMs),
   maxDelayMs: z.number().min(1).max(MAX_TIMER_DELAY_MS).default(RECONNECT_DEFAULTS.maxDelayMs),
   maxAttempts: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(RECONNECT_DEFAULTS.maxAttempts),
+})
+
+const ToolConcurrency: z<ToolConcurrencyConfig> = z.object({
+  policy: z.union([z.const('annotations'), z.const('parallel'), z.const('exclusive')])
+    .default(TOOL_CONCURRENCY_DEFAULTS.policy),
+  maxConcurrentCalls: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
+    .default(TOOL_CONCURRENCY_DEFAULTS.maxConcurrentCalls),
+  // The same value for an omitted list and an empty one: Schemastery resolves a
+  // missing array key to `[]`, and the resolver reads either as "no tool of this
+  // server is excluded".
+  exclusiveTools: z.array(String).default([]),
+  // Empty by default, so only a tool whose own annotations declare
+  // `readOnlyHint: true` is ever retried without the deployment naming it.
+  retryTools: z.array(String).default([]),
+  mode: z.union([z.const('fixed'), z.const('adaptive')]).default(TOOL_CONCURRENCY_DEFAULTS.mode),
+  // Bounds stay permissive here and are re-judged by the resolver, which is the
+  // one place a policy value can enter the bridge.
+  decreaseFactor: z.number().min(0).max(1).default(TOOL_CONCURRENCY_DEFAULTS.decreaseFactor),
+  recoveryStep: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
+    .default(TOOL_CONCURRENCY_DEFAULTS.recoveryStep),
+  recoveryQuietMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS)
+    .default(TOOL_CONCURRENCY_DEFAULTS.recoveryQuietMs),
+  countTimeouts: z.boolean().default(TOOL_CONCURRENCY_DEFAULTS.countTimeouts),
+  retryAttempts: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER)
+    .default(TOOL_CONCURRENCY_DEFAULTS.retryAttempts),
+  retryBaseDelayMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS)
+    .default(TOOL_CONCURRENCY_DEFAULTS.retryBaseDelayMs),
+  retryJitterRatio: z.number().min(0).max(1).default(TOOL_CONCURRENCY_DEFAULTS.retryJitterRatio),
 })
 
 export const Config = z.union([
@@ -115,6 +159,7 @@ export const Config = z.union([
     toolCallTimeoutMs: z.number().default(DEFAULT_TOOL_CALL_TIMEOUT_MS),
     failOnStartupError: z.boolean().default(false),
     reconnect: Reconnect,
+    toolConcurrency: ToolConcurrency,
   }),
   z.object({
     transport: z.const('streamable-http'),
@@ -124,6 +169,7 @@ export const Config = z.union([
     toolCallTimeoutMs: z.number().default(DEFAULT_TOOL_CALL_TIMEOUT_MS),
     failOnStartupError: z.boolean().default(false),
     reconnect: Reconnect,
+    toolConcurrency: ToolConcurrency,
   }),
 ]) as unknown as z<Config>
 
@@ -135,13 +181,18 @@ export const Config = z.union([
  * ordinary function as a constructor, whose returned Promise is not startup work.
  * @param ctx - plugin context carrying the tool registry.
  * @param config - resolved transport and server namespace configuration.
+ * @param internals - non-serializable hooks for tests; production omits them.
  * @returns startup readiness after connection and initial tool discovery settle.
  */
-export async function apply(ctx: Context, config: Config): Promise<void> {
-  // Fail loud at load: reconnect misconfiguration (including programmatic
-  // construction that bypassed Schemastery) rejects THIS instance before any
-  // effect registers.
+export async function apply(ctx: Context, config: Config, internals: ToolConcurrencyInternals = {}): Promise<void> {
+  // Fail loud at load: reconnect and tool-concurrency misconfiguration
+  // (including programmatic construction that bypassed Schemastery) rejects
+  // THIS instance before any effect registers.
   const reconnect = resolveReconnectPolicy(config.reconnect, `mcp-client(${config.serverName}): reconnect`)
+  const concurrency = resolveToolConcurrencyPolicy(
+    config.toolConcurrency,
+    `mcp-client(${config.serverName}): toolConcurrency`,
+  )
 
   // Reserve the namespace next: a duplicate `serverName` fails THIS instance
   // at load with an actionable error and leaves the earlier instance intact.
@@ -163,7 +214,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // The supervisor owns the client/transport generations, the reconnect
   // loop, and the live tool registrations; disposal stops reconnection,
   // quiesces in-flight work, and unregisters the current generation.
-  const connection = startConnection(ctx, config, reconnect)
+  const connection = startConnection(ctx, config, reconnect, concurrency, internals)
 
   ctx.effect(() => {
     return () => connection.dispose()

@@ -282,41 +282,6 @@ function fakeApi(overrides: Partial<{ muxFrames: MuxFrame[]; hostFrames: HostFra
         return { rpcId: request.rpcId, result: { ok: true, value: { models: [] } } }
       },
     },
-    tenantAdmin: {
-      async list(request) {
-        return { rpcId: request.rpcId, result: { ok: true, value: { items: [] } } }
-      },
-      async get(request) {
-        return { rpcId: request.rpcId, result: { ok: false, error: { code: 'tenant-not-found', message: 'stub', details: { id: request.payload.id } } } }
-      },
-      async create(request) {
-        return { rpcId: request.rpcId, result: { ok: false, error: { code: 'tenant-conflict', message: 'stub', details: { id: request.payload.id } } } }
-      },
-      async update(request) {
-        return { rpcId: request.rpcId, result: { ok: false, error: { code: 'tenant-not-found', message: 'stub', details: { id: request.payload.id } } } }
-      },
-      async enable(request) {
-        return { rpcId: request.rpcId, result: { ok: false, error: { code: 'tenant-not-found', message: 'stub', details: { id: request.payload.id } } } }
-      },
-      async disable(request) {
-        return { rpcId: request.rpcId, result: { ok: false, error: { code: 'tenant-not-found', message: 'stub', details: { id: request.payload.id } } } }
-      },
-      async remove(request) {
-        return { rpcId: request.rpcId, result: { ok: true, value: { removed: true as const } } }
-      },
-      async membersList(request) {
-        return { rpcId: request.rpcId, result: { ok: true, value: { members: [] } } }
-      },
-      async membersAdd(request) {
-        return { rpcId: request.rpcId, result: { ok: false, error: { code: 'tenant-not-found', message: 'stub', details: { id: request.payload.id } } } }
-      },
-      async membersRemove(request) {
-        return { rpcId: request.rpcId, result: { ok: false, error: { code: 'tenant-not-found', message: 'stub', details: { id: request.payload.id } } } }
-      },
-      async usersEnsure(request) {
-        return { rpcId: request.rpcId, result: { ok: true, value: { root: request.payload.subject } } }
-      },
-    },
     events: {
       mux: (_request, signal) => stream(muxFrames, signal),
       host: (_request, signal) => stream(hostFrames, signal),

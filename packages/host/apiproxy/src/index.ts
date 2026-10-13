@@ -68,6 +68,14 @@ export interface Config {
    * @default 1024
    */
   coldBlankProbeMaxBytes?: number
+  /**
+   * Whether this gateway answers user questions through its connected clients.
+   * `false` leaves the `userQuestions` seam to the other provider in this
+   * composition — the multi-tenant deployment answers through its business API
+   * — because the seam accepts exactly one provider per context.
+   * @default true
+   */
+  userQuestionsProvider?: boolean
 }
 
 /**
@@ -87,6 +95,7 @@ export class ApiProxyService extends Service implements ApiProxy {
     sessionExportCompressionLevel: z.number().step(1).min(0).max(9)
       .default(DEFAULT_SESSION_LOG_COMPRESSION_LEVEL) as z<SessionLogCompressionLevel>,
     coldBlankProbeMaxBytes: z.natural().default(DEFAULT_COLD_BLANK_PROBE_MAX_BYTES),
+    userQuestionsProvider: z.boolean().default(true),
   })
 
   readonly sessions: ApiProxy['sessions']
@@ -99,7 +108,6 @@ export class ApiProxyService extends Service implements ApiProxy {
   readonly settings: ApiProxy['settings']
   readonly credentials: ApiProxy['credentials']
   readonly llm: ApiProxy['llm']
-  readonly tenantAdmin: ApiProxy['tenantAdmin']
   readonly events: ApiProxy['events']
   readonly downloads: ApiProxy['downloads']
   readonly respond: ApiProxy['respond']
@@ -110,6 +118,7 @@ export class ApiProxyService extends Service implements ApiProxy {
       defaultModelSelection: () => ctx.agentDefaultModel.currentSelection(),
       saveDefaultModelSelection: selection => ctx.agentDefaultModel.saveSelection(selection),
       cwd: config.cwd ?? process.cwd(),
+      userQuestionsProvider: config.userQuestionsProvider ?? true,
       ...config.nativeOpen === undefined ? {} : { canOpenPath: () => config.nativeOpen as boolean },
       ...(config.sessionExportCompressionLevel === undefined
         ? {}
@@ -128,7 +137,6 @@ export class ApiProxyService extends Service implements ApiProxy {
     this.settings = api.settings
     this.credentials = api.credentials
     this.llm = api.llm
-    this.tenantAdmin = api.tenantAdmin
     this.events = api.events
     this.downloads = api.downloads
     // createApiProxy returns closures (no `this` capture), so the bind is

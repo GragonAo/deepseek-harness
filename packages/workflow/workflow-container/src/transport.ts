@@ -17,7 +17,7 @@ import type { MessagePort } from 'node:worker_threads'
 import type {
   HostToWorkerMessage,
   WorkerToHostMessage,
-} from '@deepseek-ai/dsh-workflow-worker-thread/src/protocol.ts'
+} from '@deepseek-ai/dsh-workflow-worker-thread'
 
 /** The per-poll server-side hold: a waiter responds with one message or, on expiry, nothing. */
 type MessageWaiter = (message: HostToWorkerMessage | null) => void

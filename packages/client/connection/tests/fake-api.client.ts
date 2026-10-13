@@ -225,24 +225,6 @@ export class FakeApiClient implements IApiClient {
     discoverModels: payload => this.record('llm.discoverModels', payload, Promise.resolve(ok({ models: [] }))),
   }
 
-  readonly tenantAdmin: IApiClient['tenantAdmin'] = {
-    list: payload => this.record('tenant.admin.list', payload, Promise.resolve(ok({ items: [] }))),
-    get: payload => this.record('tenant.admin.get', payload, Promise.resolve(ok(this.fakeTenant(true)))),
-    create: payload => this.record('tenant.admin.create', payload, Promise.resolve(ok(this.fakeTenant(true)))),
-    update: payload => this.record('tenant.admin.update', payload, Promise.resolve(ok(this.fakeTenant(true)))),
-    enable: payload => this.record('tenant.admin.enable', payload, Promise.resolve(ok(this.fakeTenant(true)))),
-    disable: payload => this.record('tenant.admin.disable', payload, Promise.resolve(ok(this.fakeTenant(false)))),
-    remove: payload => this.record('tenant.admin.remove', payload, Promise.resolve(ok({ removed: true as const }))),
-    membersList: payload => this.record('tenant.admin.members.list', payload, Promise.resolve(ok({ members: [] }))),
-    membersAdd: payload => this.record('tenant.admin.members.add', payload, Promise.resolve(ok({ members: [] }))),
-    membersRemove: payload => this.record('tenant.admin.members.remove', payload, Promise.resolve(ok({ members: [] }))),
-    usersEnsure: payload => this.record('tenant.admin.users.ensure', payload, Promise.resolve(ok({ root: '/fake/global' }))),
-  }
-
-  private fakeTenant(enabled: boolean) {
-    return { id: 'fake-tenant', name: 'fake', dataRoot: '/fake/data', workspaceRoot: '/fake/workspace', enabled, members: [] }
-  }
-
   /** When true, streams never fire onOpen (misbehaving-carrier material for the handshake timeout guard). */
   suppressStreamOpen = false
 

@@ -2,9 +2,9 @@
 
 [English](README.md) | 中文
 
-工具无关的 shell 环境插件：拥有 `ctx.shellEnv` 注册表，管理受信任的、每次执行收集的 `DSH_*` 变量，供模型可见的 shell 工具（`dsh-tool-bash`、`dsh-tool-pwsh`）收集进每次 shell 调用的环境。内置 shell 事实（`DSH_HOME`、`DSH_SHELL=1`、`DSH_SESSION_ID`）归注册表自身所有；其他插件可以注册额外的可枚举事实，注册随插件纤维（fiber）释放，重复所有权或未声明的运行时键会响亮失败。
+工具无关的受管环境插件：拥有 `ctx.shellEnv` 注册表，管理受信任的、每次执行收集的 `DSH_*` 变量，并且是该变量组唯一的所有者，因此沙箱里启动的每个 harness 进程都从这里取这一组变量——模型可见的 shell 工具（`dsh-tool-bash`、`dsh-tool-pwsh`）把它收集进每次 shell 调用的环境，容器代码运行时把它交给每个 `run_code` 程序。内置 shell 事实（`DSH_HOME`、`DSH_SHELL=1`、`DSH_SESSION_ID`）归注册表自身所有；其他插件可以注册额外的可枚举事实，注册随插件纤维（fiber）释放，重复所有权或未声明的运行时键会响亮失败。
 
-包根导出 Cordis 插件约定（`name`、`inject`、`Config`、`apply`）以及 `ShellEnvRegistry` 服务类及其 contributor 类型；消费方在加载本插件后使用 `ctx.shellEnv`。
+包根导出 Cordis 插件约定（`name`、`inject`、`Config`、`apply`）以及 `ShellEnvRegistry` 服务类、`composeDshEnvironment` 内置组合函数及其类型；消费方在加载本插件后使用 `ctx.shellEnv`。
 
 ## Config
 
@@ -20,6 +20,8 @@
 每次前台与后台模型 shell 调用都会收到一份新收集的受信任 `DSH_*` 环境。`DSH_HOME` 是由 [`@deepseek-ai/dsh-home-paths`](../../util/home-paths/README.md) 解析的 Harness 主目录绝对路径（`dshHome` 配置，然后环境变量 `$DSH_HOME`，然后 `~/.dsh`），`DSH_SHELL=1` 标识受管理的子进程。带 agent（智能体）的调用额外收到 `DSH_SESSION_ID=agent.session.header.id`；当活动的持久化 seam 定位到 JSONL 工件时，它们还会收到 `DSH_SESSION_JSONL=<绝对目标路径>`。JSONL 路径只是位置提示：首次 flush 之前它可能不存在，也不一定包含当前缓冲中的轮次，并且它不是授权凭据。
 
 `ctx.shellEnv` 负责收集。其他插件可以注册一个受 effect 作用域约束的 contributor，带有稳定名称、已声明的键/描述以及 `resolve(execution: ToolExecution)`；重复所有权与未声明的运行时键会响亮失败，而 `list()` 只枚举声明、不执行 provider。Harness 内置键保留 `DSH_HOME`、`DSH_SHELL` 与 `DSH_SESSION_ID`；本插件的持久化翻译器通过读取与后端无关的 `sessionPersistence.locate()` seam 拥有 `DSH_SESSION_JSONL`。
+
+变量组的内置部分由 `composeDshEnvironment(facts)` 组装，那些键只在这一处被点名，`ctx.shellEnv` 通过两个入口把它交出去。`collect(execution)` 为一次 shell 工具调用渲染它，并叠加 contributor 变量。`collectSession()` 为本注册表手里没有 `ToolExecution` 的 harness 进程渲染它——也就是容器代码运行时的程序——会话取自 agent loop 为当前驱动链建立的 ambient agent-initiator 作用域：它既不读进程环境，也不询问 contributor，因此 initiator 边界之外、或 agent 服务被释放之后 `DSH_SESSION_ID` 缺席，而该路径上 `DSH_SESSION_JSONL` 缺席。导出 `composeDshEnvironment` 是为了让需要识别或断言该变量组的调用方直接组合它，而不是再抄一份键列表。
 
 ```ts
 import type { Context } from '@deepseek-ai/cordis'
@@ -40,7 +42,7 @@ export function apply(ctx: Context): void {
 
 ## Model Experience
 
-通过 shell 工具（`dsh-tool-bash`、`dsh-tool-pwsh`）间接产生影响；这些工具会把该注册表的受管 `DSH_*` 快照收集进每次 shell 工具调用。
+通过 shell 工具（`dsh-tool-bash`、`dsh-tool-pwsh`）间接产生影响；这些工具会把该注册表的受管 `DSH_*` 快照收集进每次 shell 工具调用。容器代码运行时也把同一份快照交给每个 `run_code` 程序，因此程序不必绕一趟 shell 就能读到沙箱的 `$DSH_*` 事实。
 
 #### KV Cache effect
 
@@ -49,3 +51,4 @@ export function apply(ctx: Context): void {
 ## Known Limitations and Deferred Work
 
 - **`list()` 只枚举 contributor 声明的变量** — 注册表自有的内置键（`DSH_HOME`、`DSH_SHELL`、`DSH_SESSION_ID`）不包含在内，因此诊断、prompt 或 UI 代码不得把 `list()` 当作完整的环境目录。
+- **contributor 变量只到达 shell 工具调用** — contributor 从 `ToolExecution` 解析，而 `collectSession()` 手里没有它，因此容器代码运行时的程序永远收不到 `DSH_SESSION_JSONL`；两个入口在内置变量组上是一致。

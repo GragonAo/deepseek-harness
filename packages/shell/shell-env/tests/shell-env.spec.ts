@@ -11,12 +11,22 @@ import { Context } from '@deepseek-ai/cordis'
 import { CallId } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
-import { ShellEnvRegistry } from '@deepseek-ai/dsh-shell-env'
+import { ShellEnvRegistry, composeDshEnvironment } from '@deepseek-ai/dsh-shell-env'
 import * as BashEnvPlugin from '@deepseek-ai/dsh-shell-env'
 
 const testToolSignal = new AbortController().signal
 
 afterEach(() => vi.unstubAllEnvs())
+
+/** The one field of an `Agent` these snapshots read: its session identity. */
+function agent(sessionId: string): Agent {
+  return { session: { header: { version: 0, id: sessionId, createdAt: 0 } } } as Agent
+}
+
+/** Install a stand-in agent registry whose ambient initiator reads as given. */
+function provideAgents(ctx: Context, currentInitiator: () => Agent | undefined): void {
+  ctx.provide('agents', { currentInitiator } as unknown as Context['agents'])
+}
 
 function execution(sessionId?: string): ToolExecution {
   return {
@@ -26,9 +36,7 @@ function execution(sessionId?: string): ToolExecution {
     rootCallId: CallId('bash-env-call'),
     name: 'bash',
     arguments: { command: 'true' },
-    ...(sessionId === undefined
-      ? {}
-      : { agent: { session: { header: { version: 0, id: sessionId, createdAt: 0 } } } as Agent }),
+    ...(sessionId === undefined ? {} : { agent: agent(sessionId) }),
   }
 }
 
@@ -234,5 +242,69 @@ describe('ShellEnvRegistry', () => {
     const ctx = new Context()
     await ctx.plugin(BashEnvPlugin)
     expect(ctx.shellEnv.collect(execution('sess-p'))).not.toHaveProperty('DSH_SESSION_JSONL')
+  })
+})
+
+describe('composeDshEnvironment', () => {
+  it('composes exactly the built-ins the shell path collects for the same facts', () => {
+    const registry = new ShellEnvRegistry(new Context(), { dshHome: './test-dsh-home' })
+    const facts = { dshHome: resolve('./test-dsh-home'), sessionId: 'session-a' }
+
+    expect(composeDshEnvironment(facts)).toEqual({
+      DSH_HOME: resolve('./test-dsh-home'),
+      DSH_SESSION_ID: 'session-a',
+      DSH_SHELL: '1',
+    })
+    expect(registry.collect(execution('session-a'))).toEqual(composeDshEnvironment(facts))
+  })
+
+  it('omits DSH_SESSION_ID for facts that carry no session', () => {
+    expect(composeDshEnvironment({ dshHome: './test-dsh-home' })).toEqual({
+      DSH_HOME: './test-dsh-home',
+      DSH_SHELL: '1',
+    })
+  })
+})
+
+describe('ShellEnvRegistry.collectSession', () => {
+  it('composes the same built-ins, with the session from the ambient initiator', () => {
+    const ctx = new Context()
+    const registry = new ShellEnvRegistry(ctx, { dshHome: './test-dsh-home' })
+    provideAgents(ctx, () => agent('ambient-session'))
+
+    expect(registry.collectSession()).toEqual(composeDshEnvironment({
+      dshHome: resolve('./test-dsh-home'),
+      sessionId: 'ambient-session',
+    }))
+  })
+
+  it('omits DSH_SESSION_ID without an agent service or an initiator boundary', () => {
+    const standalone = new ShellEnvRegistry(new Context(), { dshHome: './test-dsh-home' })
+    expect(standalone.collectSession()).toEqual({ DSH_HOME: resolve('./test-dsh-home'), DSH_SHELL: '1' })
+
+    const ctx = new Context()
+    const idle = new ShellEnvRegistry(ctx, { dshHome: './test-dsh-home' })
+    provideAgents(ctx, () => undefined)
+    expect(idle.collectSession()).not.toHaveProperty('DSH_SESSION_ID')
+  })
+
+  it('omits DSH_SESSION_ID when the ambient read rejects', () => {
+    const ctx = new Context()
+    const registry = new ShellEnvRegistry(ctx, { dshHome: './test-dsh-home' })
+    provideAgents(ctx, () => { throw new Error('agent registry is disposed') })
+
+    expect(registry.collectSession()).toEqual({ DSH_HOME: resolve('./test-dsh-home'), DSH_SHELL: '1' })
+  })
+
+  it('collects no contributor variables because the path holds no tool execution', async () => {
+    const ctx = new Context()
+    await ctx.plugin(BashEnvPlugin, { dshHome: './test-dsh-home' })
+    ctx.provide('sessionPersistence', {
+      locate: () => ({ kind: 'jsonl' as const, path: 'C:\\sessions\\s.jsonl' }),
+    })
+    provideAgents(ctx, () => agent('ambient-session'))
+
+    expect(ctx.shellEnv.collect(execution('ambient-session')).DSH_SESSION_JSONL).toBe('C:\\sessions\\s.jsonl')
+    expect(ctx.shellEnv.collectSession()).not.toHaveProperty('DSH_SESSION_JSONL')
   })
 })

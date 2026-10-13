@@ -10,6 +10,12 @@ The tenant container is the security boundary, not JavaScript. The program runs 
 
 The host bridge binds an ephemeral port on all interfaces and carries a per-run 256-bit token in its URL path, so only the run holding the URL can dispatch a binding. The `container-docker` provider publishes `--add-host host.docker.internal:host-gateway` so the container reaches the host gateway by that name; a Podman deployment points `config.hostBridge` at `host.containers.internal`.
 
+## Program environment
+
+The container exec carries only the sandbox's own facts: the environment the sandbox container was started with (the platform's identity variables), `DSH_CODE_BRIDGE` — this backend's per-run bridge URL — and the managed `DSH_*` group (`DSH_HOME`, `DSH_SHELL`, and `DSH_SESSION_ID` inside an agent's driver chain) composed by its sole owner, [`ctx.shellEnv`](../../shell/shell-env/README.md), through `collectSession()`. A `run_code` program therefore reads the same managed variables a `bash` call in that sandbox receives, and this runtime keeps no variable list of its own. The host's environment is never passed: the runtime reads `ctx.get('shellEnv')`, so a composition without the shell-env registry injects no managed group at all.
+
+The session variable comes from the ambient agent-initiator scope — the agent loop's authority for the current driver chain — never from the process environment, `DSH_*` inherited from the sandbox, or the request: `CodeRunRequest` carries no session. It is absent when no initiator boundary is active or once the agent service is disposed.
+
 ## Configuration
 
 | key | default | meaning |
@@ -30,4 +36,5 @@ The retained `run_code` result appends to the parent request and does not invali
 
 - Abort is best-effort: the container exec surface is one-shot, so aborting stops the host from waiting but does not hard-kill the in-container process (it is reaped with the idle container), and logs emitted after the abort are lost — unlike the worker-thread backend, which streams each log as it lands and terminates the worker.
 - The wall-clock budget is the only time budget: the container cannot meter the program's event-loop busy time the way the worker thread's `computeMs` does.
-- Captured stdout/stderr are bounded by the in-container budget, but the underlying container exec runner itself does not cap the raw stream; an escaped program that writes straight to the real file descriptor can still grow the host-side capture (shared with the bash/fs container tools).
+- Captured stdout/stderr are bounded by the in-container budget, and the container exec runner bounds the raw stream it captures too, per stream, keeping the tail and reporting the truncation; what stays outside both is output that never reaches those pipes — a program that reopens the container's own stdout writes into the container log the runtime collects, which the `run_code` result cannot show.
+- The managed group above is the built-in group only: contributor-owned variables such as `DSH_SESSION_JSONL` resolve from a shell tool execution, which a `run_code` call does not hold, so a program never receives them.

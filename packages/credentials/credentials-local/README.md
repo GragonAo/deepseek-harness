@@ -15,7 +15,7 @@ The launching environment wins because a per-run override (`DEEPSEEK_API_KEY=…
 
 Everything below it loses to the managed store, so a key written by the Models page takes effect immediately even when an older key sits in a `.env`. Those two layers still resolve when nothing is stored, and `describe()` names them `project-env` or `user-env` with `writable: true` — storing a key replaces them as the effective source.
 
-A multi-tenant deployment gives every tenant its own document: with `path` omitted the provider resolves `config.path ?? <tenant.dataRoot>/.credentials.yaml` from the ambient tenant at each call, so tenant A and tenant B never share a store, while a request outside any tenant scope (and the single-user CLI) keeps reading and writing `$DSH_HOME/.credentials.yaml`. An explicit `path` stays one fixed global document with no tenant scoping. Only the managed document is tenant-scoped — the inherited environment and the two `.env` fallback layers are the process's own, never a tenant's, and stay global.
+A partitioned deployment gives every partition its own document: with `path` omitted the provider resolves `config.path ?? <partition.dataRoot>/.credentials.yaml` from the ambient request partition at each call, so tenant A and tenant B never share a store, while a request outside any partition (and the single-partition CLI) keeps reading and writing `$DSH_HOME/.credentials.yaml`. An explicit `path` stays one fixed global document with no partitioning. Only the managed document is partition-scoped — the inherited environment and the two `.env` fallback layers are the process's own, never a tenant's, and stay global. The partition is read through [`@deepseek-ai/dsh-partition-scope`](../../core/partition-scope/README.md), so this package depends on no tenancy implementation.
 
 Under the product CLI, resolution reads the launcher's frozen [environment snapshot](../../util/launch-environment/README.md) rather than `process.env`: only the snapshot can say whether a value came from the launching shell or from a file. A composition the product CLI did not boot has the inherited environment as its only layer, which keeps embedders on the semantics they already had.
 
@@ -23,8 +23,8 @@ Under the product CLI, resolution reads the launcher's frozen [environment snaps
 
 | Field | Default | Meaning |
 |---|---|---|
-| `path` | `<tenant.dataRoot>/.credentials.yaml`, else `<harness home>/.credentials.yaml` | Credentials document location. |
-| `dshHome` | `$DSH_HOME` or `~/.dsh` | Harness home used when `path` is omitted and no tenant is in scope. |
+| `path` | `<partition.dataRoot>/.credentials.yaml`, else `<harness home>/.credentials.yaml` | Credentials document location. |
+| `dshHome` | `$DSH_HOME` or `~/.dsh` | Harness home used when `path` is omitted and no partition is ambient. |
 | `watch` | `true` | Hot-publish external edits. |
 | `debounceMs` | `100` | Watcher write-settle window. |
 

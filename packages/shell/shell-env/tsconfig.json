@@ -30,6 +30,9 @@
       "path": "../../session/session-persistence"
     },
     {
+      "path": "../../core/agent"
+    },
+    {
       "path": "../../runtime-diagnostics/invariants"
     }
   ]

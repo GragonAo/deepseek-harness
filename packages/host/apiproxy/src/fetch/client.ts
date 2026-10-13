@@ -62,15 +62,6 @@ import {
 } from '../api/credentials.schema.ts'
 import { llmDiscoverModelsValueSchema, llmModelsValueSchema, llmProvidersValueSchema } from '../api/llm.schema.ts'
 import {
-  tenantAdminListValueSchema,
-  tenantAdminMembersAddValueSchema,
-  tenantAdminMembersListValueSchema,
-  tenantAdminMembersRemoveValueSchema,
-  tenantAdminRecordValueSchema,
-  tenantAdminRemoveValueSchema,
-  tenantAdminUsersEnsureValueSchema,
-} from '../api/tenant-admin.schema.ts'
-import {
   subagentHistoryValueSchema,
   subagentInterruptValueSchema,
   subagentListValueSchema,
@@ -170,19 +161,6 @@ export interface IApiClient {
     models(payload: RequestPayload<'llm.models'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'llm.models'>>>
     discoverModels(payload: RequestPayload<'llm.discoverModels'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'llm.discoverModels'>>>
   }
-  tenantAdmin: {
-    list(payload: RequestPayload<'tenant.admin.list'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'tenant.admin.list'>>>
-    get(payload: RequestPayload<'tenant.admin.get'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'tenant.admin.get'>>>
-    create(payload: RequestPayload<'tenant.admin.create'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'tenant.admin.create'>>>
-    update(payload: RequestPayload<'tenant.admin.update'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'tenant.admin.update'>>>
-    enable(payload: RequestPayload<'tenant.admin.enable'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'tenant.admin.enable'>>>
-    disable(payload: RequestPayload<'tenant.admin.disable'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'tenant.admin.disable'>>>
-    remove(payload: RequestPayload<'tenant.admin.remove'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'tenant.admin.remove'>>>
-    membersList(payload: RequestPayload<'tenant.admin.members.list'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'tenant.admin.members.list'>>>
-    membersAdd(payload: RequestPayload<'tenant.admin.members.add'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'tenant.admin.members.add'>>>
-    membersRemove(payload: RequestPayload<'tenant.admin.members.remove'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'tenant.admin.members.remove'>>>
-    usersEnsure(payload: RequestPayload<'tenant.admin.users.ensure'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'tenant.admin.users.ensure'>>>
-  }
   /** client-response passthrough (rpcId is a backfill of the server-request's id — never minted here). */
   respond(message: ClientResponse, signal?: AbortSignal): Promise<RpcReceipt>
 }
@@ -244,17 +222,6 @@ export const UNARY_VALUE_SCHEMAS: { [K in keyof RpcMethodMap]: z.ZodType<Wire<Re
   'llm.providers': llmProvidersValueSchema,
   'llm.models': llmModelsValueSchema,
   'llm.discoverModels': llmDiscoverModelsValueSchema,
-  'tenant.admin.list': tenantAdminListValueSchema,
-  'tenant.admin.get': tenantAdminRecordValueSchema,
-  'tenant.admin.create': tenantAdminRecordValueSchema,
-  'tenant.admin.update': tenantAdminRecordValueSchema,
-  'tenant.admin.enable': tenantAdminRecordValueSchema,
-  'tenant.admin.disable': tenantAdminRecordValueSchema,
-  'tenant.admin.remove': tenantAdminRemoveValueSchema,
-  'tenant.admin.members.list': tenantAdminMembersListValueSchema,
-  'tenant.admin.members.add': tenantAdminMembersAddValueSchema,
-  'tenant.admin.members.remove': tenantAdminMembersRemoveValueSchema,
-  'tenant.admin.users.ensure': tenantAdminUsersEnsureValueSchema,
 }
 
 /** Default timeout for bounded unary calls (rpc-compare 2026-07-19: a hung host must not leave callers pending forever). */
@@ -531,20 +498,6 @@ export abstract class AbstractApiClient implements IApiClient {
     providers: (payload, signal) => this.callUnary('llm.providers', payload, signal),
     models: (payload, signal) => this.callUnary('llm.models', payload, signal),
     discoverModels: (payload, signal) => this.callUnary('llm.discoverModels', payload, signal),
-  }
-
-  readonly tenantAdmin: IApiClient['tenantAdmin'] = {
-    list: (payload, signal) => this.callUnary('tenant.admin.list', payload, signal),
-    get: (payload, signal) => this.callUnary('tenant.admin.get', payload, signal),
-    create: (payload, signal) => this.callUnary('tenant.admin.create', payload, signal),
-    update: (payload, signal) => this.callUnary('tenant.admin.update', payload, signal),
-    enable: (payload, signal) => this.callUnary('tenant.admin.enable', payload, signal),
-    disable: (payload, signal) => this.callUnary('tenant.admin.disable', payload, signal),
-    remove: (payload, signal) => this.callUnary('tenant.admin.remove', payload, signal),
-    membersList: (payload, signal) => this.callUnary('tenant.admin.members.list', payload, signal),
-    membersAdd: (payload, signal) => this.callUnary('tenant.admin.members.add', payload, signal),
-    membersRemove: (payload, signal) => this.callUnary('tenant.admin.members.remove', payload, signal),
-    usersEnsure: (payload, signal) => this.callUnary('tenant.admin.users.ensure', payload, signal),
   }
 
   readonly events: IApiClient['events'] = {

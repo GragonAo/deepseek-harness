@@ -5,7 +5,9 @@
  * HTTP surface. The container holds only the tenant's bind-mounted workspace
  * and tools, so model code cannot touch host files, environment, or secrets
  * even if it escapes the program wrapper: isolation is the container boundary,
- * not JavaScript.
+ * not JavaScript. The program's process inherits the sandbox's own environment
+ * — the platform's identity variables and the managed `DSH_*` group composed by
+ * `ctx.shellEnv` — and nothing from the harness process.
  * @module @deepseek-ai/dsh-code-runtime-container
  */
 
@@ -16,6 +18,7 @@ import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { CodeRuntime, DUNDER_MEMBER, PORTABLE_RESERVED_WORDS, RESERVED_BINDING_GLOBALS, RESERVED_ERROR_MEMBERS } from '@deepseek-ai/dsh-code-runtime'
 import type { CodeBindingNamespace, CodeRunFailure, CodeRunRequest, CodeRunResult } from '@deepseek-ai/dsh-code-runtime'
 import type { ContainerCommandResult } from '@deepseek-ai/dsh-container'
+import type {} from '@deepseek-ai/dsh-shell-env'
 import { createBindingBridge } from './bridge.ts'
 import { CONTAINER_BOOTSTRAP } from './bootstrap.ts'
 import type { ContainerBootData, ContainerBootNamespace, ContainerResultFrame } from './bootstrap.ts'
@@ -171,9 +174,14 @@ export class ContainerCodeRuntime extends CodeRuntime {
 
     let result: ContainerCommandResult
     try {
+      // Managed `DSH_*` facts come from their sole owner, `ctx.shellEnv`, so this
+      // program and a `bash` call in the same sandbox see one group. `ctx.get`
+      // keeps that dependency optional: a composition without the registry
+      // injects no managed group, and `DSH_CODE_BRIDGE` stays this backend's own.
+      const dshEnv = this.ctx.get('shellEnv')?.collectSession() ?? {}
       result = await this.ctx.containerRuntime.exec('node', ['--input-type=module', '-e', CONTAINER_BOOTSTRAP], {
         stdin: JSON.stringify(bootData),
-        env: { DSH_CODE_BRIDGE: `http://${this.config.hostBridge}:${bridge.port}/${bridge.token}` },
+        env: { ...dshEnv, DSH_CODE_BRIDGE: `http://${this.config.hostBridge}:${bridge.port}/${bridge.token}` },
         signal: controller.signal,
       })
     } catch (error: unknown) {

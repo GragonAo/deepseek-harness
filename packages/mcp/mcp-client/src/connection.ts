@@ -20,6 +20,8 @@ import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/typ
 import type { Context } from '@deepseek-ai/cordis'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { createTransport } from './transport.ts'
+import { createToolCallLimiter } from './concurrency.ts'
+import type { ResolvedToolConcurrencyPolicy, ToolConcurrencyInternals } from './concurrency.ts'
 import { syncTools } from './tools.ts'
 import type { ToolBridgeOptions, ToolDisposers } from './tools.ts'
 import type { Config } from './index.ts'
@@ -118,14 +120,28 @@ export interface ConnectionHandle {
  * @param ctx - Cordis context providing the `tools` registry and logger.
  * @param config - Resolved plugin config selecting the transport and server identity.
  * @param policy - Resolved reconnect policy from {@link resolveReconnectPolicy}.
+ * @param concurrency - Resolved tool-call concurrency policy from
+ *   {@link resolveToolConcurrencyPolicy}; its cap becomes this one server's
+ *   limiter, which every generation shares so a reconnect keeps the cap adaptive
+ *   mode already learned rather than restarting the learning.
+ * @param internals - Non-serializable hooks; only tests pass them.
  * @returns Handle with a `ready` promise for startup-await and a `dispose` for teardown.
  */
-export function startConnection(ctx: Context, config: Config, policy: ResolvedReconnectPolicy): ConnectionHandle {
+export function startConnection(
+  ctx: Context,
+  config: Config,
+  policy: ResolvedReconnectPolicy,
+  concurrency: ResolvedToolConcurrencyPolicy,
+  internals: ToolConcurrencyInternals = {},
+): ConnectionHandle {
   const label = `mcp-client(${config.serverName})`
+  const limiter = createToolCallLimiter(concurrency, internals)
   const opts: ToolBridgeOptions = {
     registrationFailure: 'contain',
     serverName: config.serverName,
     toolCallTimeoutMs: config.toolCallTimeoutMs,
+    concurrency,
+    limiter,
   }
   // The initial sync uses 'throw' when failOnStartupError is configured, so
   // a registration conflict propagates to the startup-await path. Re-syncs
@@ -326,6 +342,11 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
     ready,
     async dispose(): Promise<void> {
       disposed = true
+      // Reject queued calls before closing the client: they have not reached
+      // the server, so waiting for a slot this generation will never hand over
+      // would strand them. Granted slots are untouched — their requests are
+      // already on the wire and fail through the transport instead.
+      limiter.close(new Error(`${label}: the connection was disposed before this call reached the server`))
       if (reconnectTimer !== undefined) {
         clearTimeout(reconnectTimer)
         reconnectTimer = undefined

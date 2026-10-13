@@ -323,6 +323,25 @@ describe('config validation', () => {
       graceMs: MAX_TIMER_DELAY_MS + 1,
     })).rejects.toThrow(`tool-fs-search: graceMs must be no greater than ${MAX_TIMER_DELAY_MS}`)
   })
+
+  it('rejects a blank ripgrepPath at load but leaves an unsupported path to the execution side', async () => {
+    const reject = new Context()
+    await reject.plugin(SystemPrompt)
+    await reject.plugin(ToolRuntime)
+    await reject.plugin(FakeSubprocess)
+    // Emptiness is knowable here; whether a path is usable is a fact of the
+    // execution side's filesystem, so any non-blank value loads.
+    await expect(reject.plugin(ToolFsSearch, { ...DEFAULT_CONFIG, ripgrepPath: '  ' }))
+      .rejects.toThrow('tool-fs-search: ripgrepPath must be a non-empty path when set')
+
+    const accept = new Context()
+    await accept.plugin(SystemPrompt)
+    await accept.plugin(ToolRuntime)
+    await accept.plugin(FakeSubprocess)
+    const fiber = await accept.plugin(ToolFsSearch, { ...DEFAULT_CONFIG, ripgrepPath: '/opt/absent/rg' })
+    expect(accept.tools.schemas().map(s => s.name).sort()).toEqual(['glob', 'grep'])
+    await fiber.dispose()
+  })
 })
 
 describe('command construction (plain argv)', () => {
@@ -539,6 +558,49 @@ describe('workdir derivation and signal forwarding', () => {
     expect(result.isError).toBe(true)
     expect(result.error).toMatchObject({ info: { name: 'SearchError', code: 'SEARCH_FAILED' } })
     expect(text(result)).toContain('no collected output streams')
+  })
+})
+
+describe('configured ripgrep path', () => {
+  it('spawns the configured path for both tools', async () => {
+    // The deployment's path names a binary in the EXECUTION side's filesystem:
+    // a container holds no path this process resolved, so the packaged one is
+    // unusable there and the config value is what every spawn uses.
+    const { ctx, subprocess } = await setup({ config: { ripgrepPath: '/usr/local/bin/rg' } })
+    subprocess.handler = () => runResult('a.ts\n')
+    await call(ctx, 'glob', { pattern: '*' })
+    expect(subprocess.spawns[0]?.argv[0]).toBe('/usr/local/bin/rg')
+    subprocess.handler = () => runResult('')
+    await call(ctx, 'grep', { pattern: 'x' })
+    expect(subprocess.spawns[1]?.argv[0]).toBe('/usr/local/bin/rg')
+  })
+
+  it('keeps spawning the packaged binary when the config omits ripgrepPath', async () => {
+    const { ctx, subprocess } = await setup()
+    subprocess.handler = () => runResult('a.ts\n')
+    await call(ctx, 'glob', { pattern: '*' })
+    expect(subprocess.spawns[0]?.argv[0]).toBe(rgPath)
+  })
+
+  it('fails as SEARCH_FAILED naming the configured path when it cannot launch', async () => {
+    const { ctx, subprocess } = await setup({ config: { ripgrepPath: '/usr/local/bin/rg' } })
+    subprocess.handler = () => { throw new Error('spawn ENOENT') }
+    const result = await call(ctx, 'grep', { pattern: 'x' })
+    expect(result.isError).toBe(true)
+    expect(result.error).toMatchObject({ info: { name: 'SearchError', code: 'SEARCH_FAILED' } })
+    // The message names the path, which is the only way a deployment can tell
+    // its own binary from the packaged one in a `SEARCH_FAILED` report.
+    expect(text(result)).toContain('ripgrep launch failed at /usr/local/bin/rg')
+  })
+
+  it('keeps the unconfigured launch-failure message free of a path', async () => {
+    // A co-located deployment's failure stays what it was: the packaged path is
+    // not the deployment's choice, so reporting it would only add noise.
+    const { ctx, subprocess } = await setup()
+    subprocess.handler = () => { throw new Error('spawn ENOENT') }
+    const result = await call(ctx, 'grep', { pattern: 'x' })
+    expect(text(result)).toContain('(ripgrep launch failed)')
+    expect(text(result)).not.toContain('ripgrep launch failed at')
   })
 })
 

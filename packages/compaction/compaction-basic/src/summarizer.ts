@@ -21,6 +21,9 @@ interface SummaryConfig {
 const SUMMARY_OPEN_TAG = '<compacted-summary>'
 const SUMMARY_CLOSE_TAG = '</compacted-summary>'
 
+/** Marks a summary that ended at the output budget instead of at its own end. */
+const SUMMARY_TRUNCATION_CODE = 'MAX_TOKENS'
+
 /**
  * The summarization directive, delivered as the FINAL user message after the
  * replayed conversation rather than as a distinct summarizer system prompt.
@@ -194,6 +197,21 @@ export function frameSummary(summary: readonly ContentBlock[]): ContentBlock[] {
   ]
 }
 
+/**
+ * Whether a summarization failure is the output budget rather than the conversation.
+ *
+ * A truncated summary is discarded whole, so a caller that retries must change
+ * something the outcome depends on. Retrying the identical region, budget, and
+ * model reproduces the identical truncation, which is what makes this
+ * distinguishable from a failure a plain retry could survive.
+ * @param error - failure from the summarizer or from the compaction transaction carrying it.
+ * @returns true when the failure is an Error carrying the truncation code.
+ */
+export function isSummaryTruncation(error: unknown): error is Error & { code: string } {
+  return error instanceof Error
+    && (error as { code?: unknown }).code === SUMMARY_TRUNCATION_CODE
+}
+
 /** Map a terminal summarization finish to its fail-closed error. */
 function finishError(finish: FinishReason): Error | undefined {
   switch (finish.kind) {
@@ -205,7 +223,7 @@ function finishError(finish: FinishReason): Error | undefined {
     }
     case 'max-tokens': {
       const error = new Error('summarization truncated at the token cap (incomplete checkpoint)') as Error & { code?: string }
-      error.code = 'MAX_TOKENS'
+      error.code = SUMMARY_TRUNCATION_CODE
       return error
     }
     default:

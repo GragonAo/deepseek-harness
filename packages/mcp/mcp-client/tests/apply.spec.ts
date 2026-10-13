@@ -151,6 +151,115 @@ describe('mcp-client plugin module exports', () => {
       reconnect: { maxAttempts: 0 },
     } as never)).toThrow()
   })
+
+  it('Config schema materializes tool-concurrency defaults and merges partial overrides', () => {
+    const defaults = {
+      policy: 'annotations',
+      maxConcurrentCalls: 10,
+      exclusiveTools: [],
+      retryTools: [],
+      mode: 'adaptive',
+      decreaseFactor: 0.5,
+      recoveryStep: 1,
+      recoveryQuietMs: 2_000,
+      countTimeouts: true,
+      retryAttempts: 0,
+      retryBaseDelayMs: 200,
+      retryJitterRatio: 0.2,
+    }
+    const omitted = ConfigSchema({
+      transport: 'streamable-http',
+      serverName: 'srv',
+      url: 'http://localhost:3000/mcp',
+    } as never)
+    expect(omitted.toolConcurrency).toEqual(defaults)
+
+    const partial = ConfigSchema({
+      transport: 'streamable-http',
+      serverName: 'srv',
+      url: 'http://localhost:3000/mcp',
+      toolConcurrency: { policy: 'exclusive' },
+    } as never)
+    expect(partial.toolConcurrency).toEqual({ ...defaults, policy: 'exclusive' })
+
+    // A list passes through as written: Schemastery's array default would erase
+    // the difference between it and the omitted case, so the resolver receives
+    // exactly what the deployment configured.
+    const listed = ConfigSchema({
+      transport: 'streamable-http',
+      serverName: 'srv',
+      url: 'http://localhost:3000/mcp',
+      toolConcurrency: {
+        policy: 'parallel',
+        maxConcurrentCalls: 20,
+        exclusiveTools: ['write', 'delete'],
+        retryTools: ['read'],
+      },
+    } as never)
+    expect(listed.toolConcurrency).toEqual({
+      ...defaults,
+      policy: 'parallel',
+      maxConcurrentCalls: 20,
+      exclusiveTools: ['write', 'delete'],
+      retryTools: ['read'],
+    })
+
+    // The adaptive knobs keep the values the deployment wrote, and `fixed` is a
+    // value it can write.
+    const adaptive = ConfigSchema({
+      transport: 'streamable-http',
+      serverName: 'srv',
+      url: 'http://localhost:3000/mcp',
+      toolConcurrency: {
+        mode: 'fixed',
+        decreaseFactor: 0.25,
+        recoveryStep: 2,
+        recoveryQuietMs: 250,
+        countTimeouts: false,
+        retryAttempts: 3,
+        retryBaseDelayMs: 50,
+        retryJitterRatio: 0,
+      },
+    } as never)
+    expect(adaptive.toolConcurrency).toEqual({
+      ...defaults,
+      mode: 'fixed',
+      decreaseFactor: 0.25,
+      recoveryStep: 2,
+      recoveryQuietMs: 250,
+      countTimeouts: false,
+      retryAttempts: 3,
+      retryBaseDelayMs: 50,
+      retryJitterRatio: 0,
+    })
+  })
+
+  it('Config schema rejects an invalid tool-concurrency block', () => {
+    for (const toolConcurrency of [
+      { policy: 'trusting' },
+      { maxConcurrentCalls: 0 },
+      { maxConcurrentCalls: 1.5 },
+      { exclusiveTools: [1] },
+      { retryTools: [1] },
+      { mode: 'elastic' },
+      // The open 0..1 interval is the resolver's judgement: the schema can only
+      // express an inclusive bound, and it rejects what it can.
+      { decreaseFactor: 1.5 },
+      { recoveryStep: 0 },
+      { recoveryQuietMs: 0 },
+      { countTimeouts: 'yes' },
+      { retryAttempts: -1 },
+      { retryBaseDelayMs: 0 },
+      { retryJitterRatio: 1.5 },
+    ]) {
+      expect(() => ConfigSchema({
+        transport: 'stdio',
+        serverName: 'srv',
+        command: 'echo',
+        toolConcurrency,
+      } as never)).toThrow()
+    }
+  })
 })
 
 describe('apply (plugin lifecycle)', () => {

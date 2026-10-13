@@ -107,7 +107,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     methods: [
       {
         signature: 'async fetch(request: Request): Promise<Response>',
-        description: 'Authenticate one request and answer it through the shared gateway under the resolved tenant\'s authority. Authentication and tenant resolution fail closed before any method runs.',
+        description: 'Authenticate one request and answer it through the shared gateway under the resolved tenant\'s authority. Authentication, tenant resolution, and membership fail closed before any method runs, with no exception for an administrative token: tenant administration is served by `@deepseek-ai/dsh-tenant-admin-http` at its own prefix.',
         parameters: [{ name: 'request', description: 'the incoming Fetch request (unary RPC or SSE channel).' }],
         returns: 'the gateway\'s response, or a 401/403/500 fail-closed rejection.',
       },
@@ -599,6 +599,13 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [{ name: 'command', description: 'the executable inside the container.' }, { name: 'args', description: 'positional arguments (never shell-interpreted here).' }, { name: 'opts', description: 'optional stdin feed and cancellation.' }],
         returns: 'the command\'s exit code and captured stdout/stderr.',
         throws: ['`TenantError` code `NO_TENANT_IN_SCOPE` outside an authenticated request.'],
+      },
+      {
+        signature: 'abstract openPty(options: ContainerPtyOptions): Promise<ContainerPtySession>',
+        description: 'Open one interactive session in the ambient tenant\'s container, over a terminal allocated by the container runtime itself.\n\n`exec` cannot serve this: it captures a completed command\'s streams and has no way to keep stdin open, to size a terminal, or to signal a process that is still running. A session opened here is live until it is closed or its process ends, and it outlives the call that opened it.',
+        parameters: [{ name: 'options', description: 'command line, terminal size, retained-output bound, cancellation.' }],
+        returns: 'a live session holding the returned terminal.',
+        throws: ['`TenantError` code `NO_TENANT_IN_SCOPE` outside an authenticated request, and the provider\'s own failure when the container cannot be reached or the command never took over the terminal.'],
       },
     ],
   },
@@ -1608,10 +1615,44 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'an immutable environment overlay containing built-ins and current contributions.',
       },
       {
+        signature: 'collectSession(): DshEnvironment',
+        description: 'Build the trusted `DSH_*` snapshot for one harness process started outside the model shell path — the container code runtime, which runs a `run_code` program in the tenant sandbox — so both entry points into that sandbox inject the group composeDshEnvironment owns instead of two subsets.\n\nBuilt-ins only: a BashEnvContributor resolves from a ToolExecution, which this path has none of, so contributor-owned variables (`DSH_SESSION_JSONL`) stay absent here.\n\nThe session comes from the ambient agent-initiator scope — the authority the agent loop establishes for the current driver chain — never from the process environment. Outside that boundary, or once the agent service is disposed, the variable is absent rather than guessed.',
+        parameters: [],
+        returns: 'an immutable environment overlay containing the built-ins.',
+      },
+      {
         signature: 'list(): BashEnvVariableInfo[]',
         description: 'Enumerate plugin-contributed variables without executing their resolvers.',
         parameters: [],
         returns: 'declarations sorted by environment variable name.',
+      },
+    ],
+  },
+  {
+    key: 'skillInstall',
+    summary: '`ctx.skillInstall` service: installs, replaces, and removes skill bundles in an ambient tier.',
+    description: '`ctx.skillInstall` service: installs, replaces, and removes skill bundles in an ambient tier.',
+    methods: [
+      {
+        signature: 'async install(request: SkillInstallRequest): Promise<SkillInstallResult>',
+        description: 'Install one skill bundle into an ambient tier, replacing any existing skill of the same name when the request allows it. The bundle is validated in full before the tier directory changes at all, and the refreshed catalog is read afterwards so the result reports whether the skill is now discoverable.',
+        parameters: [{ name: 'request', description: 'tier, zip bytes, and whether replacement is allowed.' }],
+        returns: 'the installed skill and whether the refreshed catalog lists it.',
+        throws: ['SkillInstallError when the tier, the archive, or the skill document is refused.'],
+      },
+      {
+        signature: 'async remove(request: SkillRemoveRequest): Promise<SkillRemoveResult>',
+        description: 'Remove one skill from an ambient tier, accepting either its frontmatter name or the directory name holding it, and refresh every cached catalog.',
+        parameters: [{ name: 'request', description: 'tier and the skill to remove.' }],
+        returns: 'the removed directory and whether the refreshed catalog still lists the name.',
+        throws: ['SkillInstallError when the tier is unavailable, the skill is absent, or two directories claim the name.'],
+      },
+      {
+        signature: 'async list(request: SkillListRequest): Promise<SkillTierListing>',
+        description: 'List one tier directory with each entry\'s loadability, so a skill placed by hand is reported with the coded reasons it never reaches the catalog.',
+        parameters: [{ name: 'request', description: 'tier to inspect.' }],
+        returns: 'the tier directory and its entries.',
+        throws: ['SkillInstallError when the tier is unavailable.'],
       },
     ],
   },
@@ -1643,6 +1684,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Observe the current invocation-neutral catalog and whether discovery completed within a stable revision. Incomplete observations are never cached, allowing consumers to retain last-good state and retry on their next request boundary.',
         parameters: [{ name: 'options', description: 'view options; `scope` selects the viewing agent\'s layers, `cwd` selects project roots, and `signal` cancels discovery.' }],
         returns: 'sorted summaries plus discovery-completeness state.',
+      },
+      {
+        signature: 'refresh(): SkillRefreshReport',
+        description: 'Drop every completed catalog so the next read re-discovers from every provider, and notify catalog observers. Any mutation of a provider\'s backing store calls this once instead of pushing per-provider notifications: providers are re-asked on the next read, so discovery results that were cached before the mutation can never be served again. The call is synchronous and touches no provider, so a caller holding the mutation\'s own completion guarantee does not wait on discovery.',
+        parameters: [],
+        returns: 'the catalog revision now in effect; entries cached under any earlier revision are gone.',
       },
       {
         signature: 'async get(name: string, options: SkillViewOptions = {}): Promise<SkillDefinition | undefined>',
@@ -1702,7 +1749,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'get(name: string): DomainImpl | undefined',
-        description: 'Look up an open domain by name for the ambient tenant, untyped. Diagnostic surface (the package invariant cross-checks change events against live domain state); typed consumers hold the handle returned by open.',
+        description: 'Look up an open domain by name for the ambient partition, untyped. Diagnostic surface (the package invariant cross-checks change events against live domain state); typed consumers hold the handle returned by open.',
         parameters: [{ name: 'name', description: 'Domain name.' }],
         returns: 'the open domain runtime, or `undefined` when not open.',
       },
@@ -1948,6 +1995,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'tenantAdminHttp',
+    summary: 'Tenant-administration carrier.',
+    description: 'Tenant-administration carrier. Load it beside `ctx.tenantAuth` and `ctx.tenantAdmin`; it registers its `/admin` prefix route and, unless disabled, its wire reference.',
+    methods: [],
+  },
+  {
     key: 'tenantAuth',
     summary: 'Abstract tenant authenticator (`ctx.tenantAuth`).',
     description: 'Abstract tenant authenticator (`ctx.tenantAuth`). Subclass, implement authenticate, and load the subclass as a plugin.',
@@ -1962,15 +2015,23 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
-    key: 'tenantHttpApi',
-    summary: 'Stateless tenant HTTP API registered as `ctx.tenantHttpApi`.',
-    description: 'Stateless tenant HTTP API registered as `ctx.tenantHttpApi`.',
+    key: 'tenantQuestions',
+    summary: 'Tenant question channel: the user-questions provider a multi-tenant deployment mounts, plus the business-plane methods that answer it.',
+    description: 'Tenant question channel: the user-questions provider a multi-tenant deployment mounts, plus the business-plane methods that answer it.\n\nIt owns one ask\'s whole lifecycle: this service appends the audit pair, holds the pending ask, and settles it — the first of answer, deadline, abort, or disposal to claim an ask wins, and every other path then finds no ask.',
     methods: [
       {
-        signature: 'register(operation: TenantOperation): () => void',
-        description: 'Register the single request operation and its HTTP route.',
-        parameters: [{ name: 'operation', description: 'the tenant-scoped request operation.' }],
-        returns: 'the disposer removing both the operation and its route.',
+        signature: 'list(): TenantPendingQuestion[]',
+        description: 'The asks the ambient subject may still answer, oldest first.\n\nWire method `tenantQuestion.list`: `POST /api/tenantQuestion.list` with an empty payload. It is the recovery path for a business subscriber that missed the `user-question/asked` event — the durable record of what was asked is the session log, not this table.',
+        parameters: [],
+        returns: 'one view per live ask of the ambient (tenant, subject); questions a different subject owns are never listed.',
+        throws: ['{TenantError} `NO_TENANT_IN_SCOPE` or `NO_USER_IN_SCOPE` outside a request that proved both (the carrier enters both before calling this).'],
+      },
+      {
+        signature: 'async answer(payload: unknown): Promise<TenantQuestionAnswerReceipt>',
+        description: 'Accept one answer and wake the tool call that asked.\n\nWire method `tenantQuestion.answer`: `POST /api/tenantQuestion.answer` with the payload `{ sessionId, questionId, answer }`, where `answer` is `{ answers: [{ id, selected, custom? }] }` carrying one item per question of that ask. The payload is accepted only when it names an ask still waiting for the ambient (tenant, subject) in that same session, and when every item answers one of that ask\'s questions with labels the question itself offered — so a stale id, another subject\'s question, or another session\'s ask cannot be answered here.',
+        parameters: [{ name: 'payload', description: 'the request payload, unvalidated: which answers are acceptable depends on the ambient subject\'s live asks, so the schema is built per call rather than declared.' }],
+        returns: 'the ask that was resolved and the session whose tool call it woke.',
+        throws: ['{ZodError} when the payload names no answerable ask, or its answer does not answer that ask (the carrier answers `bad-request` with the issues).', 'when the `user-question/decided` append fails: an answer is reported accepted only once its resolution is logged.'],
       },
     ],
   },
@@ -2439,7 +2500,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
   {
     key: 'workspaceRegistry',
     summary: 'Durable workspace registry.',
-    description: 'Durable workspace registry. Startup waits for `sessionPersistence`, builds one canonical-cwd header index, and completes the one-time history bootstrap before the service becomes active. The persistence dependency is mandatory so an unavailable peer can never be mistaken for an empty history and commit the initialized marker. Every partition\'s state is keyed by tenant id (`undefined` for the single-user partition); see the module JSDoc for the multi-tenant lazy/tenant-switch contract.',
+    description: 'Durable workspace registry. Startup waits for `sessionPersistence`, builds one canonical-cwd header index, and completes the one-time history bootstrap before the service becomes active. The persistence dependency is mandatory so an unavailable peer can never be mistaken for an empty history and commit the initialized marker. Every partition\'s state is keyed by its request-partition key (`undefined` for the partitionless state); see the module JSDoc for the partitioned lazy/partition-switch contract.',
     methods: [
       {
         signature: 'async create(path: string, title?: string): Promise<Workspace>',
@@ -2449,13 +2510,13 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'get(id: WorkspaceId): Workspace | undefined',
-        description: 'Look up a workspace by id for the ambient tenant. Uninitialized partitions serve `undefined` (no cross-tenant leak).',
+        description: 'Look up a workspace by id for the ambient request partition. Uninitialized partitions serve `undefined` (no cross-partition leak).',
         parameters: [{ name: 'id', description: 'Workspace id.' }],
         returns: 'the workspace, or `undefined` when unknown or uninitialized.',
       },
       {
         signature: 'list(): Workspace[]',
-        description: 'Synchronous workspace projection for the ambient tenant in durable registry order. An uninitialized partition (multi-tenant boot, or a tenant whose domain has not yet been opened) projects as empty rather than failing. Every entity\'s `sessionIds` getter is already filtered by the startup/live canonical-cwd header index; this method performs no persistence reads.',
+        description: 'Synchronous workspace projection for the ambient request partition in durable registry order. An uninitialized partition (partitioned boot, or a partition whose domain has not yet been opened) projects as empty rather than failing. Every entity\'s `sessionIds` getter is already filtered by the startup/live canonical-cwd header index; this method performs no persistence reads.',
         parameters: [],
         returns: 'a fresh ordered array of workspace entities.',
       },
@@ -3163,11 +3224,35 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ContainerCommandResult',
-    declaration: 'export interface ContainerCommandResult {\n    exitCode: number;\n    stdout: string;\n    stderr: string;\n}',
+    declaration: 'export interface ContainerCommandResult {\n    exitCode: number;\n    stdout: string;\n    stderr: string;\n    stdoutTruncated?: boolean;\n    stderrTruncated?: boolean;\n}',
   },
   {
     name: 'ContainerExecOptions',
     declaration: 'export interface ContainerExecOptions {\n    stdin?: string;\n    cwd?: string;\n    env?: Readonly<Record<string, string>>;\n    signal?: AbortSignal;\n}',
+  },
+  {
+    name: 'ContainerPtyForeground',
+    declaration: 'export interface ContainerPtyForeground {\n    pgid: number;\n}',
+  },
+  {
+    name: 'ContainerPtyOptions',
+    declaration: 'export interface ContainerPtyOptions {\n    command: string;\n    args?: readonly string[];\n    rows: number;\n    cols: number;\n    maxOutputBytes: number;\n    disposeGraceMs: number;\n    signal?: AbortSignal;\n}',
+  },
+  {
+    name: 'ContainerPtyOutcome',
+    declaration: 'export interface ContainerPtyOutcome {\n    exitCode: number | null;\n    signal: NodeJS.Signals | null;\n}',
+  },
+  {
+    name: 'ContainerPtyRead',
+    declaration: 'export interface ContainerPtyRead {\n    data: string;\n    truncated: boolean;\n}',
+  },
+  {
+    name: 'ContainerPtySession',
+    declaration: 'export interface ContainerPtySession {\n    readonly pid: number;\n    readonly done: Promise<ContainerPtyOutcome>;\n    read(): ContainerPtyRead;\n    write(data: string): Promise<void>;\n    foreground(): Promise<ContainerPtyForeground | undefined>;\n    signal(signal: ContainerPtySignal): Promise<number>;\n    close(reason: string): Promise<void>;\n}',
+  },
+  {
+    name: 'ContainerPtySignal',
+    declaration: 'export type ContainerPtySignal = \'SIGINT\' | \'SIGTERM\' | \'SIGKILL\' | \'SIGTSTP\' | \'SIGHUP\';',
   },
   {
     name: 'ContentBlockMap',
@@ -4394,8 +4479,28 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface SkillDefinition extends SkillSummary {\n    readonly content: string;\n    readonly path?: string;\n    readonly metadata?: Readonly<Record<string, unknown>>;\n}',
   },
   {
+    name: 'SkillDocumentIssue',
+    declaration: 'export interface SkillDocumentIssue {\n    readonly code: SkillDocumentIssueCode;\n    readonly message: string;\n    readonly line?: number;\n}',
+  },
+  {
+    name: 'SkillDocumentIssueCode',
+    declaration: 'export type SkillDocumentIssueCode = \'frontmatter-missing\' | \'frontmatter-unterminated\' | \'frontmatter-invalid-yaml\' | \'frontmatter-not-mapping\' | \'name-missing\' | \'name-invalid\' | \'description-missing\' | \'unsupported-field\' | \'field-not-boolean\';',
+  },
+  {
+    name: 'SkillInstallRequest',
+    declaration: 'export interface SkillInstallRequest {\n    readonly tier: SkillTierKind;\n    readonly bundle: Uint8Array;\n    readonly replace?: boolean;\n    readonly signal?: AbortSignal | undefined;\n}',
+  },
+  {
+    name: 'SkillInstallResult',
+    declaration: 'export interface SkillInstallResult {\n    readonly tier: SkillTierKind;\n    readonly name: string;\n    readonly directory: string;\n    readonly replaced: boolean;\n    readonly files: readonly string[];\n    readonly visible: boolean;\n}',
+  },
+  {
     name: 'SkillInvocationPolicy',
     declaration: 'export interface SkillInvocationPolicy {\n    readonly modelInvocable: boolean;\n    readonly userInvocable: boolean;\n}',
+  },
+  {
+    name: 'SkillListRequest',
+    declaration: 'export interface SkillListRequest {\n    readonly tier: SkillTierKind;\n    readonly signal?: AbortSignal | undefined;\n}',
   },
   {
     name: 'SkillLookupOptions',
@@ -4414,8 +4519,20 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface SkillProviderObservation {\n    readonly candidates: readonly SkillCandidate[];\n    readonly complete: boolean;\n}',
   },
   {
+    name: 'SkillRefreshReport',
+    declaration: 'export interface SkillRefreshReport {\n    readonly revision: number;\n}',
+  },
+  {
     name: 'SkillRegistration',
     declaration: 'export type SkillRegistration = Omit<SkillDefinition, \'invocation\' | \'provider\'> & {\n    readonly invocation?: SkillInvocationPolicy;\n    readonly provider?: string;\n};',
+  },
+  {
+    name: 'SkillRemoveRequest',
+    declaration: 'export interface SkillRemoveRequest {\n    readonly tier: SkillTierKind;\n    readonly name: string;\n    readonly signal?: AbortSignal | undefined;\n}',
+  },
+  {
+    name: 'SkillRemoveResult',
+    declaration: 'export interface SkillRemoveResult {\n    readonly tier: SkillTierKind;\n    readonly name: string;\n    readonly directory: string;\n    readonly visible: boolean;\n}',
   },
   {
     name: 'SkillResourceBase',
@@ -4428,6 +4545,18 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SkillSummary',
     declaration: 'export interface SkillSummary {\n    readonly name: string;\n    readonly description: string;\n    readonly whenToUse?: string;\n    readonly invocation: SkillInvocationPolicy;\n    readonly source: SkillSource;\n    readonly provider: string;\n    readonly resourceBase?: SkillResourceBase;\n}',
+  },
+  {
+    name: 'SkillTierEntry',
+    declaration: 'export interface SkillTierEntry {\n    readonly entry: string;\n    readonly name?: string;\n    readonly description?: string;\n    readonly loadable: boolean;\n    readonly issues: readonly SkillDocumentIssue[];\n}',
+  },
+  {
+    name: 'SkillTierKind',
+    declaration: 'export type SkillTierKind = (typeof SKILL_TIER_KINDS)[number];',
+  },
+  {
+    name: 'SkillTierListing',
+    declaration: 'export interface SkillTierListing {\n    readonly tier: SkillTierKind;\n    readonly directory: string;\n    readonly entries: readonly SkillTierEntry[];\n}',
   },
   {
     name: 'SkillViewOptions',
@@ -4666,16 +4795,20 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type TenantId = Branded<\'TenantId\'>;',
   },
   {
-    name: 'TenantOperation',
-    declaration: 'export type TenantOperation<T = unknown> = (input: TenantOperationInput) => Promise<T>;',
-  },
-  {
-    name: 'TenantOperationInput',
-    declaration: 'export interface TenantOperationInput {\n    readonly tenant: Tenant;\n    readonly principal: TenantPrincipal;\n    readonly body: unknown;\n}',
+    name: 'TenantPendingQuestion',
+    declaration: 'export interface TenantPendingQuestion {\n    readonly id: TenantQuestionId;\n    readonly sessionId: Session[\'id\'];\n    readonly questions: readonly AskUserQuestionItem[];\n    readonly expiresAtMs: number;\n}',
   },
   {
     name: 'TenantPrincipal',
-    declaration: 'export interface TenantPrincipal {\n    readonly tenantId: TenantId;\n    readonly subject: string;\n    readonly scopes?: readonly string[];\n}',
+    declaration: 'export interface TenantPrincipal {\n    readonly tenantId?: TenantId;\n    readonly subject: string;\n    readonly scopes?: readonly string[];\n}',
+  },
+  {
+    name: 'TenantQuestionAnswerReceipt',
+    declaration: 'export interface TenantQuestionAnswerReceipt {\n    readonly questionId: TenantQuestionId;\n    readonly sessionId: Session[\'id\'];\n}',
+  },
+  {
+    name: 'TenantQuestionId',
+    declaration: 'export type TenantQuestionId = Branded<\'TenantQuestionId\'>;',
   },
   {
     name: 'TerminalBackend',

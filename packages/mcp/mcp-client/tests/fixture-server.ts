@@ -72,5 +72,36 @@ server.registerTool('admin.reset', {
   content: [{ type: 'text', text: 'reset done' }],
 }))
 
+/**
+ * Peak number of `slow_read` handlers this process has run at the same time.
+ * A concurrency test reads it back through `concurrency_stats`, so the
+ * assertion measures the server's own observed overlap rather than the
+ * client's bookkeeping.
+ */
+let peakInFlight = 0
+let inFlight = 0
+
+server.registerTool('slow_read', {
+  title: 'Slow Read Tool',
+  description: 'Holds a read open, so overlapping calls are observable.',
+  inputSchema: { tag: z.string().describe('Tag echoed back'), holdMs: z.number().describe('How long to hold') },
+  annotations: { readOnlyHint: true },
+}, async (args) => {
+  inFlight += 1
+  peakInFlight = Math.max(peakInFlight, inFlight)
+  await new Promise(resolve => setTimeout(resolve, args.holdMs))
+  inFlight -= 1
+  return { content: [{ type: 'text', text: `read:${args.tag}` }] }
+})
+
+server.registerTool('concurrency_stats', {
+  title: 'Concurrency Stats Tool',
+  description: 'Reports the peak concurrent slow_read handlers.',
+  inputSchema: {},
+  annotations: { readOnlyHint: true },
+}, async () => ({
+  content: [{ type: 'text', text: String(peakInFlight) }],
+}))
+
 const transport = new StdioServerTransport()
 await server.connect(transport)

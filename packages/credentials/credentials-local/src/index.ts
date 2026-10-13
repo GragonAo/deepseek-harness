@@ -1,8 +1,8 @@
 /**
  * File-backed credentials provider over the active managed document — inside
- * a tenant scope that is `<tenant.dataRoot>/.credentials.yaml`, outside one the
- * single-user `$DSH_HOME/.credentials.yaml` — layered against the environment
- * by how much each layer is trusted:
+ * an ambient request partition that is `<partition.dataRoot>/.credentials.yaml`,
+ * outside one the single-user `$DSH_HOME/.credentials.yaml` — layered against
+ * the environment by how much each layer is trusted:
  *
  * ```text
  * inherited process environment      (read-only, wins)
@@ -22,14 +22,14 @@
  * project it is launched in. It ranks below the managed store, so a key stored
  * through the Models page is never displaced by one a checkout happens to carry.
  *
- * The managed document is tenant-scoped when `config.path` is omitted: the
- * provider resolves the document from the ambient tenant at every call, so
- * each tenant reads and writes its own `<tenant.dataRoot>/.credentials.yaml`,
- * and outside any tenant scope the document stays `$DSH_HOME/.credentials.yaml`.
- * Only that writable document is per-tenant — the inherited environment and the
- * two `.env` fallback layers are the process's own, never a tenant's, and stay
- * global. An explicit `config.path` is one fixed global document with no tenant
- * scoping.
+ * The managed document is partition-scoped when `config.path` is omitted: the
+ * provider resolves the document from the ambient partition at every call, so
+ * each partition reads and writes its own
+ * `<partition.dataRoot>/.credentials.yaml`, and outside any partition the
+ * document stays `$DSH_HOME/.credentials.yaml`. Only that writable document is
+ * per-partition — the inherited environment and the two `.env` fallback layers
+ * are the process's own, never a tenant's, and stay global. An explicit
+ * `config.path` is one fixed global document with no partitioning.
  *
  * The file is the provider-managed writable source: every write re-reads the
  * document under a cross-process writer lock before patching only its own key
@@ -56,23 +56,24 @@ import { Document, parseDocument, type YAMLError } from 'yaml'
 import { withFileLock, writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { canonicalizeWatchPath, resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
-import { currentTenant } from '@deepseek-ai/dsh-tenant'
+import { currentPartition } from '@deepseek-ai/dsh-partition-scope'
 import { CredentialProvider, credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { CredentialInfo, CredentialRef, ResolvedCredential } from '@deepseek-ai/dsh-credentials'
 import type { LaunchEnvironmentEntry } from '@deepseek-ai/dsh-launch-environment'
 
-/** Basename of the credentials document inside the harness home or a tenant data root. */
+/** Basename of the credentials document inside the harness home or a partition data root. */
 export const CREDENTIALS_FILENAME = '.credentials.yaml'
 
 /** Plugin config: file location and hot-reload behavior. */
 export interface Config {
   /**
-   * Credentials document path; defaults to `<tenant.dataRoot>/.credentials.yaml`
-   * inside a tenant scope, otherwise `.credentials.yaml` under the harness home.
-   * An explicit path is one fixed global document with no tenant scoping.
+   * Credentials document path; defaults to `<partition.dataRoot>/.credentials.yaml`
+   * inside an ambient request partition, otherwise `.credentials.yaml` under the
+   * harness home. An explicit path is one fixed global document with no
+   * partitioning.
    */
   path?: string
-  /** Harness home used when `path` is omitted and no tenant is in scope; defaults to `$DSH_HOME` or `~/.dsh`. */
+  /** Harness home used when `path` is omitted and no partition is ambient; defaults to `$DSH_HOME` or `~/.dsh`. */
   dshHome?: string
   /** Watch the document and hot-publish external edits; defaults to true. */
   watch?: boolean
@@ -90,7 +91,7 @@ interface ResolvedSpec {
 /**
  * Resolve the runtime spec from plugin config: an explicit `path` wins,
  * otherwise the document lives at `<harness home>/.credentials.yaml` (the
- * non-tenant fallback). The call-time tenant-scoped path comes from
+ * partitionless fallback). The call-time partition-scoped path comes from
  * {@link activeCredentialFilename}.
  * @param config - raw plugin config.
  * @returns the resolved config-time file location and watch behavior.
@@ -105,14 +106,16 @@ export function resolveSpec(config: Config): ResolvedSpec {
 
 /**
  * The managed document the provider reads and writes at call time. An explicit
- * `config.path` is one fixed global document (no tenant scoping); otherwise the
- * document lives at `<tenant.dataRoot>/.credentials.yaml` inside the ambient
- * tenant scope, falling back to `<harness home>/.credentials.yaml` outside one.
+ * `config.path` is one fixed global document (no partitioning); otherwise the
+ * document lives at `<partition.dataRoot>/.credentials.yaml` inside an ambient
+ * request partition, falling back to `<harness home>/.credentials.yaml`
+ * outside one.
+ * @param ctx - Context carrying the optional ambient-partition provider.
  * @param config - raw plugin config.
  * @returns the active document path.
  */
-export function activeCredentialFilename(config: Config): string {
-  const base = currentTenant()?.dataRoot ?? resolveDshHome(config.dshHome)
+export function activeCredentialFilename(ctx: Context, config: Config): string {
+  const base = currentPartition(ctx)?.dataRoot ?? resolveDshHome(config.dshHome)
   return resolve(config.path ?? join(base, CREDENTIALS_FILENAME))
 }
 
@@ -249,7 +252,7 @@ interface FileState {
   watcher: FSWatcher | undefined
 }
 
-/** File-backed credentials provider (tenant-scoped managed document). */
+/** File-backed credentials provider (partition-scoped managed document). */
 export class LocalCredentialProvider extends CredentialProvider {
   /* jscpd:ignore-start -- deliberate config-surface and lifecycle symmetry with
      settings-file (prefer symmetry for parallel values); extracting the shared
@@ -291,9 +294,9 @@ export class LocalCredentialProvider extends CredentialProvider {
     this.debounceMs = spec.debounceMs
   }
 
-  /** The active managed-document path at call time, tenant-scoped unless `config.path` is set. */
+  /** The active managed-document path at call time, partition-scoped unless `config.path` is set. */
   private activeFilename(): string {
-    return activeCredentialFilename(this.config)
+    return activeCredentialFilename(this.ctx, this.config)
   }
 
   /** One file's snapshot, created empty on first address. */
@@ -331,8 +334,8 @@ export class LocalCredentialProvider extends CredentialProvider {
       await this.operations
       await this.closeWatchers()
     }
-    // Boot-load the non-tenant (global) document, so a corrupt single-user
-    // document still fails activation; tenant documents load lazily per file.
+    // Boot-load the partitionless (global) document, so a corrupt single-user
+    // document still fails activation; partition documents load lazily per file.
     await this.loadFor(this.activeFilename())
   }
 
@@ -424,7 +427,7 @@ export class LocalCredentialProvider extends CredentialProvider {
     }
     this.assertUnshadowed(ref, verb)
     // Capture the active document at call entry: a write that outlives its
-    // request scope must still land in the tenant's own document.
+    // request partition must still land in that partition's own document.
     const filename = this.activeFilename()
     return this.enqueue(async () => {
       if (this.isClosed()) {
@@ -433,7 +436,7 @@ export class LocalCredentialProvider extends CredentialProvider {
       // Re-judged at run time: the environment may have changed while queued.
       this.assertUnshadowed(ref, verb)
       // The writer lock's exclusive create needs the parent to exist; 0700
-      // because the harness home or tenant data root holds user-private data.
+      // because the harness home or partition data root holds user-private data.
       await mkdir(dirname(filename), { recursive: true, mode: 0o700 })
       await withFileLock(filename, async () => {
         // Read-modify-write: fold in any on-disk state this process has not

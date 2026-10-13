@@ -1,0 +1,48 @@
+# 最小 tool-terminal 组合：真实 app 启动路径 + 真实 agent 回合 + 真实工具注册表，
+# 只有容器运行时（外部服务）与模型（脚本化，保证确定性）是夹具自己的。
+# 由 terminal-container 包内的 loader.spec.ts 驱动。
+- id: mock-llm
+  name: './mock-terminal-llm.ts'
+
+- id: system-prompt
+  name: '@deepseek-ai/dsh-system-prompt'
+
+- id: tools
+  name: '@deepseek-ai/dsh-tools'
+
+- id: terminal
+  name: '@deepseek-ai/dsh-terminal'
+
+- id: container-runtime
+  name: './fake-container-runtime.ts'
+
+- id: terminal-container
+  name: '@deepseek-ai/dsh-terminal-container'
+  config:
+    cwd: '.'
+    pollIntervalMs: 5
+    idleSilenceMs: 15
+    timeoutMs: 1000
+
+- id: tool-terminal
+  name: '@deepseek-ai/dsh-tool-terminal'
+
+- id: agent-spine
+  name: '@deepseek-ai/dsh-agent-spine-demo'
+  config:
+    agents:
+      - id: main
+        provider: mock
+        model: mock-terminal
+        cwd: !!js process.cwd()
+    persona: 'Test tool-terminal round trip.'
+    workspaceContext: false
+
+- id: persistence
+  name: '@deepseek-ai/dsh-session-persistence-jsonl'
+  config:
+    root: './.sessions'
+    compression: 'none'
+
+- id: checkpoint-policy
+  name: '@deepseek-ai/dsh-session-checkpoint-policy'

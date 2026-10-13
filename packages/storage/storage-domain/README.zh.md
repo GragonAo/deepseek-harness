@@ -4,7 +4,7 @@
 
 DeepSeek Harness 存储中心的领域数据形式：在所有已配置的后端注册后，公开可注入的 `ctx.storageDomain` 服务及对应的 `ctx.storage.domain` 投影。一个领域通过 `defineDomain`（zod 记录 schema、从 `z.infer` 派生的类型）声明一次，通过 `DomainFacility.open` 打开，并由具有最终决定权的内存状态提供服务：读取同步执行；写入在每个领域各自的一条链上串行化，先在已路由后端达到持久状态，再更新内存并发出 `domain/changed`。打开领域的消费方负责管理句柄的生命周期，并通过 `Domain.close()` 释放它（幂等；通常作为其自身的 `ctx.effect` 资源释放函数）；插件卸载时，该设施会关闭仍处于打开状态的领域。
 
-在多租户下，单次打开守卫按环境 (租户, 用户) 键控：当租户与用户都在作用域内时，`partitionKey(name)` 为 `${tenantPartitionName(tenant.id)}.${userPartitionName(user)}.${name}`，否则为裸领域名。因此同一声明领域每个 (租户, 用户) 只打开一次 —— 同一租户的两个用户、以及两个租户各持独立的投影 —— 而单用户与匿名打开则回退到无作用域键。
+在分区化部署下，单次打开守卫按环境请求分区键控：当分区携带用户时，`partitionKey(ctx, name)` 为 `${tenantName}.${userName}.${name}`，否则为裸领域名。因此同一声明领域每个分区只打开一次 —— 同一租户的两个用户、以及两个租户各持独立的投影 —— 而单分区部署与匿名打开则回退到无作用域键。分区经 `@deepseek-ai/dsh-partition-scope` 读取，因此本包不依赖任何多租户实现。
 
 设计原理、打开语义和存储／领域分层见 [Agent Note](../../../.agents/notes/proposed/architecture/2026-07-24-domain-kv-storage-and-workspace.zh.md)。
 

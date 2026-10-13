@@ -21,7 +21,7 @@
       "path": "../../util/brand"
     },
     {
-      "path": "../../tenant/tenant"
+      "path": "../../core/partition-scope"
     },
     {
       "path": "../../runtime-diagnostics/invariants"

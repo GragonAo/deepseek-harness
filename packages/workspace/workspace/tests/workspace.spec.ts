@@ -2,15 +2,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
-import { Context } from '@deepseek-ai/cordis'
+import { Context, Service } from '@deepseek-ai/cordis'
 import Storage, { StorageError } from '@deepseek-ai/dsh-storage'
 import type { KvUnit, KvUnitDescriptor, StorageBackend } from '@deepseek-ai/dsh-storage'
 import { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import type { DomainChanged } from '@deepseek-ai/dsh-storage-domain'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionHeader } from '@deepseek-ai/dsh-session'
-import { requireTenant, requireUser, runWithTenant, runWithUser, TenantId, UserId } from '@deepseek-ai/dsh-tenant'
-import type { Tenant } from '@deepseek-ai/dsh-tenant'
+import { currentPartition, type PartitionScope, type RequestPartition } from '@deepseek-ai/dsh-partition-scope'
 import { MemoryMediaPool, MemoryStorageBackend } from '../../../storage/storage-domain/tests/helpers/memory-backend.ts'
 import WorkspaceRegistry, {
   WorkspaceId,
@@ -131,45 +130,80 @@ function selectiveFailureBackend(
   }
 }
 
-function tenant(id: string): Tenant {
-  return {
-    id: TenantId(id),
-    name: id,
-    dataRoot: `/data/${id}`,
-    workspaceRoot: `/workspace/${id}`,
+/** Ambient-partition provider a test drives directly, standing in for a tenancy carrier. */
+class TestPartitionScope extends Service implements PartitionScope {
+  constructor(ctx: Context, private partition: RequestPartition | undefined) {
+    super(ctx, 'partitionScope')
+  }
+
+  current(): RequestPartition | undefined {
+    return this.partition
+  }
+
+  /**
+   * Enter one partition for the duration of `run`, restoring the previous one
+   * when it settles, so the asynchronous tree inside the callback stays in the
+   * partition the way the carrier's own request scope spans an operation.
+   */
+  async run<T>(partition: RequestPartition, run: () => T | Promise<T>): Promise<T> {
+    const previous = this.partition
+    this.partition = partition
+    try {
+      return await run()
+    } finally {
+      this.partition = previous
+    }
   }
 }
 
+/** One ambient partition the registry keys by. */
+function partition(tenant: string, user: string): RequestPartition {
+  return {
+    tenant,
+    tenantName: `tenant_${tenant}`,
+    user,
+    userName: `user_${user}`,
+    dataRoot: `/data/${tenant}`,
+  }
+}
+
+/** The ambient partition's tenant and user, failing closed as a partition-scoped backend does. */
+function requireTestPartition(ctx: Context): { tenant: string; user: string } {
+  const partition = currentPartition(ctx)
+  if (partition?.user === undefined) {
+    throw Object.assign(new Error('no tenant in scope'), { code: 'NO_TENANT_IN_SCOPE' })
+  }
+  return { tenant: partition.tenant, user: partition.user }
+}
+
 /**
- * (Tenant, user)-keyed in-memory backend mirroring `storage-postgres`: one
- * medium per (tenant, user, unit) and an open that fails closed outside any
- * scope, so a tenantless boot presents the same `NO_TENANT_IN_SCOPE` the
+ * Request-partition-keyed in-memory backend mirroring `storage-postgres`: one
+ * medium per (partition, unit) and an open that fails closed outside any
+ * partition, so a partitionless boot presents the same `NO_TENANT_IN_SCOPE` the
  * registry treats as its lazily-uninitialized signal.
  */
-class TenantMemoryBackend implements StorageBackend {
+class PartitionMemoryBackend implements StorageBackend {
   readonly kv: { open(descriptor: KvUnitDescriptor): Promise<KvUnit> }
   private readonly openKeys = new Set<string>()
   private readonly media = new Map<string, { tables: Map<string, Map<string, unknown>>; global: unknown }>()
 
-  constructor() {
+  constructor(private readonly ctx: Context) {
     this.kv = {
       open: async (descriptor) => {
-        const active = requireTenant()
-        const user = requireUser()
-        const key = `${active.id}:${user}:${descriptor.name}`
+        const active = requireTestPartition(this.ctx)
+        const key = `${active.tenant}:${active.user}:${descriptor.name}`
         if (this.openKeys.has(key)) {
-          throw new Error(`tenant memory unit '${descriptor.name}' is already open (double-open is a caller bug)`)
+          throw new Error(`partition memory unit '${descriptor.name}' is already open (double-open is a caller bug)`)
         }
         this.openKeys.add(key)
         const medium = this.media.get(key) ?? { tables: new Map(), global: null }
         this.media.set(key, medium)
         const assertOpen = (): void => {
           if (!this.openKeys.has(key)) {
-            throw new StorageError('closed', `tenant memory unit '${descriptor.name}' is closed`)
+            throw new StorageError('closed', `partition memory unit '${descriptor.name}' is closed`)
           }
-          // Mirrors the per-operation (tenant, user) guard of the postgres backend.
-          requireTenant()
-          requireUser()
+          // Mirrors the per-operation partition guard of the postgres backend.
+          requireTestPartition(this.ctx)
         }
         return {
           loadAll: async () => {
@@ -211,11 +245,12 @@ class TenantMemoryBackend implements StorageBackend {
   }
 }
 
-/** Boot the registry over the tenant-keyed backend, with no tenant in scope. */
-async function tenantHarness() {
+/** Boot the registry over the partition-keyed backend, with no partition in scope. */
+async function partitionHarness() {
   const ctx = new Context()
+  const scope = new TestPartitionScope(ctx, undefined)
   await ctx.plugin(Storage)
-  ctx.storage.backend.register('memory', new TenantMemoryBackend())
+  ctx.storage.backend.register('memory', new PartitionMemoryBackend(ctx))
   const facility = new DomainFacility(ctx, { backend: 'memory', routes: {} })
   ctx.storage.mount('domain', facility)
   ctx.provide('storageDomain', facility)
@@ -224,7 +259,7 @@ async function tenantHarness() {
   const inspect = vi.fn(() => { throw new Error('event bodies must not be inspected') })
   ctx.provide('sessionPersistence', { list, load, inspect } as never)
   await ctx.plugin(WorkspaceRegistry)
-  return { ctx, registry: ctx.workspaceRegistry }
+  return { ctx, scope, registry: ctx.workspaceRegistry }
 }
 
 function record(path: string, sessionIds: string[], createdAt = '2026-07-24T00:00:00.000Z'): WorkspaceRecord {
@@ -1040,56 +1075,57 @@ describe('registry-global session archive', () => {
   })
 })
 
-describe('tenant-scoped registry', () => {
-  /** Enter the ambient (tenant, user) scope most request paths run under. */
-  const scoped = <T>(t: Tenant, user: string, fn: () => T): T =>
-    runWithTenant(t, () => runWithUser(UserId(user), fn))
+describe('partition-scoped registry', () => {
+  /** Enter the ambient partition most request paths run under. */
+  const scoped = <T>(scope: TestPartitionScope, tenant: string, user: string, fn: () => T): Promise<T> =>
+    scope.run(partition(tenant, user), fn)
 
-  it('boots outside any scope to an empty, non-throwing projection', async () => {
-    const { registry } = await tenantHarness()
+  it('boots outside any partition to an empty, non-throwing projection', async () => {
+    const { registry } = await partitionHarness()
     expect(registry.list()).toEqual([])
     expect(registry.archivedSessionIds).toEqual([])
     expect(registry.get(WorkspaceId('00000000-0000-4000-8000-000000000001'))).toBeUndefined()
   })
 
-  it('isolates workspace registries per (tenant, user) on create/list switches', async () => {
-    const dirA = await makeDir('tenant-a')
-    const dirB = await makeDir('tenant-b')
-    const { registry } = await tenantHarness()
+  it('isolates workspace registries per partition on create/list switches', async () => {
+    const dirA = await makeDir('partition-a')
+    const dirB = await makeDir('partition-b')
+    const { scope, registry } = await partitionHarness()
 
-    await scoped(tenant('acme'), 'user-1', () => registry.create(dirA))
+    await scoped(scope, 'acme', 'user-1', () => registry.create(dirA))
     // A different tenant or user has never been accessed: its projection is
     // still empty, not A's.
-    expect(scoped(tenant('globex'), 'user-1', () => registry.list())).toEqual([])
-    expect(scoped(tenant('acme'), 'user-2', () => registry.list())).toEqual([])
+    expect(await scoped(scope, 'globex', 'user-1', () => registry.list())).toEqual([])
+    expect(await scoped(scope, 'acme', 'user-2', () => registry.list())).toEqual([])
     // A sees exactly its own workspace.
-    const acmePaths = scoped(tenant('acme'), 'user-1', () => registry.list()).map(workspace => workspace.path)
+    const acmePaths = (await scoped(scope, 'acme', 'user-1', () => registry.list()))
+      .map(workspace => workspace.path)
     expect(acmePaths).toEqual([await realpath(dirA)])
 
-    await scoped(tenant('globex'), 'user-1', () => registry.create(dirB))
-    expect(scoped(tenant('globex'), 'user-1', () => registry.list()).map(workspace => workspace.path))
+    await scoped(scope, 'globex', 'user-1', () => registry.create(dirB))
+    expect((await scoped(scope, 'globex', 'user-1', () => registry.list())).map(workspace => workspace.path))
       .toEqual([await realpath(dirB)])
     // A's projection is unchanged by B's create.
-    expect(scoped(tenant('acme'), 'user-1', () => registry.list()).map(workspace => workspace.path))
+    expect((await scoped(scope, 'acme', 'user-1', () => registry.list())).map(workspace => workspace.path))
       .toEqual([await realpath(dirA)])
 
-    // Outside any scope, no partition is addressable: empty projection.
+    // Outside any partition, no partition is addressable: empty projection.
     expect(registry.list()).toEqual([])
   })
 
   it('keeps two users of one tenant to separate workspace registries', async () => {
     const dirA = await makeDir('user-a')
     const dirB = await makeDir('user-b')
-    const { registry } = await tenantHarness()
+    const { scope, registry } = await partitionHarness()
 
-    await scoped(tenant('acme'), 'user-1', () => registry.create(dirA))
+    await scoped(scope, 'acme', 'user-1', () => registry.create(dirA))
     // user-2 of the same tenant has its own (empty) projection.
-    expect(scoped(tenant('acme'), 'user-2', () => registry.list())).toEqual([])
-    await scoped(tenant('acme'), 'user-2', () => registry.create(dirB))
-    expect(scoped(tenant('acme'), 'user-2', () => registry.list()).map(workspace => workspace.path))
+    expect(await scoped(scope, 'acme', 'user-2', () => registry.list())).toEqual([])
+    await scoped(scope, 'acme', 'user-2', () => registry.create(dirB))
+    expect((await scoped(scope, 'acme', 'user-2', () => registry.list())).map(workspace => workspace.path))
       .toEqual([await realpath(dirB)])
     // user-1 still sees exactly its own workspace.
-    expect(scoped(tenant('acme'), 'user-1', () => registry.list()).map(workspace => workspace.path))
+    expect((await scoped(scope, 'acme', 'user-1', () => registry.list())).map(workspace => workspace.path))
       .toEqual([await realpath(dirA)])
   })
 })

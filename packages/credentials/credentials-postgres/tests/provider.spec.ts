@@ -11,7 +11,7 @@ import Storage, { storageBackendServiceKey } from '@deepseek-ai/dsh-storage'
 import { PostgresStorageBackend } from '@deepseek-ai/dsh-storage-postgres'
 import type { SqlExecutor } from '@deepseek-ai/dsh-storage-postgres'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import { TenantId, UserId, runWithTenant, runWithUser, tenantPartitionName } from '@deepseek-ai/dsh-tenant'
+import { TenantId, UserId, TenantPartitionScope, runWithTenant, runWithUser, tenantPartitionName } from '@deepseek-ai/dsh-tenant'
 import type { Tenant } from '@deepseek-ai/dsh-tenant'
 import PostgresCredentialProvider from '../src/index.ts'
 
@@ -56,6 +56,9 @@ afterEach(async () => {
 
 async function boot(executor: SqlExecutor = new RecordingExecutor()): Promise<{ ctx: Context; executor: RecordingExecutor }> {
   const ctx = new Context()
+  // The tenant plugin mounts the ambient partition; a bare context must mount
+  // it explicitly, or the partition-keyed seam resolves partitionless.
+  ctx.provide('partitionScope', new TenantPartitionScope())
   await ctx.plugin(Storage)
   const backend = new PostgresStorageBackend(executor)
   const unregister = ctx.storage.backend.register('postgres', backend)

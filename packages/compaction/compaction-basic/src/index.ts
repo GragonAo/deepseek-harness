@@ -27,7 +27,7 @@ import {
   compactSurfaceRegion,
   selectCompactableRange,
 } from './region.ts'
-import { summarizeWithLlm } from './summarizer.ts'
+import { summarizeWithLlm, isSummaryTruncation } from './summarizer.ts'
 import type { SummarizationInput, SummaryResult } from './summarizer.ts'
 import type {
   BasicCompactionConfig,
@@ -68,6 +68,21 @@ function conversationTarget(
   if (agent.options.provider === undefined || agent.options.provider.length === 0
     || agent.options.model === undefined || agent.options.model.length === 0) return undefined
   return { provider: agent.options.provider, model: agent.options.model }
+}
+
+/**
+ * Grow the retained-tail budget so the next attempt summarizes a smaller head.
+ *
+ * Doubling terminates because the attempts are bounded, and the clamp preserves
+ * the invariant `resolveCompactSpec` asserts — a retained tail at or above the
+ * threshold has no head left to compact, so the caller must stop rather than
+ * ask for a range that cannot exist.
+ * @param retainTokens - retained-tail budget that produced the truncated summary.
+ * @param thresholdTokens - pressure threshold this attempt must bring the surface below.
+ * @returns the next attempt's retained-tail budget.
+ */
+function grownRetainTokens(retainTokens: number, thresholdTokens: number): number {
+  return Math.min(Math.max(retainTokens * 2, 1), thresholdTokens - 1)
 }
 
 const thresholdRatioSchema = z.number()
@@ -249,7 +264,9 @@ export class BasicCompactionEngine extends CompactionEngine {
    * Compact for replayed step-boundary pressure or one provider-confirmed context
    * overflow. Both triggers price the latest durable routed request envelope;
    * overflow bypasses the normal threshold and retained-tail policy so it can
-   * force one useful balanced reduction.
+   * force one useful balanced reduction. Pressure retries a summary truncated at
+   * `maxTokens` against a smaller head, because repeating the same region, budget,
+   * and model reproduces the same truncation.
    * @param agent - agent whose latest durable routed request is measured.
    * @param trigger - normal step-boundary pressure or context-overflow recovery.
    * @param signal - live turn cancellation signal forwarded to summarization.
@@ -312,20 +329,38 @@ export class BasicCompactionEngine extends CompactionEngine {
     if (measurement.totalTokens < spec.thresholdTokens) return null
 
     let result: CompactionResult | null = null
+    // A region the summarizer cannot fit inside its output budget must not be
+    // retried unchanged: identical region, budget, and model reproduce the
+    // identical truncation, so every attempt costs a full summarization call
+    // while the surface stays exactly where it was. Retaining more of the tail
+    // shrinks the summarized head, which is the one thing the next attempt can
+    // change; the attempts stay bounded by `compactionRetries`.
+    let retainTokens = spec.retainTokens
+    let truncation: Error | undefined
     for (let attempt = 0; attempt <= spec.compactionRetries; attempt += 1) {
-      const range = selectCompactableRange(agent.session, measurement, spec.retainTokens)
+      const range = selectCompactableRange(agent.session, measurement, retainTokens)
       if (range === null) {
-        /* v8 ignore else -- concrete replacement preserves a compactable checkpoint; subclass hooks cannot mutate it. */
-        if (result === null) return null
+        // Nothing left to summarize once the retained tail covers the surface.
+        // With no truncation recorded there is genuinely nothing to compact; a
+        // recorded one is the reason to report, never a reason to report none.
+        if (result === null && truncation === undefined) return null
         /* v8 ignore next -- paired with the defensive post-success branch above. */
         break
       }
-      result = await this.compactRegion(range.start, range.end, agent, signal)
+      truncation = undefined
+      try {
+        result = await this.compactRegion(range.start, range.end, agent, signal)
+      } catch (error: unknown) {
+        if (!isSummaryTruncation(error)) throw error
+        truncation = error
+        retainTokens = grownRetainTokens(retainTokens, spec.thresholdTokens)
+        continue
+      }
       measurement = meter.measure(agent.session)
       if (measurement.totalTokens < spec.thresholdTokens) return result
     }
 
-    throw new Error(
+    throw truncation ?? new Error(
       `compaction still above threshold after ${spec.compactionRetries + 1} compaction attempts `
       + `(${measurement.totalTokens} estimated tokens >= threshold ${spec.thresholdTokens})`,
     )

@@ -9,9 +9,7 @@
 import { describe, expect, it } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { TenantId, currentTenant, currentUser, runWithTenant, runWithUser } from '@deepseek-ai/dsh-tenant'
-import type { Tenant } from '@deepseek-ai/dsh-tenant'
-import type { UserId } from '@deepseek-ai/dsh-tenant'
+import { currentPartition, type PartitionScope, type RequestPartition } from '@deepseek-ai/dsh-partition-scope'
 import {
   SettingsProvider,
   settingsNamespace,
@@ -20,8 +18,36 @@ import {
   type SettingsTierRoot,
 } from '../src/index.ts'
 
-function tenant(id: string): Tenant {
-  return { id: TenantId(id), name: id, dataRoot: `/data/${id}`, workspaceRoot: `/data/${id}/workspace` }
+/** Ambient-partition provider a test drives directly, standing in for a tenancy carrier. */
+class TestPartitionScope extends Service implements PartitionScope {
+  constructor(ctx: Context, private partition: RequestPartition | undefined) {
+    super(ctx, 'partitionScope')
+  }
+
+  current(): RequestPartition | undefined {
+    return this.partition
+  }
+
+  /** Enter one partition for the duration of `run`, restoring the previous one. */
+  async run<T>(partition: RequestPartition, run: () => T | Promise<T>): Promise<T> {
+    const previous = this.partition
+    this.partition = partition
+    try {
+      return await run()
+    } finally {
+      this.partition = previous
+    }
+  }
+}
+
+/** One ambient partition; the settings base reads only the raw tenant and user ids. */
+function partition(tenant: string, user?: string): RequestPartition {
+  return {
+    tenant,
+    tenantName: `tenant_${tenant}`,
+    dataRoot: `/data/${tenant}`,
+    ...(user === undefined ? {} : { user, userName: `user_${user}` }),
+  }
 }
 
 interface DemoConfig {
@@ -51,10 +77,9 @@ class UserMemorySettings extends SettingsProvider {
   }
 
   private key(): string {
-    const tenant = currentTenant()
-    const user = currentUser()
-    if (tenant === undefined || user === undefined) return ''
-    return `${tenant.id}\u0000${user}`
+    const partition = currentPartition(this.ctx)
+    if (partition?.user === undefined) return ''
+    return `${partition.tenant}\u0000${partition.user}`
   }
 
   protected load(): Promise<Record<string, unknown>> {
@@ -88,29 +113,30 @@ class FixedSettingsTiers extends Service implements SettingsTierProvider {
 
 async function boot(
   tierSections: ReadonlyMap<SettingsNamespace, Record<string, unknown>>,
-): Promise<{ ctx: Context; done: () => Promise<void> }> {
+): Promise<{ ctx: Context; scope: TestPartitionScope; done: () => Promise<void> }> {
   const ctx = new Context()
+  const scope = new TestPartitionScope(ctx, undefined)
   const fiber = await ctx.plugin(UserMemorySettings)
   new FixedSettingsTiers(ctx, tierSections)
-  return { ctx, done: async () => fiber.dispose() }
+  return { ctx, scope, done: async () => fiber.dispose() }
 }
 
 describe('settings tier layering', () => {
   it('resolves schema defaults < base < tier < user document', async () => {
     const ns = settingsNamespace('demo')
-    const { ctx, done } = await boot(new Map([[ns, { label: 'tier-label' }]]))
+    const { ctx, scope, done } = await boot(new Map([[ns, { label: 'tier-label' }]]))
     try {
       // No user document yet: the tier section layers over the composition base.
-      const scope = ctx.settings.register(ns, DemoSchema, { base: { size: 20 } })
-      expect(scope.get()).toEqual({ label: 'tier-label', size: 20 })
+      const registration = ctx.settings.register(ns, DemoSchema, { base: { size: 20 } })
+      expect(registration.get()).toEqual({ label: 'tier-label', size: 20 })
       // No base and no tier falls back to schema defaults alone.
       const bare = settingsNamespace('bare')
       expect(ctx.settings.register(bare, DemoSchema).get()).toEqual({ label: 'default-label', size: 12 })
-      // The runtime user document layers above the tier section, per (tenant, user) scope.
-      await runWithTenant(tenant('acme'), () => runWithUser('user-1' as UserId, async () => {
+      // The runtime user document layers above the tier section, per (tenant, user) partition.
+      await scope.run(partition('acme', 'user-1'), async () => {
         await ctx.settings.update(ns, { label: 'user-label' })
-        expect(scope.get()).toEqual({ label: 'user-label', size: 20 })
-      }))
+        expect(registration.get()).toEqual({ label: 'user-label', size: 20 })
+      })
     } finally {
       await done()
     }
@@ -118,16 +144,16 @@ describe('settings tier layering', () => {
 
   it('keeps tier and user layers independent: a user reset re-inherits the tier', async () => {
     const ns = settingsNamespace('demo')
-    const { ctx, done } = await boot(new Map([[ns, { size: 30 }]]))
+    const { ctx, scope, done } = await boot(new Map([[ns, { size: 30 }]]))
     try {
-      const scope = ctx.settings.register(ns, DemoSchema)
-      expect(scope.get()).toEqual({ label: 'default-label', size: 30 })
-      await runWithTenant(tenant('acme'), () => runWithUser('user-1' as UserId, async () => {
+      const registration = ctx.settings.register(ns, DemoSchema)
+      expect(registration.get()).toEqual({ label: 'default-label', size: 30 })
+      await scope.run(partition('acme', 'user-1'), async () => {
         await ctx.settings.update(ns, { label: 'user-label' })
-        expect(scope.get()).toEqual({ label: 'user-label', size: 30 })
+        expect(registration.get()).toEqual({ label: 'user-label', size: 30 })
         await ctx.settings.replace(ns, {})
-        expect(scope.get()).toEqual({ label: 'default-label', size: 30 })
-      }))
+        expect(registration.get()).toEqual({ label: 'default-label', size: 30 })
+      })
     } finally {
       await done()
     }

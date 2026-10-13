@@ -11,6 +11,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { type JsonValue } from '@deepseek-ai/dsh-tools'
 import type { PostToolDecision } from '@deepseek-ai/dsh-tools'
 import { publicToolName, syncTools, type ToolBridgeOptions } from '@deepseek-ai/dsh-mcp-client/src/tools.ts'
+import { createToolCallLimiter, resolveToolConcurrencyPolicy } from '@deepseek-ai/dsh-mcp-client/src/concurrency.ts'
 import { createTransport } from '@deepseek-ai/dsh-mcp-client/src/transport.ts'
 import type { Config } from '@deepseek-ai/dsh-mcp-client'
 
@@ -24,6 +25,7 @@ interface MockTool {
   inputSchema: Record<string, unknown>
   outputSchema?: Record<string, unknown>
   execution?: { taskSupport?: 'optional' | 'required' | 'forbidden' }
+  annotations?: { readOnlyHint?: boolean; idempotentHint?: boolean; destructiveHint?: boolean }
 }
 
 interface MockCallResult {
@@ -142,10 +144,14 @@ function textAt(content: readonly ContentBlock[], index = 0): string {
   return block.text
 }
 
+const defaultConcurrency = resolveToolConcurrencyPolicy(undefined, 'toolConcurrency')
+
 const defaultOpts: ToolBridgeOptions = {
   registrationFailure: 'contain',
   serverName: 'srv',
   toolCallTimeoutMs: 60_000,
+  concurrency: defaultConcurrency,
+  limiter: createToolCallLimiter(defaultConcurrency),
 }
 
 // ---- Tests ----
@@ -292,6 +298,101 @@ describe('syncTools', () => {
     expect(ctx.tools.get('mcp__srv__old_tool')).toBeUndefined()
     expect(ctx.tools.get('mcp__srv__new_tool')).toBeDefined()
     expect(secondDisposers.size).toBe(1)
+  })
+
+  it('rejects a sync whose exclusiveTools names a tool the server does not list', async () => {
+    const client = createMockClient([
+      { name: 'greet', inputSchema: { type: 'object' } },
+      { name: 'add', inputSchema: { type: 'object' } },
+    ])
+    const opts: ToolBridgeOptions = {
+      ...defaultOpts,
+      concurrency: resolveToolConcurrencyPolicy({ exclusiveTools: ['write'] }, 'toolConcurrency'),
+    }
+
+    // The name exists only after `tools/list`, so this is the earliest point
+    // that can judge it — and it fails the sync rather than publishing tools
+    // under a configuration nobody can trust.
+    await expect(syncTools(client as never, ctx, opts, new Map())).rejects.toThrow(
+      'mcp-client(srv): toolConcurrency.exclusiveTools names unknown tool "write"; this server lists: add, greet',
+    )
+    expect(ctx.tools.get('mcp__srv__greet')).toBeUndefined()
+    expect(ctx.tools.get('mcp__srv__add')).toBeUndefined()
+  })
+
+  it('names every unknown exclusive tool and an empty tool list', async () => {
+    const client = createMockClient([])
+    const opts: ToolBridgeOptions = {
+      ...defaultOpts,
+      concurrency: resolveToolConcurrencyPolicy({ exclusiveTools: ['write', 'delete'] }, 'toolConcurrency'),
+    }
+
+    await expect(syncTools(client as never, ctx, opts, new Map())).rejects.toThrow(
+      'mcp-client(srv): toolConcurrency.exclusiveTools names unknown tools "write", "delete"; this server lists: (none)',
+    )
+  })
+
+  it('rejects unknown names from both tool lists in one diagnostic', async () => {
+    const client = createMockClient([{ name: 'greet', inputSchema: { type: 'object' } }])
+    const opts: ToolBridgeOptions = {
+      ...defaultOpts,
+      concurrency: resolveToolConcurrencyPolicy({ retryTools: ['fetch'] }, 'toolConcurrency'),
+    }
+
+    // A retryTools typo is fail-safe in effect — the tool is simply never
+    // retried — and still rejects, because the deployment's statement that
+    // repeating that call is safe has no referent.
+    await expect(syncTools(client as never, ctx, opts, new Map())).rejects.toThrow(
+      'mcp-client(srv): toolConcurrency.retryTools names unknown tool "fetch"; this server lists: greet',
+    )
+
+    const both = resolveToolConcurrencyPolicy(
+      { exclusiveTools: ['write'], retryTools: ['fetch'] },
+      'toolConcurrency',
+    )
+    await expect(syncTools(client as never, ctx, { ...defaultOpts, concurrency: both }, new Map())).rejects.toThrow(
+      'toolConcurrency.exclusiveTools names unknown tool "write",'
+      + ' toolConcurrency.retryTools names unknown tool "fetch"; this server lists: greet',
+    )
+  })
+
+  it('keeps the previous generation registered when a name disappears on re-sync', async () => {
+    const client = createMockClient([
+      { name: 'write', inputSchema: { type: 'object' } },
+    ])
+    const opts: ToolBridgeOptions = {
+      ...defaultOpts,
+      concurrency: resolveToolConcurrencyPolicy({ exclusiveTools: ['write'] }, 'toolConcurrency'),
+    }
+    const firstDisposers = await syncTools(client as never, ctx, opts, new Map())
+    expect(ctx.tools.get('mcp__srv__write')).toBeDefined()
+
+    // A server upgrade renamed the tool: the fetch phase rejects before the
+    // swap, so the last good generation keeps serving.
+    client.listTools.mockResolvedValue({ tools: [{ name: 'write_v2', inputSchema: { type: 'object' } }], nextCursor: undefined })
+    await expect(syncTools(client as never, ctx, opts, firstDisposers)).rejects.toThrow(
+      'toolConcurrency.exclusiveTools names unknown tool "write"; this server lists: write_v2',
+    )
+
+    expect(ctx.tools.get('mcp__srv__write')).toBeDefined()
+    expect(ctx.tools.get('mcp__srv__write_v2')).toBeUndefined()
+  })
+
+  it('accepts a listed tool that the server does list', async () => {
+    const client = createMockClient([
+      { name: 'write', inputSchema: { type: 'object' } },
+      { name: 'read', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } },
+    ])
+    const opts: ToolBridgeOptions = {
+      ...defaultOpts,
+      concurrency: resolveToolConcurrencyPolicy({ policy: 'parallel', exclusiveTools: ['write'] }, 'toolConcurrency'),
+    }
+
+    const disposers = await syncTools(client as never, ctx, opts, new Map())
+
+    expect(disposers.size).toBe(2)
+    expect(ctx.tools.get('mcp__srv__write')).toBeDefined()
+    expect(ctx.tools.get('mcp__srv__read')).toBeDefined()
   })
 
   it('drains paginated listTools responses', async () => {

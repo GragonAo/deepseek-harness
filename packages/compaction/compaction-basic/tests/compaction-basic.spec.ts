@@ -836,6 +836,97 @@ describe('optional model-free tool-result pruning', () => {
     expect(session.events.filter(event =>
       event.type === 'tool/result' && event.surfaceOp !== 'append')).toHaveLength(0)
   })
+
+  it('retries a truncated summary against a smaller head rather than repeating it', async () => {
+    const ctx = createContext(2_000)
+    const compact = new TestCompactionEngine(ctx, {
+      auto: false,
+      thresholdRatio: 0.5,
+      retainTokens: 100,
+      compactionRetries: 1,
+    })
+    // Many small messages, so the doubled tail budget lands the cut on a later
+    // node instead of inside the same node.
+    const session = conversation(20)
+    compact.error = Object.assign(
+      new Error('summarization truncated at the token cap (incomplete checkpoint)'),
+      { code: 'MAX_TOKENS' },
+    )
+    // Only the first attempt truncates, so the retry is the attempt that lands.
+    compact.mutateDuringSummary = () => {
+      if (compact.calls.length > 1) compact.error = undefined
+    }
+
+    expect(await compactIfNeeded(compact, session)).not.toBeNull()
+    expect(compact.calls).toHaveLength(2)
+    expect(summarizedText(compact.calls[1]!.input).length)
+      .toBeLessThan(summarizedText(compact.calls[0]!.input).length)
+  })
+
+  it('surfaces the truncation it could not shrink away and commits nothing', async () => {
+    const ctx = createContext(2_000)
+    const compact = new TestCompactionEngine(ctx, {
+      auto: false,
+      thresholdRatio: 0.5,
+      retainTokens: 50,
+      compactionRetries: 1,
+    })
+    const session = oversizedToolResult(3_000, true)
+    const before = session.surface.nodes
+    const truncation = Object.assign(
+      new Error('summarization truncated at the token cap (incomplete checkpoint)'),
+      { code: 'MAX_TOKENS' },
+    )
+    compact.error = truncation
+
+    await expect(compactIfNeeded(compact, session)).rejects.toBe(truncation)
+    expect(session.surface.nodes).toEqual(before)
+  })
+
+  it('clamps the grown head budget below the threshold and stops when no head is left', async () => {
+    const ctx = createContext(2_000)
+    const compact = new TestCompactionEngine(ctx, {
+      auto: false,
+      thresholdRatio: 0.5,
+      retainTokens: 600,
+      compactionRetries: 1,
+    })
+    const session = oversizedToolResult(3_000, true)
+    const truncation = Object.assign(
+      new Error('summarization truncated at the token cap (incomplete checkpoint)'),
+      { code: 'MAX_TOKENS' },
+    )
+    compact.error = truncation
+
+    // 600 doubles past the 1_000-token threshold, so the retry retains almost the
+    // whole surface, finds no head to summarize, and reports the truncation
+    // instead of claiming there was nothing to compact.
+    await expect(compactIfNeeded(compact, session)).rejects.toBe(truncation)
+    expect(compact.calls).toHaveLength(1)
+  })
+
+  it('grows the retained tail from a zero budget so the retry still differs', async () => {
+    const ctx = createContext(4_000)
+    const compact = new TestCompactionEngine(ctx, {
+      auto: false,
+      thresholdRatio: 0.5,
+      retainTokens: 0,
+      compactionRetries: 1,
+    })
+    const session = conversation(12, 'fixture '.repeat(200).trim())
+    compact.error = Object.assign(
+      new Error('summarization truncated at the token cap (incomplete checkpoint)'),
+      { code: 'MAX_TOKENS' },
+    )
+    compact.mutateDuringSummary = () => {
+      if (compact.calls.length > 1) compact.error = undefined
+    }
+
+    // A zero budget doubles to nothing, so the growth has to lift it off zero for
+    // the retry to be a different request at all.
+    expect(await compactIfNeeded(compact, session)).not.toBeNull()
+    expect(compact.calls).toHaveLength(2)
+  })
 })
 
 describe('compaction region transaction', () => {

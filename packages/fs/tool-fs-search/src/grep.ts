@@ -1,12 +1,14 @@
 /**
  * The model-facing `grep` tool: search file contents with a ripgrep regular
- * expression. Execution spawns the packaged ripgrep binary
- * (`@vscode/ripgrep`) directly through the subprocess seam with a plain argv
- * vector using a fixed line-oriented `rg --json` command so file path, line
- * number, and line text parse without colon-splitting ambiguity — this module
- * owns the model-facing schema, argument validation, argv construction,
- * `--json` record parsing, per-line preview retention, match retention,
- * grouping, and formatting; process concerns stay behind `ctx.subprocess`.
+ * expression. Execution spawns a ripgrep binary directly through the
+ * subprocess seam with a plain argv vector using a fixed line-oriented
+ * `rg --json` command so file path, line number, and line text parse without
+ * colon-splitting ambiguity — the packaged `@vscode/ripgrep` binary, or the
+ * deployment's configured `ripgrepPath` when the spawn runs in another
+ * filesystem — and this module owns the model-facing schema, argument
+ * validation, argv construction, `--json` record parsing, per-line preview
+ * retention, match retention, grouping, and formatting; process concerns stay
+ * behind `ctx.subprocess`.
  *
  * @module @deepseek-ai/dsh-tool-fs-search/grep
  */
@@ -51,6 +53,8 @@ export interface GrepToolCaps {
   stderrMaxBytes: number
   /** Cooperative tool-call budget (ms) attached as `ToolDefinition.timeoutMs`. */
   timeoutMs: number
+  /** Binary path on the execution side to spawn instead of the packaged one (the `ripgrepPath` config). */
+  ripgrepPath?: string
 }
 
 /** Validated `grep` arguments. */
@@ -319,7 +323,7 @@ export function applyGrepTool(ctx: Context, caps: GrepToolCaps): void {
     },
     async execute(args, exec) {
       const input = parseGrepArgs(args)
-      const run = await runRipgrep(ctx, exec, 'grep', buildGrepCommand(input), caps.rawOutputMaxBytes, caps.graceMs, caps.stderrMaxBytes)
+      const run = await runRipgrep(ctx, exec, 'grep', buildGrepCommand(input), caps.rawOutputMaxBytes, caps.graceMs, caps.stderrMaxBytes, caps.ripgrepPath)
       if (run.noMatches) return { matches: [] }
 
       const all: GrepMatch[] = []
