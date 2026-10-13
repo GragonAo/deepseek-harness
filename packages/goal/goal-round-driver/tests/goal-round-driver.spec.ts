@@ -85,12 +85,15 @@ afterEach(async () => {
 })
 
 /** Mount a real loop with only its model scripted. */
-async function harness(script: ScriptEntry[]): Promise<Harness> {
+async function harness(
+  script: ScriptEntry[],
+  config?: { maxErrorRetries?: number; errorRetryDelayMs?: number },
+): Promise<Harness> {
   const ctx = new Context()
   contexts.push(ctx)
   await mountAgentLoopTestDependencies(ctx)
   await ctx.plugin(GoalService)
-  const driver = await ctx.plugin(goalSession)
+  const driver = config === undefined ? await ctx.plugin(goalSession) : await ctx.plugin(goalSession, config)
   await ctx.plugin(AgentLoop, { agents: [] })
   const adapter = new ScriptedAdapter(script)
   ctx.llm.registerAdapter(['mock'], adapter)
@@ -489,6 +492,60 @@ describe('same-session goal driving', () => {
 
     const goal = await waitForGoal(test.ctx, test.agent, current => current?.activation === 'disarmed')
 
+    expect(goal).toMatchObject({ phase: 'active', roundsStarted: 1 })
+    expect(test.adapter.requests).toHaveLength(1)
+  })
+
+  it('re-arms a released goal once the runtime recovers, and the settled round restarts the counter', async () => {
+    const test = await harness([textResponse('round one'), textResponse('round two')], { errorRetryDelayMs: 0 })
+    // A release schedules a retry only for a goal that held authority, so the
+    // failure must land after round one was reserved: flush 1 is goal creation's
+    // checkpoint, flush 2 settles round one.
+    let flushes = 0
+    test.ctx.on('session/flush', () => {
+      flushes += 1
+      return flushes === 2 ? Promise.reject(new Error('disk unavailable')) : undefined
+    })
+    test.ctx.goals.create(test.agent, { objective: 'recover from one transient failure', maxGoalRounds: 2 })
+
+    const goal = await waitForGoal(test.ctx, test.agent, current => current?.roundsStarted === 2)
+
+    const disarmed = test.agent.session.events.find(event => event.type === 'goal-round-driver/disarmed')
+    expect(disarmed?.data.retry).toMatchObject({ attempt: 1, maxAttempts: 3 })
+    expect(test.agent.session.events.some(event => event.type === 'goal-round-driver/rearmed')).toBe(true)
+    expect(goal).toMatchObject({ roundsStarted: 2 })
+    expect(test.adapter.requests).toHaveLength(2)
+  })
+
+  it('probe: the driver may append its own release event', async () => {
+    const test = await harness([])
+    const appended = test.agent.session.append('goal-round-driver/disarmed', {
+      goalId: GoalId('probe'),
+      revision: 1,
+      roundsStarted: 0,
+      cause: 'load',
+      retry: null,
+    })
+
+    expect(appended.type).toBe('goal-round-driver/disarmed')
+    expect(test.agent.session.events.some(event => event.type === 'goal-round-driver/disarmed')).toBe(true)
+  })
+
+  it('leaves the goal released without re-arming once the retry bound is spent', async () => {
+    const test = await harness([textResponse('round one')], { maxErrorRetries: 0, errorRetryDelayMs: 0 })
+    let flushes = 0
+    test.ctx.on('session/flush', () => {
+      flushes += 1
+      return flushes === 2 ? Promise.reject(new Error('disk unavailable')) : undefined
+    })
+    test.ctx.goals.create(test.agent, { objective: 'run out of retry budget', maxGoalRounds: 2 })
+
+    const goal = await waitForGoal(test.ctx, test.agent, current => current?.activation === 'disarmed')
+    await new Promise<void>(resolve => { setTimeout(resolve, 5) })
+
+    const disarmed = test.agent.session.events.find(event => event.type === 'goal-round-driver/disarmed')
+    expect(disarmed?.data.retry).toBeNull()
+    expect(test.agent.session.events.some(event => event.type === 'goal-round-driver/rearmed')).toBe(false)
     expect(goal).toMatchObject({ phase: 'active', roundsStarted: 1 })
     expect(test.adapter.requests).toHaveLength(1)
   })

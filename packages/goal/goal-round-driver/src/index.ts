@@ -6,17 +6,83 @@
 import { isDeepStrictEqual } from 'node:util'
 import { FiberState } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type { GoalMessageSource, GoalRef, GoalView } from '@deepseek-ai/dsh-goal'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, MessageId, MessageSource } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent, UserMessage } from '@deepseek-ai/dsh-session'
+import type {
+  GoalRoundDriverDisarmedEvent,
+  GoalRoundDriverDisarmCause,
+  GoalRoundDriverRearmedEvent,
+  GoalRoundDriverRetry,
+} from './types.ts'
 import { renderGoalRoundPrompt } from './prompt.ts'
 
 export { renderGoalRoundPrompt } from './prompt.ts'
+// The durable release vocabulary (./types.ts) holds the SessionEventMap merge
+// this package owns; re-exporting it keeps that module edge in the emitted
+// declarations, so a consumer reading the two events compiles against them.
+export type * from './types.ts'
 
 export const name = 'goal-round-driver'
 export const inject = ['agents', 'goals', 'sessions']
+
+/**
+ * Deployment policy for a goal round that failed. A failure releases automatic
+ * continuation first — no other trigger may restart a round before the retry
+ * fires — and the bounded retry re-arms the goal after
+ * {@link RETRY_DEFAULTS.errorRetryDelayMs}. The bound, not the delay, is what
+ * stops a goal that keeps failing from spending its round budget: every retry
+ * is one admitted goal round.
+ */
+export interface Config {
+  /**
+   * Consecutive failure-driven releases retried before continuation stays
+   * released for a human resume (default 3). `0` disables automatic retry.
+   */
+  maxErrorRetries?: number
+  /** Delay before the first automatic re-arm in milliseconds; each consecutive attempt doubles it (default 5000). */
+  errorRetryDelayMs?: number
+}
+
+/** Defaults shared by the Config schema and {@link resolveConfig}. */
+export const RETRY_DEFAULTS = Object.freeze({
+  maxErrorRetries: 3,
+  errorRetryDelayMs: 5000,
+})
+
+export const Config: z<Config> = z.object({
+  maxErrorRetries: z.number().default(RETRY_DEFAULTS.maxErrorRetries),
+  errorRetryDelayMs: z.number().default(RETRY_DEFAULTS.errorRetryDelayMs),
+})
+
+/** Validated {@link Config} with every default materialized. */
+interface ResolvedConfig {
+  /** Validated non-negative retry ceiling. */
+  readonly maxErrorRetries: number
+  /** Validated non-negative base re-arm delay. */
+  readonly errorRetryDelayMs: number
+}
+
+/**
+ * Validate the deployment policy at plugin load: a fractional, negative, or
+ * non-finite value is a misconfiguration, never a silent fall-back.
+ * @param config - the plugin config after schemastery defaulting.
+ * @returns the resolved policy.
+ */
+function resolveConfig(config: Config): ResolvedConfig {
+  const maxErrorRetries = config.maxErrorRetries ?? RETRY_DEFAULTS.maxErrorRetries
+  const errorRetryDelayMs = config.errorRetryDelayMs ?? RETRY_DEFAULTS.errorRetryDelayMs
+  if (!Number.isSafeInteger(maxErrorRetries) || maxErrorRetries < 0) {
+    throw new Error(`goal-round-driver: invalid maxErrorRetries ${maxErrorRetries} — must be a non-negative safe integer`)
+  }
+  if (!Number.isSafeInteger(errorRetryDelayMs) || errorRetryDelayMs < 0) {
+    throw new Error(`goal-round-driver: invalid errorRetryDelayMs ${errorRetryDelayMs} — must be a non-negative safe integer`)
+  }
+  return { maxErrorRetries, errorRetryDelayMs }
+}
 
 /** Identity reserved before a goal continuation enters the agent inbox. */
 interface RoundIdentity {
@@ -34,6 +100,21 @@ interface RoundAttempt extends RoundIdentity {
   stale: boolean
 }
 
+/** One release of automatic continuation and the automatic retry it schedules, if any. */
+interface Release {
+  readonly cause: GoalRoundDriverDisarmCause
+  readonly detail?: string
+  readonly retry: GoalRoundDriverRetry | null
+}
+
+/** A scheduled automatic re-arm; any later release or lifecycle edge supersedes it. */
+interface PendingRetry {
+  /** Exact goal revision whose authority the release removed. */
+  readonly ref: GoalRef
+  readonly retry: GoalRoundDriverRetry
+  readonly timer: ReturnType<typeof setTimeout>
+}
+
 /** Serialized process-local scheduling state for one exact Agent lifecycle. */
 interface DriverState {
   readonly agent: Agent
@@ -43,6 +124,9 @@ interface DriverState {
   requested: boolean
   run: Promise<void> | undefined
   stopping: boolean
+  /** Consecutive failure-driven releases with no completed round between them. */
+  errorRetries: number
+  pendingRetry: PendingRetry | undefined
 }
 
 /** Whether a source identifies an automatic, positive-numbered goal round. */
@@ -72,8 +156,22 @@ function renderThrown(value: unknown): string {
   return value instanceof Error ? value.message : String(value)
 }
 
+/**
+ * Operator-facing notice for one release. It states the goal, the driver-owned
+ * cause with its failure text, and what happens to automatic continuation next,
+ * because the release itself leaves no other operator-visible trace.
+ */
+function renderReleaseNotice(goal: GoalView, data: GoalRoundDriverDisarmedEvent): string {
+  const reason = data.detail === undefined ? data.cause : `${data.cause}: ${data.detail}`
+  const continuation = data.retry === null
+    ? 'resume the goal to continue'
+    : `automatic retry in ${data.retry.delayMs} ms (attempt ${data.retry.attempt} of ${data.retry.maxAttempts})`
+  return `goal-round-driver: released automatic continuation for goal "${goal.id}" revision ${goal.revision} (${reason}); ${continuation}`
+}
+
 /** Install automatic same-session continuation and its race fences. */
-export function apply(ctx: Context): void {
+export function apply(ctx: Context, config: Config = {}): void {
+  const resolved = resolveConfig(config)
   const states = new Map<Agent, DriverState>()
 
   /** Create state for an exact currently live agent. */
@@ -88,6 +186,8 @@ export function apply(ctx: Context): void {
       requested: false,
       run: undefined,
       stopping: false,
+      errorRetries: 0,
+      pendingRetry: undefined,
     }
     states.set(agent, state)
     return state
@@ -113,14 +213,108 @@ export function apply(ctx: Context): void {
     return readyToDrive(state) && !state.needsCheckpoint
   }
 
-  /** Remove automatic authority while preserving the durable phase. */
-  function disarm(state: DriverState): void {
+  /** Drop a scheduled automatic re-arm; every later release and lifecycle edge supersedes it. */
+  function cancelPendingRetry(state: DriverState): void {
+    const pending = state.pendingRetry
+    if (pending === undefined) return
+    state.pendingRetry = undefined
+    clearTimeout(pending.timer)
+  }
+
+  /**
+   * Apply one release: supersede any scheduled re-arm, remove process-local
+   * authority, and record the release durably plus on the operator log. A goal
+   * that is not armed has no authority to remove, so it reports nothing.
+   * @param state - the exact agent lifecycle releasing authority.
+   * @param release - driver-owned cause and the retry it schedules, if any.
+   * @returns the exact ref the release applied to, absent when nothing was released.
+   */
+  function applyRelease(state: DriverState, release: Release): GoalRef | undefined {
+    cancelPendingRetry(state)
+    const goal = currentGoal(state)
+    if (goal?.activation !== 'armed') return undefined
     try {
-      const goal = currentGoal(state)
-      if (goal?.activation === 'armed') ctx.goals.disarm(state.agent)
+      ctx.goals.disarm(state.agent)
     } catch (error: unknown) {
-      ctx.logger.warn(`goal-round-driver: could not disarm agent "${state.agent.id}": ${renderThrown(error)}`)
+      ctx.logger.warn(`goal-round-driver: could not release automatic continuation for agent "${state.agent.id}": ${renderThrown(error)}`)
+      return undefined
     }
+    // The release has happened. A failure to record it must not revoke it, nor
+    // cancel the retry the caller schedules from this return.
+    const data: GoalRoundDriverDisarmedEvent = {
+      goalId: goal.id,
+      revision: goal.revision,
+      roundsStarted: goal.roundsStarted,
+      cause: release.cause,
+      ...release.detail === undefined ? {} : { detail: release.detail },
+      retry: release.retry,
+    }
+    try {
+      state.agent.session.append('goal-round-driver/disarmed', data)
+    } catch (error: unknown) {
+      ctx.logger.warn(`goal-round-driver: could not record the release of goal "${goal.id}": ${renderThrown(error)}`)
+    }
+    ctx.logger.warn(renderReleaseNotice(goal, data))
+    return goalRef(goal)
+  }
+
+  /** Release automatic continuation for a decision no automatic retry may override. */
+  function release(state: DriverState, cause: GoalRoundDriverDisarmCause, detail?: string): void {
+    applyRelease(state, { cause, ...(detail === undefined ? {} : { detail }), retry: null })
+  }
+
+  /**
+   * Release automatic continuation after a failure, then schedule its bounded
+   * retry. The counter advances only for a release that removed authority, and
+   * an attempt past the configured bound leaves the goal released until a human
+   * resume — the release event reports which of the two happened.
+   */
+  function releaseAfterFailure(state: DriverState, cause: GoalRoundDriverDisarmCause, detail: string): void {
+    const attempt = state.errorRetries + 1
+    const retry: GoalRoundDriverRetry | null = attempt <= resolved.maxErrorRetries
+      ? {
+        attempt,
+        maxAttempts: resolved.maxErrorRetries,
+        delayMs: resolved.errorRetryDelayMs * 2 ** (attempt - 1),
+      }
+      : null
+    const ref = applyRelease(state, { cause, detail, retry })
+    if (ref === undefined) return
+    state.errorRetries = attempt
+    if (retry === null) return
+    state.pendingRetry = {
+      ref,
+      retry,
+      timer: setTimeout(() => { fireRetry(state, ref, retry) }, retry.delayMs),
+    }
+  }
+
+  /**
+   * Re-arm and re-drive the exact revision the release removed authority from.
+   * A different current goal — a human pause, edit, clear, or a new goal —
+   * supersedes the retry and leaves the goal as that decision left it.
+   */
+  function fireRetry(state: DriverState, ref: GoalRef, retry: GoalRoundDriverRetry): void {
+    state.pendingRetry = undefined
+    const goal = currentGoal(state)
+    if (goal === undefined || goal.id !== ref.id || goal.revision !== ref.revision) return
+    try {
+      const armed = ctx.goals.resume(state.agent, goalRef(goal))
+      const data: GoalRoundDriverRearmedEvent = {
+        goalId: armed.id,
+        revision: armed.revision,
+        retry,
+      }
+      state.agent.session.append('goal-round-driver/rearmed', data)
+      ctx.logger.info(
+        `goal-round-driver: re-armed goal "${armed.id}" revision ${armed.revision} `
+        + `(attempt ${retry.attempt}/${retry.maxAttempts})`,
+      )
+    } catch (error: unknown) {
+      ctx.logger.warn(`goal-round-driver: could not re-arm goal "${goal.id}" for agent "${state.agent.id}": ${renderThrown(error)}`)
+      return
+    }
+    requestDrive(state)
   }
 
   /** Preserve claimed step context when this driver drops only its own round. */
@@ -144,8 +338,7 @@ export function apply(ctx: Context): void {
       try {
         await ctx.sessions.flush(agent.session)
       } catch (error: unknown) {
-        ctx.logger.warn(`goal-round-driver: durability checkpoint failed for agent "${agent.id}": ${renderThrown(error)}`)
-        disarm(state)
+        releaseAfterFailure(state, 'checkpoint-failed', renderThrown(error))
         return
       }
       // A mutation or ordinary prompt may have arrived while the checkpoint
@@ -218,14 +411,12 @@ export function apply(ctx: Context): void {
           try {
             await drive(state)
           } catch (error: unknown) {
-            ctx.logger.warn(`goal-round-driver: driver failed for agent "${state.agent.id}": ${renderThrown(error)}`)
-            disarm(state)
+            releaseAfterFailure(state, 'driver-failed', renderThrown(error))
           }
         }
       })
     } catch (error: unknown) {
-      ctx.logger.warn(`goal-round-driver: could not start driver for agent "${state.agent.id}": ${renderThrown(error)}`)
-      disarm(state)
+      releaseAfterFailure(state, 'scheduler-unavailable', renderThrown(error))
       return
     }
     state.run = run
@@ -234,8 +425,7 @@ export function apply(ctx: Context): void {
       if (state.requested && !state.stopping) requestDrive(state)
     }
     void run.then(retire, (error: unknown) => {
-      ctx.logger.warn(`goal-round-driver: driver task rejected for agent "${state.agent.id}": ${renderThrown(error)}`)
-      disarm(state)
+      releaseAfterFailure(state, 'driver-task-rejected', renderThrown(error))
       retire()
     })
   }
@@ -243,18 +433,20 @@ export function apply(ctx: Context): void {
   // One composite effect keeps the step fence installed until this
   // plugin's own scheduling tasks settle.
   ctx.effect(function* () {
-    ctx.on('agent/error', ({ agent }) => {
+    ctx.on('agent/error', ({ agent, error }) => {
       const state = stateFor(agent)
-      disarm(state)
+      releaseAfterFailure(state, 'agent-error', renderThrown(error))
     })
 
     ctx.on('agent/created', ({ agent }) => { stateFor(agent) })
     ctx.on('agent/disposed', ({ agent }) => { states.delete(agent) })
     ctx.on('agent/session-start', ({ agent }) => {
       const state = stateFor(agent)
+      cancelPendingRetry(state)
       state.attempt = undefined
       state.competingQueued = false
       state.needsCheckpoint = false
+      state.errorRetries = 0
     })
     ctx.on('agent/status', ({ agent, status }) => {
       const state = stateFor(agent)
@@ -268,8 +460,7 @@ export function apply(ctx: Context): void {
           try {
             ctx.goals.pause(agent, goalRef(goal))
           } catch (error: unknown) {
-            ctx.logger.warn(`goal-round-driver: could not pause cancelled goal for agent "${agent.id}": ${renderThrown(error)}`)
-            disarm(state)
+            release(state, 'pause-failed', renderThrown(error))
           }
         }
         requestDrive(state)
@@ -316,14 +507,21 @@ export function apply(ctx: Context): void {
           return
         case 'turn/end':
           if (event.data.reason.kind === 'max-tokens') {
-            disarm(state)
+            release(state, 'max-tokens')
+            return
+          }
+          // The driver's own round finished without an error: the runtime
+          // demonstrably recovered, so the retry counter restarts. A failure
+          // that ended the turn never reaches this branch.
+          if (event.data.reason.kind === 'completed' && state.attempt?.phase === 'admitted') {
+            state.errorRetries = 0
             return
           }
           if (event.data.reason.kind !== 'aborted') return
           if (state.attempt?.phase === 'claimed' || state.attempt?.phase === 'admitted') {
             state.attempt.cancelled = true
           }
-          else disarm(state)
+          else release(state, 'turn-aborted')
           return
         default:
           return
@@ -357,7 +555,7 @@ export function apply(ctx: Context): void {
         valid = validReservation(state, content, source)
       } catch (error: unknown) {
         ctx.logger.warn(`goal-round-driver: pre-step check failed for agent "${agent.id}": ${renderThrown(error)}`)
-        disarm(state)
+        releaseAfterFailure(state, 'pre-step-check-failed', renderThrown(error))
       }
       if (!valid) {
         const attempt = state.attempt
@@ -401,7 +599,7 @@ export function apply(ctx: Context): void {
         valid = validReservation(state, content, source)
       } catch (error: unknown) {
         ctx.logger.warn(`goal-round-driver: post-decision check failed for agent "${agent.id}": ${renderThrown(error)}`)
-        disarm(state)
+        releaseAfterFailure(state, 'post-decision-check-failed', renderThrown(error))
         valid = false
       }
       if (!valid) {
@@ -417,7 +615,7 @@ export function apply(ctx: Context): void {
     // automatic authority from an earlier producer instance.
     for (const agent of ctx.agents.list()) {
       const state = stateFor(agent)
-      disarm(state)
+      release(state, 'load')
     }
 
     // Yielded after listener registration, so this close runs first and the
@@ -426,7 +624,7 @@ export function apply(ctx: Context): void {
       const waits: Promise<void>[] = []
       for (const state of states.values()) {
         state.stopping = true
-        disarm(state)
+        release(state, 'unload')
         const attempt = state.attempt
         if (attempt !== undefined) {
           attempt.stale = true

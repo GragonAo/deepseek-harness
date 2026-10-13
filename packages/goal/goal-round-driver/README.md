@@ -17,7 +17,9 @@ Same-session continuation driver for [`ctx.goals`](../goal/README.md). It turns 
   name: '@deepseek-ai/dsh-goal-round-driver'
 ```
 
-The plugin has no tunable configuration. `maxGoalRounds` belongs to the goal definition, while the model-facing blocked threshold belongs to [`dsh-tool-goal`](../tool-goal/README.md); duplicating either value in the driver could produce divergent policy.
+The driver's only tunable configuration bounds automatic recovery from its own failures: `maxErrorRetries` (default 3) caps the consecutive retries a released goal gets, and `errorRetryDelayMs` (default 5000) is the first delay, doubling per attempt. Both are validated as non-negative safe integers at load, and a delay of 0 retries immediately. `maxGoalRounds` belongs to the goal definition, while the model-facing blocked threshold belongs to [`dsh-tool-goal`](../tool-goal/README.md); duplicating either value in the driver could produce divergent policy.
+
+A release that removed authority records `goal-round-driver/disarmed` with its cause and the retry it scheduled, and each re-arm records `goal-round-driver/rearmed`. A round that finishes without an error restarts the counter, so the bound covers consecutive failures rather than a goal's lifetime; an attempt past the bound leaves the goal released until a human resume.
 
 ## Round contract
 
