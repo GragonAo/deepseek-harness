@@ -46,12 +46,18 @@ class CapturedReader implements SubprocessOutputReader {
 
   constructor(private readonly maxBytes: number) {}
 
-  settle(full: string): void {
+  /**
+   * 收下这次 exec 的结果。
+   * @param full - 容器返回的整段文本（可能已经被容器侧上界截成末尾一段）。
+   * @param containerTruncated - 容器是否已经丢掉了这条流的前缀；丢掉就再也补不回来，
+   *   所以它必须让这次读取报 lossy，而不是让调用方以为读到的就是全部输出。
+   */
+  settle(full: string, containerTruncated: boolean): void {
     this.totalBytes = Buffer.byteLength(full, 'utf8')
     const buf = Buffer.from(full, 'utf8')
     if (buf.length <= this.maxBytes) {
       this.text = full
-      this.truncated = false
+      this.truncated = containerTruncated
     } else {
       this.text = buf.subarray(buf.length - this.maxBytes).toString('utf8')
       this.truncated = true
@@ -73,7 +79,12 @@ class CapturedReader implements SubprocessOutputReader {
   }
 }
 
-/** One captured-exec process handle (no live streaming in this slice). */
+/**
+ * One captured-exec process handle (no live streaming in this slice).
+ *
+ * 进程环境就是 `spec.env` 本身：受管 `DSH_*` 变量组由 `ctx.shellEnv` 这个唯一所有者
+ * 组装，本 provider 只做透传，不自己拼一份列表，也不覆写调用方给的值。
+ */
 class ContainerSubprocessHandle implements SubprocessHandle {
   readonly pid = -1
   readonly stdin = undefined
@@ -108,8 +119,8 @@ class ContainerSubprocessHandle implements SubprocessHandle {
     if (spec.signal !== undefined) execOpts.signal = spec.signal
     const running = runtime.exec(program, spec.argv.slice(1), execOpts)
     void running.then((result) => {
-      this.stdoutReader?.settle(result.stdout)
-      this.stderrReader?.settle(result.stderr)
+      this.stdoutReader?.settle(result.stdout, result.stdoutTruncated === true)
+      this.stderrReader?.settle(result.stderr, result.stderrTruncated === true)
     }, () => {})
     this.done = running.then(result => ({ exitCode: result.exitCode, signal: null }))
   }

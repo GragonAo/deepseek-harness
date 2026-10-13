@@ -21,6 +21,9 @@
       "path": "../../util/brand"
     },
     {
+      "path": "../../core/partition-scope"
+    },
+    {
       "path": "../../runtime-diagnostics/invariants"
     }
   ]

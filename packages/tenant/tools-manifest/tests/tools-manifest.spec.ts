@@ -111,6 +111,31 @@ describe('tools-manifest tier registration', () => {
     await ctx.fiber.dispose()
   })
 
+  it('registers a tier that also ships a restriction document, ignoring that document', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-tools-manifest-'))
+    roots.push(root)
+    const workspace = join(root, 'acme-workspace')
+    await addManifest(join(workspace, 'shared', 'tools'), 'probe.yaml', echoManifest('probe', 'case'))
+    await addManifest(join(workspace, 'shared', 'tools'), 'restriction.yaml', 'allow: [probe]\n')
+
+    const ctx = await harness()
+    await ctx.plugin(applyToolTier, { usersRoot: join(root, 'users'), systemToolsDir: join(root, 'system', 'tools') })
+    await ctx.plugin(applyToolsManifest, { defaultCwd: process.cwd() })
+
+    const tenant: Tenant = { id: TenantId('acme'), name: 'acme', dataRoot: '/data/acme', workspaceRoot: workspace }
+    await runWithTenant(tenant, () => runWithUser(UserId('user-1'), async () => {
+      const agent = await stubAgent(ctx)
+      try {
+        // The restriction document belongs to the restriction loader: only `probe` is registered.
+        expect(ctx.tools.schemas().map(t => t.name)).toEqual(['probe'])
+        expect(await run(ctx, 'probe')).toBe('case')
+      } finally {
+        agent.dispose()
+      }
+    }))
+    await ctx.fiber.dispose()
+  })
+
   it('asserts the tier rank constants match the configured near-over-far order', () => {
     expect(CASE_TOOL_RANK).toBeLessThan(USER_GLOBAL_TOOL_RANK)
     expect(USER_GLOBAL_TOOL_RANK).toBeLessThan(SYSTEM_TOOL_RANK)

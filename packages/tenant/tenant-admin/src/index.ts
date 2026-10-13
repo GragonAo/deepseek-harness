@@ -129,12 +129,17 @@ export class TenantAdmin extends Service {
     this.archiveRoot = config.archiveRoot
     // A durable store is authoritative over the config seed: persisted records
     // overwrite same-id seeds, and records absent from config are re-added.
-    ctx.effect(() => {
-      void this.hydrate().catch((error: unknown) => {
-        this.ctx.logger.warn('tenantAdmin: record-store hydration failed: %s', String(error))
-      })
-      return () => {}
-    }, 'tenantAdmin: hydrate from record store')
+    // The store is an optional provider, and composition does not order rows, so
+    // hydration waits on the service key: it runs when a store mounts, and again
+    // if a late provider replaces it.
+    ctx.inject([TENANT_RECORD_STORE], (storeCtx) => {
+      storeCtx.effect(() => {
+        void this.hydrate().catch((error: unknown) => {
+          storeCtx.logger.warn('tenantAdmin: record-store hydration failed: %s', String(error))
+        })
+        return () => {}
+      }, 'tenantAdmin: hydrate from record store')
+    })
   }
 
   /** Load persisted records into the live registry (store wins over config seeds). */

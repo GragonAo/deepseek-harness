@@ -163,6 +163,35 @@ describe('userPartitionName', () => {
   })
 })
 
+describe('ctx.partitionScope', () => {
+  it('serves the ambient partition and unmounts with the plugin', async () => {
+    const ctx = new Context()
+    // Until the tenant mount exists nothing provides the partition, which is
+    // what leaves the neutral consumers on the single-partition path.
+    expect(ctx.get('partitionScope')).toBeUndefined()
+
+    const fiber = await ctx.plugin(TenantRegistry)
+    const read = () => ctx.get('partitionScope')?.current()
+
+    expect(read()).toBeUndefined()
+    expect(runWithTenant(tenant('acme'), read)).toEqual({
+      tenant: 'acme',
+      tenantName: tenantPartitionName(TenantId('acme')),
+      dataRoot: '/data/acme',
+    })
+    expect(runWithTenant(tenant('acme'), () => runWithUser(UserId('user-1'), read))).toEqual({
+      tenant: 'acme',
+      tenantName: tenantPartitionName(TenantId('acme')),
+      user: 'user-1',
+      userName: userPartitionName(UserId('user-1')),
+      dataRoot: '/data/acme',
+    })
+
+    await fiber.dispose()
+    expect(ctx.get('partitionScope')).toBeUndefined()
+  })
+})
+
 describe('TenantRegistry', () => {
   it('registers, resolves, lists, and disposes records', async () => {
     const ctx = new Context()

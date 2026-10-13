@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { ContainerCommandResult } from '@deepseek-ai/dsh-container'
+import { composeDshEnvironment } from '@deepseek-ai/dsh-shell-env'
 import type { SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import { ContainerSubprocessRuntime } from '../src/index.ts'
 
@@ -58,6 +59,20 @@ describe('ContainerSubprocessRuntime', () => {
     const exec = calls.find(c => c.command === 'echo')
     expect(exec?.args).toEqual(['hi'])
     expect(exec?.opts?.cwd).toBe('/workspace')
+  })
+
+  it('forwards the caller-composed managed DSH_* group unchanged', async () => {
+    const { runtime, calls } = mount()
+    // The group is assembled by its sole owner (`ctx.shellEnv`); this provider
+    // is a carrier, so the bash entry point's container process receives
+    // exactly what the owner composed — no subset, no rewrite.
+    const managed = composeDshEnvironment({ dshHome: '/root/.dsh', sessionId: 'session-tenant-7' })
+    const handle = runtime.spawn({ ...collectSpec(['echo', 'hi']), env: managed })
+    await handle.done
+
+    const env = calls.find(c => c.command === 'echo')?.opts?.env
+    expect(env).toEqual(managed)
+    expect(env?.DSH_SESSION_ID).toBe('session-tenant-7')
   })
 
   it('rejects piped stdio in the slice', () => {

@@ -160,6 +160,11 @@ export class ContainerFileSystem extends FileSystem {
   async readText(target: FsTarget, signal?: AbortSignal): Promise<string> {
     const result = await this.runtime.exec('sh', ['-c', `cat ${quoteShell(String(target.targetKey))}`], signalOpts(signal))
     if (result.exitCode !== 0) throw this.readError(result, target.displayPath)
+    // 容器侧上界截断过的 stdout 不是这个文件的内容，只是它的末尾一段：把一段残缺文本当成
+    // 整份文件交给调用方，会让 `editText` 拿着错的 before 去改文件，所以这里只能失败。
+    if (result.stdoutTruncated === true) {
+      throw new FsError(`${target.displayPath} exceeds the sandbox output budget`, 'FS_TOO_LARGE')
+    }
     return decodeText(result.stdout, target.displayPath)
   }
 
@@ -188,6 +193,11 @@ export class ContainerFileSystem extends FileSystem {
     }
     const result = await this.runtime.exec('sh', ['-c', `base64 < ${quoteShell(String(target.targetKey))}`], signalOpts(signal))
     if (result.exitCode !== 0) throw this.readError(result, target.displayPath)
+    // 同 `readText`：被截断的 base64 解出来的字节不是这个文件的字节。`stat` 报的大小能挡掉
+    // 大部分超限文件，但上界由部署给出，比这里的 `maxBytes` 更小时只有这条标记能发现它。
+    if (result.stdoutTruncated === true) {
+      throw new FsError(`${target.displayPath} exceeds the sandbox output budget`, 'FS_TOO_LARGE')
+    }
     const bytes = Buffer.from(result.stdout.replaceAll('\n', '').trim(), 'base64')
     if (bytes.length > maxBytes) throw new FsError(`${target.displayPath} exceeds ${maxBytes} bytes`, 'FS_TOO_LARGE')
     return bytes
@@ -208,6 +218,10 @@ export class ContainerFileSystem extends FileSystem {
         throw new FsError(`not a directory: ${target.displayPath}`, 'FS_NOT_DIRECTORY')
       }
       throw new FsError(`${target.displayPath}: ${result.stderr.trim()}`, 'FS_IO_ERROR')
+    }
+    // 被截断的清单只是一部分条目，而调用方（技能发现、搜索）会把它当成这个目录的全部内容。
+    if (result.stdoutTruncated === true) {
+      throw new FsError(`${target.displayPath} listing exceeds the sandbox output budget`, 'FS_TOO_LARGE')
     }
     const entries: FsDirEntry[] = []
     for (const line of result.stdout.split('\n')) {

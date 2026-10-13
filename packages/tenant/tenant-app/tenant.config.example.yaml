@@ -1,0 +1,118 @@
+# 租户服务配置示例。
+#
+# 这份文件是 `dsh-tenant --config` 的输入；环境变量可以覆盖其中部署会变的那几项
+# （例如 DSH_TENANT_POSTGRES_URL、DSH_TENANT_HTTP_PORT、DSH_TENANT_SANDBOX_BACKEND）。
+# 所有字段都是必填或可选明确的：写错字段名会在启动时报错，而不是被忽略。
+
+http:
+  # 监听地址：127.0.0.1 只给本机，0.0.0.0 给所有网卡。
+  host: 0.0.0.0
+  port: 8080
+
+database:
+  # 同一个 PostgreSQL 实例承载每个租户的分区：会话、设置、凭据、租户记录。
+  connectionString: postgres://dsh:dsh@127.0.0.1:5432/dsh
+
+auth:
+  # 令牌的签发者必须匹配。
+  issuer: https://id.example.com/realms/business
+  # 二选一：生产用 jwks，本地联调用 secret。
+  verify:
+    kind: jwks
+    jwksUri: https://id.example.com/realms/business/protocol/openid-connect/certs
+  audience: dsh-tenant
+  # 令牌里承载租户 id 的声明；没有这个声明的令牌是平台凭据，只能进管理面。
+  tenantIdClaim: tenant_id
+
+admin:
+  # 准入管理面的作用域；管理面不解析租户，也不需要成员关系。
+  scope: dsh:tenant-admin
+
+tenants:
+  # 每个主体一个子目录，作为它们的跨案件全局目录，挂进沙箱 /global。
+  usersRoot: /srv/dsh/users
+  # purge 租户时目录移入这里。
+  archiveRoot: /srv/dsh/archive
+  defaults:
+    # 新建租户的默认目录；/admin/tenants.create 未显式给出的字段取这里。
+    dataRoot: /srv/dsh/data
+    workspaceRoot: /srv/dsh/workspace
+    toolsRoot: /srv/dsh/tools
+    network: none
+
+permissions:
+  mode: workspace-write
+  approval: ask
+
+model:
+  provider: deepseek-official
+  model: deepseek-v4-flash
+
+web:
+  searchApiKeyEnv: DEEPSEEK_API_KEY
+
+surfaces:
+  openapi: true
+  console: false
+  adminOpenapi: true
+
+sandbox:
+  # 本地开发用 docker；生产改成 k8s，并把 namespace 与 image 填上。
+  backend: docker
+  runtime: docker
+  network: dsh-tenant
+  image: registry.example.com/dsh/tool-exec:1
+  systemRoot: /srv/dsh/system
+  pythonRoot: /srv/dsh/python
+  idleTimeoutMs: 900000
+  sandboxCacheTtlMs: 30000
+  startTimeoutMs: 180000
+  toolTimeoutMs: 600000
+
+# 生产形态（k8s）示例：分层目录、Python 三件套与 claim 都是必填项。
+# sandbox:
+#   backend: k8s
+#   namespace: tenant-sandboxes
+#   image: registry.example.com/dsh/tool-exec:1
+#   workspaceClaim: dsh-tenant-layers
+#   claimRoot: /srv/dsh/claim
+#   systemRoot: /srv/dsh/system
+#   pythonRoot: /srv/dsh/python
+#   toolsRoot: /srv/dsh/tools
+#   pythonEnv:
+#     binDir: /usr/local/bin
+#     virtualEnv: /opt/venv
+#     sitePackages: /opt/venv/lib/python3.12/site-packages
+#   toolTimeoutMs: 600000
+#   idleTimeoutMs: 900000
+#   startTimeoutMs: 180000
+
+# 一个 MCP 服务器挂成一块 mcp-client 插件，工具以 mcp__<serverName>__<原工具名> 注册。
+# `headers` 是认证：客户端把它附在每个 MCP 请求上，值只能来自这份配置文件。
+# 这些 server 按第三方对待（注解不可信），所以逐条写明 `policy: parallel` 与分给它的
+# `maxConcurrentCalls`——它是全宿主共用的硬闸，一批 server 共用同一个后端时各条之和就是打到那个后端的
+# 并发；写数据的工具名进 `exclusiveTools`，它们永不与任何别的调用重叠。
+# 顺序与重发是两件事：`exclusiveTools` 只管提交顺序，重发由 `retryTools` 或工具自己声明的
+# `readOnlyHint: true` 决定。不写 `retryTools` ⇒ 只有声明只读的工具会被重发，写工具永不重发；
+# 写工具要不要允许重发是部署的判断（重复导入安全吗），所以下面保持不写、只把形状标出来。
+# `mode` 默认 `adaptive`：上限从 `maxConcurrentCalls` 起步，被拒一次就往下调、静默一阵再回升，
+# 所以没量过容量的 server 写 `policy: parallel` 加一个起步值就够；量过的写 `mode: fixed` 固定住。
+# `failOnStartupError: true` 让这条 server 连不上时启动就失败，而不是安静地挂成“没有工具”
+# （客户端默认 false）；`toolCallTimeoutMs` 不写就用它默认的 60 秒。
+# 12 条共用同一个后端的完整形状见 docker/tenant.config.example.yaml。
+mcpServers:
+  - serverName: icac-case
+    transport: streamable-http
+    url: http://127.0.0.1:19830/mcp/case
+    headers:
+      Authorization: Bearer <token>
+    failOnStartupError: true
+    toolConcurrency:
+      policy: parallel
+      maxConcurrentCalls: 2
+      # retryTools: [query_case]   # 只在确认这个工具重发安全时写；不写 ⇒ 只有只读工具会重发
+
+# 逐行覆盖组合清单：停用一行，或追加它的配置。
+plugins:
+  hmr:
+    enabled: false

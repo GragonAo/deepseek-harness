@@ -1,0 +1,289 @@
+# 生产形态：租户服务宿主在 k8s 里的 Secret + Deployment + Service。
+#
+# 用法（在部署机上）：
+#
+#   bash docker/build-images.sh
+#   docker save dsh-tenant:latest | ssh <节点> 'ctr -n k8s.io images import -'
+#   kubectl -n dsh create secret generic dsh-tenant-secret \
+#     --from-literal=DSH_TENANT_OIDC_SECRET=<与签发方共享的密钥> \
+#     --from-literal=NEWAPI_API_KEY=<模型 key> \
+#     --from-literal=DSH_OBJECT_ACCESS_KEY=<RGW 用户的 access key> \
+#     --from-literal=DSH_OBJECT_SECRET_KEY=<RGW 用户的 secret key>
+#   # 对象存储的桶与匿名只读策略是部署步骤，见 packages/tenant/object-store/README.md。
+#   kubectl -n dsh apply -f docker/k8s/tenant-rbac.yaml   # 服务账号与沙箱权限，必须先于宿主
+#   cp docker/k8s/tenant-host.yaml /tmp/dsh-tenant-host.yaml   # 本机副本，下面只改它
+#   # 在副本里给 mcpServers 段的每条 server 填上真 token，再应用副本：仓库那份留占位符。
+#   kubectl -n dsh apply -f /tmp/dsh-tenant-host.yaml
+#
+# 整份租户配置装进 Secret，而不是 ConfigMap。配置里的 mcpServers 段要写 MCP 请求头
+# （`Authorization: Bearer <token>`），而请求头的值只能来自配置文件：环境变量覆盖只覆盖
+# config.ts 里 applyEnvOverrides 列出的那几项，mcpServers 不在其中，所以“占位符 + 环境变量
+# 替换”在它身上不生效。ConfigMap 是任何有 `get configmap` 权限的主体都能读的，Secret 至少
+# 把它放进了 `kubectl get secret` 之后。命名空间的 Role 刻意不授予 secrets/configmaps 的
+# 任何权限，而这份 Secret 由 kubelet 挂进容器——卷挂载不走 ServiceAccount，两边不冲突。
+# 代价要说清：别把仓库这份 apply 到已经填好真值的 Secret 上，那会把 token 换回占位符。
+#
+# 密钥不进仓库：配置里 auth.verify.secret 只是占位值，由 DSH_TENANT_OIDC_SECRET 覆盖。
+# 覆盖没生效时表现为第一次管理面调用返回 INVALID_TOKEN，而不是启动失败。
+#
+# 前提条件（属集群既有设施，不在这份清单里）：
+#   - 命名空间 dsh、PostgreSQL 服务 dsh-pg、RWX StorageClass（沙箱工作区 PVC 用它）；
+#   - 服务账号 dsh-host 及其 Role —— k8s 沙箱后端要按 (租户,用户) 建 Pod 与 PVC；
+#   - 沙箱镜像 dsh-tool-exec:latest 已在节点上（k8s 回退到 Docker Hub，而部署网络通常拉不到）；
+#   - 宿主目录 /opt/dsh（config 里的四条路径、systemRoot、pythonRoot 都在它下面）。
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dsh-tenant-config
+  namespace: dsh
+type: Opaque
+# stringData 写明文、由 API 服务端编码；这份配置里有 MCP 请求头，所以它只能是 Secret。
+stringData:
+  tenant.config.yaml: |
+    http:
+      host: 0.0.0.0
+      port: 8788
+
+    database:
+      connectionString: postgres://dsh:dsh-local@dsh-pg:5432/dsh
+
+    auth:
+      issuer: mt-deploy
+      verify:
+        kind: secret
+        # 占位：由 Deployment 的 DSH_TENANT_OIDC_SECRET 覆盖（见文件头）。
+        secret: placeholder-overridden-by-env
+      audience: dsh-tenant
+      tenantIdClaim: tenant_id
+
+    admin:
+      scope: dsh:tenant-admin
+
+    tenants:
+      usersRoot: /opt/dsh/.dsh/users
+      archiveRoot: /opt/dsh/.dsh/archive
+      defaults:
+        dataRoot: /opt/dsh/.dsh/tenants
+        workspaceRoot: /opt/dsh/tenants
+        toolsRoot: /opt/dsh/tools
+        network: none
+
+    permissions:
+      mode: workspace-write
+      approval: ask
+
+    model:
+      # 与下面 plugins.llm-pi-ai 里启用的 provider / model 对应；不匹配时下发 prompt 会以
+      # model-unavailable 拒绝。
+      provider: newapi
+      model: qwen3.8-flash
+
+    web:
+      searchApiKeyEnv: DEEPSEEK_API_KEY
+
+    surfaces:
+      # 控制台页面要前端产物，租户镜像不构建它；接口面看 /openapi.json 与 /swagger。
+      openapi: true
+      console: false
+      adminOpenapi: true
+
+    sandbox:
+      backend: k8s
+      namespace: dsh
+      image: dsh-tool-exec:latest
+      imagePullPolicy: IfNotPresent
+      # 执行容器的工作目录：/tmp 是沙箱自己的 emptyDir，不是挂载点。模型按相对路径写出的中间产物
+      # 随沙箱销毁而消失，不会落进用户案件的工作目录；交付物由模型显式写到挂载的 /workspace。
+      workDir: /tmp/work
+    # 案件共享目录与用户跨案件目录对沙箱只读：它们由业务侧写入，沙箱只是读取方。
+    # 可写就意味着一个用户的沙箱能改到同案件其他用户的输入。
+    sharedReadOnly: true
+    usersReadOnly: true
+      # 沙箱工作区是 RWX PVC：同一租户的多个沙箱 Pod 共用一棵工作区树。
+      workspaceClaim: dsh-workspace
+      claimRoot: /opt/dsh
+      systemRoot: /opt/dsh/.dsh/system
+      # 沙箱镜像里没有 Python：解释器与全部依赖来自宿主这个目录。节点上读不到时加载直接失败。
+      pythonRoot: /opt/dsh/.dsh/pyenv
+      toolsRoot: /opt/dsh/tools
+      # 沙箱内 Python 的三条路径：节点目录宿主读不到，所以逐项给出。
+      pythonEnv:
+        binDir: /opt/dsh/.dsh/pyenv/bin
+        virtualEnv: /opt/dsh/.dsh/pyenv
+        sitePackages: /opt/dsh/.dsh/pyenv/lib/python3.11/site-packages
+      # 空闲预算：注入沙箱的 DSH_TOOL_EXEC_IDLE_MS，沙箱自己判定空闲后退出，退出后 Pod 停在
+      # Succeeded，由宿主下一次启动时的收尸清掉。宿主不自己计时：多副本下它会删掉别人在用的沙箱。
+      idleTimeoutMs: 900000
+      startTimeoutMs: 180000
+      toolTimeoutMs: 600000
+
+    tools:
+      # 呈现方式：both 两种形态同时给——每个工具的原生 schema，加上 run_code 与一份生成的 SDK
+      # 类型声明，模型按当下这件事挑一种；code 只留 run_code 通道；native 只给原生 schema。
+      # 租户栈的默认值是 both，读一个文件、问一句这类会话不必写程序。上百个 MCP 工具的原生 schema
+      # 靠案件级可见工具清单压住：`<tenant.workspaceRoot>/shared/tools/restriction.yaml`
+      # （allow/deny 两份全局工具名列表，见 @deepseek-ai/dsh-tools-restriction 的 README），
+      # 它同时缩小原生 schema 段与 SDK 段。
+      mode: both
+      # 全局天花板：一个 run_code 程序在途的子调用总数不超过它，按**程序**算——每个会话各有一份，
+      # 所以并发会话下打到 MCP 后端的并发还要乘上同时活跃的程序数。真正钉住后端的是每条 server
+      # 自己的 cap。
+      maxParallelSubCalls: 32
+
+    # 每个 MCP 服务器挂成一个 mcp-client 实例，工具以 mcp__<serverName>__<原工具名> 注册。
+    # 这些 server 全部按第三方对待：不由我们维护，所以不指望它们声明 `readOnlyHint` /
+    # `idempotentHint`，mcp-client 的默认策略 annotations 在它们身上读不出并发意图，因此每条
+    # server 都显式写 `toolConcurrency.policy: parallel`——并发的判断与责任由我们承担。
+    # 两层上限的关系：每条 server 的 `maxConcurrentCalls` 是**分配**，而且是一道全宿主共用的硬闸
+    # （所有会话、所有 run_code 程序一起走它）；全局 `maxParallelSubCalls` 是**天花板**，决定单个
+    # 程序撒多宽。一批入口共用同一个后端进程时（同 host:port、只有路径不同），各条 cap 之和就是打到
+    # 那个后端的并发，所以天花板设成后端扛得住的总量，再按各组扇出把 cap 分下去。
+    # 一条 server 内部一旦真的并发，提交顺序就不再有任何保证：写数据的工具要放进 `exclusiveTools`
+    # （它认的是这条 server 的 tools/list 报出的原名，写错会在那次工具同步时报出真正提供的名字）。
+    # 认证走 `headers`；header 的值只能来自配置文件，所以整份配置从 Secret 挂进来（见文件头）。
+    # `failOnStartupError: true` 逐条都写：客户端的默认值是 false，那时一次连不上只留一条日志，
+    # 那一行安静地挂成“这个 server 没有工具”，与“配置错误必须响亮失败”相反。写成 true 后，地址
+    # 写错或对方没起来会让启动直接失败，并在错误里指名那一行（组合行 mcp-<序号>-<serverName>）。
+    # 整段省略就是用 mcp-client 自己的默认值（annotations 策略、10 路），租户侧不替它改。
+    # 12 条入口（共用后端、逐条 cap 与 exclusiveTools）的完整形状见
+    # docker/tenant.config.example.yaml 的 mcpServers 段。
+    #
+    # mcpServers:
+    #   - serverName: icac-case
+    #     transport: streamable-http
+    #     url: http://mcp-gateway:19830/mcp/case
+    #     headers: { Authorization: Bearer <token> }
+    #     failOnStartupError: true
+    #     toolConcurrency: { policy: parallel, maxConcurrentCalls: 2 }
+
+    plugins:
+      llm-pi-ai:
+        enabled: true
+        config:
+          providers:
+            newapi:
+              api: openai-completions
+              baseURL: https://coding.300188.cn/v1
+              apiKeyEnv: NEWAPI_API_KEY
+              displayName: newapi
+              models:
+                - id: qwen3.8-flash
+                  name: Qwen3.8 Flash
+                  maxTokens: 8192
+                  contextWindow: 131072
+      # 默认关着：这套部署只用一个 provider，多挂一个会让 model.provider 的解析多一处来源。
+      llm-deepseek:
+        enabled: false
+      # 对象存储（见 packages/tenant/object-store/README.md）：endpoint 是本服务签名上传用的地址，
+      # 集群内地址即可；publicBaseUrl 是写进模型回复、用户浏览器点的那个地址。两者写反不会报错但会
+      # 产生取不到的链接，verifyPublic 让那种情况在发布时失败而不是把死链交给模型。bucket 必须已经
+      # 开放匿名只读（桶与桶策略是部署步骤，不由服务创建）。两个密钥由 dsh-tenant-secret 提供，
+      # 见文件头的 create secret 命令。
+      object-store:
+        enabled: true
+        config:
+          endpoint: http://rook-ceph-rgw-dsh-objectstore.rook-ceph.svc:80
+          bucket: dsh-public
+          publicBaseUrl: http://192.168.138.130:30900
+          region: us-east-1
+          forcePathStyle: true
+          accessKeyEnv: DSH_OBJECT_ACCESS_KEY
+          secretKeyEnv: DSH_OBJECT_SECRET_KEY
+          # /global 挂载对应的宿主根（宿主的 /opt/dsh 与沙箱共用同一份 PVC）。
+          usersRoot: /opt/dsh/.dsh/users
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dsh-tenant-host
+  namespace: dsh
+spec:
+  replicas: 1
+  # 单副本且共享宿主目录（用户全局层、工具目录、Python 运行时），滚动更新会短暂出现两个实例
+  # 同时持有同一棵树，所以先停后起。
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: dsh-tenant-host
+  template:
+    metadata:
+      labels:
+        app: dsh-tenant-host
+    spec:
+      serviceAccountName: dsh-host
+      containers:
+        - name: tenant
+          image: dsh-tenant:latest
+          # 镜像由 `ctr -n k8s.io images import` 送进节点，所以不拉取；换版本时改这里的 tag
+          # 并重新导入。
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: api
+              containerPort: 8788
+          envFrom:
+            - secretRef:
+                name: dsh-tenant-secret
+          env:
+            # 覆盖这份配置里的占位密钥（见文件头）；配置文件本身由下面的卷挂进来。
+            - name: DSH_TENANT_OIDC_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: dsh-tenant-secret
+                  key: DSH_TENANT_OIDC_SECRET
+          readinessProbe:
+            httpGet:
+              path: /openapi.json
+              port: api
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /openapi.json
+              port: api
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 3
+          volumeMounts:
+            # 四条租户路径、systemRoot、pythonRoot 都在这棵树里；沙箱 Pod 也按同路径挂它。
+            - name: dsh
+              mountPath: /opt/dsh
+            - name: config
+              mountPath: /etc/dsh/tenant.config.yaml
+              subPath: tenant.config.yaml
+              readOnly: true
+      volumes:
+        # 与沙箱挂同一份 PVC：沙箱的 /workspace、/shared、/global、/tools、.dsh/system 与 .dsh/pyenv
+        # 都取自它，而它的根布局 tenants/<案件>/workspace/{users/<主体>,shared} + .dsh/{users,system,pyenv}
+        # + tools 与配置里的 workspaceRoot/usersRoot/systemRoot/pythonRoot/toolsRoot 逐项对应。
+        # 宿主改挂 hostPath 时只看得见另一棵树：沙箱产出的文件在宿主侧一律不存在，发布工具会如实报
+        # 不存在，因此「宿主要读沙箱文件」这条链路依赖这里必须是同一份存储。
+        - name: dsh
+          persistentVolumeClaim:
+            claimName: dsh-workspace
+        - name: config
+          secret:
+            secretName: dsh-tenant-config
+            # 宿主任一进程都以 root 跑（镜像没有 USER），所以 0400 就够了：只有它能读到这份配置。
+            defaultMode: 0400
+            items:
+              - key: tenant.config.yaml
+                path: tenant.config.yaml
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dsh-tenant
+  namespace: dsh
+spec:
+  type: ClusterIP
+  selector:
+    app: dsh-tenant-host
+  ports:
+    # 业务面 POST /api/<method>，管理面 POST /admin/<method>，接口清单在 /openapi.json。
+    - name: api
+      port: 8788
+      targetPort: api

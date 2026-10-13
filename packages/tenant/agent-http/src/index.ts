@@ -15,13 +15,16 @@
  * interchangeable and a cold session is resumed by the gateway itself.
  *
  * The one shared gateway is single-tenant in its visibility, so the carrier
- * also scopes the cross-session channels it exposes: `session.list` /
- * `session.search` items and the session-scoped frames on the `events.mux` /
- * `events.host` streams are filtered to the ambient (tenant, user)'s sessions.
- * Ownership comes from the `session/created` events observed under that
- * (tenant, user) authority — a session is visible to a subject when it has no
- * live owner in this process (a cold session the persistence layer already
- * bound to that subject) or its live owner is that same (tenant, user).
+ * also scopes every surface that names a session: `session.list` /
+ * `session.search` items, the session-scoped frames on the `events.mux` /
+ * `events.host` streams, and each RPC method addressed by an existing
+ * `sessionId`. A live owner this carrier observed decides on its own — this
+ * subject is admitted, another is answered `session-not-found`; an id no live
+ * owner claims must appear in the ambient (tenant, user)'s durable records,
+ * which `session-persistence-postgres` resolves inside that tenant's schema, so
+ * a session another tenant created is refused live or cold and a carrier
+ * restart cannot widen visibility. An unclaimed id with no store to vouch for
+ * it is refused rather than admitted.
  *
  * When a `webServer` service is present, the carrier also registers the
  * `/api` prefix route (a fetch bridge replacing the single-user
@@ -31,18 +34,28 @@
  * reference) and `/console` (a self-contained operator page for tenant
  * administration and the session lifecycle).
  *
+ * The carrier also answers the question channel's own methods
+ * (`@deepseek-ai/dsh-tenant-questions`'s `TENANT_QUESTION_METHODS`) in place of
+ * the gateway, whose method map is closed and shared by every deployment: a
+ * multi-tenant business client asks `POST /api/tenantQuestion.answer` to answer
+ * a question the model asked, under this same authority.
+ *
  * @module @deepseek-ai/dsh-agent-http
  */
 
 import { Buffer } from 'node:buffer'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Context, Service } from '@deepseek-ai/cordis'
-import { toFetchHandler } from '@deepseek-ai/dsh-host-apiproxy'
+import { RpcId, toFetchHandler } from '@deepseek-ai/dsh-host-apiproxy'
+import { clientRequestSchema } from '@deepseek-ai/dsh-host-apiproxy/api/rpc.schema'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import z from '@deepseek-ai/schemastery'
+import { ZodError } from 'zod'
+import { TENANT_QUESTION_METHODS } from '@deepseek-ai/dsh-tenant-questions'
+import type { TenantQuestionMethod } from '@deepseek-ai/dsh-tenant-questions'
 import { swaggerRoutes } from './openapi-route.ts'
 import { consoleRoutes } from './console.ts'
-import { currentTenant, currentUser, DEFAULT_TENANT_ADMIN_SCOPE, runWithScopes, runWithTenant, runWithUser, TenantError, UserId } from '@deepseek-ai/dsh-tenant'
+import { currentTenant, currentUser, runWithScopes, runWithTenant, runWithUser, TenantError, UserId } from '@deepseek-ai/dsh-tenant'
 import type { Tenant, TenantId } from '@deepseek-ai/dsh-tenant'
 import { TenantAuthError } from '@deepseek-ai/dsh-tenant-auth'
 
@@ -67,12 +80,28 @@ const DEFAULT_OPENAPI = true
 /** Default for `console`: serve the operator console out of the box. */
 const DEFAULT_CONSOLE = true
 
+/**
+ * RPC methods addressed by an existing `sessionId` (the `session.*` entries of
+ * the gateway's closed method map whose request payload names one session).
+ * Each is resolved against the ambient (tenant, user) before the gateway runs
+ * it, so a foreign or unknown id never reaches the shared agent registry.
+ */
+const SESSION_ADDRESSED_METHODS: ReadonlySet<string> = new Set([
+  'session.history',
+  'session.models',
+  'session.selectModel',
+  'session.rename',
+  'session.fork',
+  'session.prompt',
+  'session.attachment',
+  'session.updateQueue',
+  'session.cancel',
+])
+
 /** Carrier configuration. */
 export interface Config {
   /** Maximum buffered request body bytes before the route answers 413. */
   maxRequestBodyBytes?: number
-  /** OIDC scope admitted to the administrative surface (skips tenant membership). */
-  adminScope?: string
   /** Serve `GET /openapi.json` and the `/swagger` UI when a `webServer` is present. */
   openapi?: boolean
   /** Serve the `/console` operator page when a `webServer` is present. */
@@ -84,18 +113,15 @@ export class AgentHttp extends Service {
   static inject = ['tenantAuth', 'tenants', 'apiProxy']
   static Config: z<Config> = z.object({
     maxRequestBodyBytes: z.natural().min(1).default(DEFAULT_MAX_REQUEST_BODY_BYTES),
-    adminScope: z.string().default(DEFAULT_TENANT_ADMIN_SCOPE),
     openapi: z.boolean().default(DEFAULT_OPENAPI),
     console: z.boolean().default(DEFAULT_CONSOLE),
   })
 
   /** Live sessionId -> owning (tenant, user), fed by `session/created` under the ambient scope. */
   private readonly sessionScopes = new Map<string, { tenant: string; user: UserId }>()
-  private readonly adminScope: string
 
   constructor(ctx: Context, readonly config: Config) {
     super(ctx, 'agentHttp')
-    this.adminScope = config.adminScope ?? DEFAULT_TENANT_ADMIN_SCOPE
     ctx.effect(() => ctx.on('session/created', (session) => {
       const tenant = currentTenant()
       const user = currentUser()
@@ -135,22 +161,24 @@ export class AgentHttp extends Service {
 
   /**
    * Authenticate one request and answer it through the shared gateway under
-   * the resolved tenant's authority. Authentication and tenant resolution fail
-   * closed before any method runs.
+   * the resolved tenant's authority. Authentication, tenant resolution, and
+   * membership fail closed before any method runs, with no exception for an
+   * administrative token: tenant administration is served by
+   * `@deepseek-ai/dsh-tenant-admin-http` at its own prefix.
    * @param request - the incoming Fetch request (unary RPC or SSE channel).
    * @returns the gateway's response, or a 401/403/500 fail-closed rejection.
    */
   async fetch(request: Request): Promise<Response> {
     try {
       const principal = await this.ctx.tenantAuth.authenticate(request.headers.get('authorization') ?? '')
+      const tenantId = principal.tenantId
+      // The business surface serves one tenant's sessions: a platform credential
+      // proves no tenant, so it is refused here and served by /admin instead.
+      if (tenantId === undefined) {
+        throw new TenantAuthError('INVALID_TOKEN', 'this surface requires a tenant-scoped credential')
+      }
       const subject = UserId(principal.subject)
-      // An administrative token still authenticates against its own enabled
-      // tenant, but is not held to that tenant's membership list: the
-      // `tenantAdmin` surface re-checks the scope before any cross-tenant work.
-      const isAdmin = (principal.scopes ?? []).includes(this.adminScope)
-      const tenant = isAdmin
-        ? this.ctx.tenants.resolve(principal.tenantId)
-        : this.ctx.tenants.resolveMember(principal.tenantId, subject)
+      const tenant = this.ctx.tenants.resolveMember(tenantId, subject)
       return await runWithScopes(principal.scopes, () =>
         runWithTenant(tenant, () => runWithUser(subject, () => this.delegate(request, tenant, subject))))
     } catch (error: unknown) {
@@ -169,6 +197,18 @@ export class AgentHttp extends Service {
   /** Run the gateway for one resolved (tenant, user), scoping the cross-session channels it answers. */
   private async delegate(request: Request, tenant: Tenant, user: UserId): Promise<Response> {
     const { pathname } = new URL(request.url)
+    const channelMethod = pathname.startsWith(`${API_PATH}/`) ? pathname.slice(API_PATH.length + 1) : ''
+    const operation = request.method === 'POST' ? TENANT_QUESTION_METHODS.get(channelMethod) : undefined
+    // The question channel's own methods answer here, in place of the gateway's
+    // closed method map; every other request — including a non-POST on these
+    // paths — is the gateway's to answer.
+    if (operation !== undefined) return await this.answerQuestionMethod(request, channelMethod, operation)
+    if (request.method === 'POST' && SESSION_ADDRESSED_METHODS.has(channelMethod)) {
+      const addressed = await addressedSession(request)
+      if (addressed !== undefined && !await this.recorded(addressed.sessionId, tenant.id, user)) {
+        return sessionNotFound(addressed.rpcId, addressed.sessionId)
+      }
+    }
     const response = await toFetchHandler(this.ctx.apiProxy).fetch(request)
     const scopesStream = pathname === '/api/events.mux' || pathname === '/api/events.host'
     if (request.method === 'GET' && scopesStream && response.body !== null) {
@@ -183,11 +223,92 @@ export class AgentHttp extends Service {
     return response
   }
 
+  /**
+   * Answer one of the question channel's methods.
+   *
+   * The two-level parse is the gateway's, so a business client sees one protocol:
+   * the envelope first (a mismatch or an unreadable envelope is a 200
+   * `bad-request` ServerResponse), then the payload, whose validation lives in
+   * `ctx.tenantQuestions` (its `ZodError` becomes the same `bad-request`). The
+   * carrier layer keeps the gateway's statuses too: 415 for a non-JSON media
+   * type, 400 for a body that is not JSON, 500 for a crash in the channel, and 503
+   * when no question channel is mounted.
+   * @param request - the incoming request, already authenticated and scoped.
+   * @param method - the channel method named by the path.
+   * @param operation - the channel call this method makes.
+   * @returns the ServerResponse full form, or a carrier-layer rejection.
+   */
+  private async answerQuestionMethod(
+    request: Request,
+    method: string,
+    operation: TenantQuestionMethod,
+  ): Promise<Response> {
+    const questions = this.ctx.get('tenantQuestions')
+    if (questions === undefined) return new Response(`question channel is not mounted: ${method}`, { status: 503 })
+    const mediaType = request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase()
+    if (mediaType !== 'application/json') {
+      return new Response('content type must be application/json', { status: 415 })
+    }
+    let body: unknown
+    try {
+      body = await request.json()
+    } catch {
+      return new Response('body is not JSON', { status: 400 })
+    }
+    const envelope = clientRequestSchema.safeParse(body)
+    if (!envelope.success) {
+      // Best effort at correlation, as the gateway does: a salvageable string
+      // rpcId is echoed, otherwise the fixed sentinel keeps the response a valid
+      // ServerResponse.
+      const rawId = (body as { rpcId?: unknown } | null)?.rpcId
+      const rpcId = typeof rawId === 'string' ? RpcId(rawId) : RpcId(INVALID_REQUEST_RPC_ID)
+      return badRequest(rpcId, 'invalid client-request message', envelope.error.issues)
+    }
+    const message = envelope.data
+    if (message.method !== method) {
+      return badRequest(message.rpcId, `method "${message.method}" does not match path "${method}"`, [])
+    }
+    try {
+      const value = await operation(questions, message.payload)
+      return Response.json({ type: 'server-response', rpcId: message.rpcId, result: { ok: true, value } })
+    } catch (error: unknown) {
+      if (error instanceof ZodError) {
+        return badRequest(message.rpcId, `invalid payload for ${method}`, error.issues)
+      }
+      // Anything else is a failure the channel could not express as a payload
+      // rejection — a resolution the session log refused, for instance — and the
+      // carrier reports it as its own crash rather than as a 200 the business
+      // client would read as an answer.
+      return new Response(`handler failure: ${String(error)}`, { status: 500 })
+    }
+  }
+
   /** True when this (tenant, user) may see a session: cold (no live owner) or owned by it. */
   private owns(sessionId: unknown, tenantId: TenantId, user: UserId): boolean {
     if (typeof sessionId !== 'string') return false
     const owner = this.sessionScopes.get(sessionId)
     return owner === undefined || (owner.tenant === String(tenantId) && owner.user === user)
+  }
+
+  /**
+   * True when the ambient (tenant, user) owns a session id. A live owner this
+   * process observed decides on its own — claimed by this subject is admitted,
+   * claimed by another is refused; an unclaimed id must be in the durable store,
+   * which resolves the ambient tenant and user itself, so another tenant's
+   * session is simply absent. An unclaimed id with no store to vouch for it is
+   * refused rather than admitted.
+   * @param sessionId - the id the request names.
+   * @param tenantId - the authenticated tenant.
+   * @param user - the authenticated subject.
+   * @returns whether the request may address that session.
+   */
+  private async recorded(sessionId: string, tenantId: TenantId, user: UserId): Promise<boolean> {
+    const owner = this.sessionScopes.get(sessionId)
+    if (owner !== undefined) return owner.tenant === String(tenantId) && owner.user === user
+    const persistence = this.ctx.get('sessionPersistence')
+    if (persistence === undefined) return false
+    const headers = await persistence.list()
+    return headers.some(header => String(header.id) === sessionId)
   }
 
   /** Drop `session.list`/`session.search` items whose live owner is another (tenant, user). */
@@ -217,6 +338,46 @@ function reconstruct(original: Response, body: unknown): Response {
   headers.delete('content-encoding')
   headers.delete('transfer-encoding')
   return new Response(JSON.stringify(body), { status: original.status, headers })
+}
+
+/**
+ * Read the `rpcId` and `sessionId` a session-addressed request names.
+ * @param request - the incoming client request, read through a clone so the gateway still receives it.
+ * @returns the pair, or `undefined` when the body is not a readable client request.
+ */
+async function addressedSession(request: Request): Promise<{ rpcId: string; sessionId: string } | undefined> {
+  try {
+    const body = await request.clone().json() as { rpcId?: unknown; payload?: { sessionId?: unknown } }
+    const sessionId = body.payload?.sessionId
+    if (typeof body.rpcId !== 'string' || typeof sessionId !== 'string') return undefined
+    return { rpcId: body.rpcId, sessionId }
+  } catch {
+    // A body that is not JSON, or one this carrier cannot read twice: the
+    // gateway's own schema rejection owns that request.
+    return undefined
+  }
+}
+
+/**
+ * Answer a session-addressed request whose id the ambient (tenant, user) has no
+ * record of, in the gateway's own `session-not-found` form.
+ * @param rpcId - the request's correlation id.
+ * @param sessionId - the id the request named.
+ * @returns the JSON-RPC error response.
+ */
+function sessionNotFound(rpcId: string, sessionId: string): Response {
+  return Response.json({
+    type: 'server-response',
+    rpcId: RpcId(rpcId),
+    result: {
+      ok: false,
+      error: {
+        code: 'session-not-found',
+        message: `session '${sessionId}' was not found`,
+        details: { sessionId },
+      },
+    },
+  })
 }
 
 /**
@@ -369,6 +530,25 @@ function jsonError(status: number, code: string, message: string, headers?: Reco
   return new Response(JSON.stringify({ error: { code, message } }), {
     status,
     headers: { 'content-type': 'application/json', ...headers },
+  })
+}
+
+/** Sentinelled rpcId the gateway uses for an envelope whose own id is unreadable. */
+const INVALID_REQUEST_RPC_ID = 'invalid-request'
+
+/**
+ * Report a rejected request in the 200 ServerResponse body both surfaces use for
+ * business errors, so a business client cannot tell which side answered.
+ * @param rpcId - the request's rpcId, or the sentinel when it was unreadable.
+ * @param message - why the request was rejected.
+ * @param issues - the field-level detail of the rejection.
+ * @returns the response carrying the error.
+ */
+function badRequest(rpcId: RpcId, message: string, issues: unknown[]): Response {
+  return Response.json({
+    type: 'server-response',
+    rpcId,
+    result: { ok: false, error: { code: 'bad-request', message, details: { issues } } },
   })
 }
 

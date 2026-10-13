@@ -3,12 +3,17 @@ import { Script } from 'node:vm'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { SignJWT } from 'jose'
 import type { JWTPayload } from 'jose'
-import { SessionStore } from '@deepseek-ai/dsh-session'
+import { SessionStore, type Session } from '@deepseek-ai/dsh-session'
+import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
-import { currentTenant, runWithTenant, runWithUser, TenantId, UserId } from '@deepseek-ai/dsh-tenant'
+import { currentTenant, currentUser, runWithTenant, runWithUser, TenantId, UserId } from '@deepseek-ai/dsh-tenant'
 import type { Tenant } from '@deepseek-ai/dsh-tenant'
 import { TenantRegistry } from '@deepseek-ai/dsh-tenant'
 import JwtTenantAuthenticator from '@deepseek-ai/dsh-tenant-auth-jwt'
+import UserQuestionService from '@deepseek-ai/dsh-user-questions'
+import InvariantRegistry from '@deepseek-ai/dsh-invariants'
+import TenantQuestionService from '@deepseek-ai/dsh-tenant-questions'
+import * as TenantQuestionInvariant from '@deepseek-ai/dsh-tenant-questions/invariant'
 import AgentHttp from '../src/index.ts'
 
 const SECRET = new TextEncoder().encode('test-secret')
@@ -129,6 +134,80 @@ function hostRequest(token: string): Request {
 function createScopedSession(ctx: Context, id: string, user: string): string {
   return String(runWithTenant(tenant(id), () => runWithUser(UserId(user), () => ctx.sessions.create())).id)
 }
+
+/**
+ * A durable store doubling the tenant-keyed persistence provider: `list()`
+ * answers only the ambient (tenant, user)'s records, exactly as
+ * `session-persistence-postgres` resolves them inside that tenant's schema.
+ */
+class FakePersistence extends Service {
+  readonly records = new Map<string, { tenant: string; user: string }>()
+
+  constructor(ctx: Context) {
+    super(ctx, 'sessionPersistence')
+  }
+
+  list = async (): Promise<Array<{ id: string }>> => {
+    const id = currentTenant()?.id
+    const user = currentUser()
+    return [...this.records.entries()]
+      .filter(([, owner]) => owner.tenant === String(id) && owner.user === user)
+      .map(([sessionId]) => ({ id: sessionId }))
+  }
+}
+
+function addressedRequest(method: string, token: string, sessionId: string): Request {
+  return new Request(`http://localhost/api/${method}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      type: 'client-request',
+      rpcId: 'r-owner',
+      method,
+      payload: { sessionId, mode: 'queue', content: [{ type: 'text', text: 'hi' }] },
+    }),
+  })
+}
+
+describe('AgentHttp session ownership', () => {
+  it('answers a live session another tenant owns with session-not-found', async () => {
+    const { ctx } = await boot()
+    const foreign = createScopedSession(ctx, 'globex', 'user-1')
+    const body = await (await ctx.agentHttp.fetch(addressedRequest('session.prompt', await issueToken('acme'), foreign))).json() as {
+      result: { ok: boolean; error?: { code: string; details: { sessionId: string } } }
+    }
+    expect(body.result.ok).toBe(false)
+    expect(body.result.error?.code).toBe('session-not-found')
+    expect(body.result.error?.details.sessionId).toBe(foreign)
+  })
+
+  it('leaves the owning tenant its own live session', async () => {
+    const { ctx } = await boot()
+    const own = createScopedSession(ctx, 'acme', 'user-1')
+    const response = await ctx.agentHttp.fetch(addressedRequest('session.prompt', await issueToken('acme'), own))
+    expect(await response.text()).not.toContain('session-not-found')
+  })
+
+  it('resolves a cold session from the durable store, not from live ownership', async () => {
+    const { ctx } = await boot()
+    const persistence = new FakePersistence(ctx)
+    persistence.records.set('session-cold-acme', { tenant: 'acme', user: 'user-1' })
+    const own = await ctx.agentHttp.fetch(addressedRequest('session.prompt', await issueToken('acme'), 'session-cold-acme'))
+    expect(await own.text()).not.toContain('session-not-found')
+    const foreign = await ctx.agentHttp.fetch(addressedRequest('session.prompt', await issueToken('globex'), 'session-cold-acme'))
+    const body = await foreign.json() as { result: { error?: { code: string } } }
+    expect(body.result.error?.code).toBe('session-not-found')
+  })
+
+  it('refuses an id no record in the ambient tenant owns while a store is mounted', async () => {
+    const { ctx } = await boot()
+    new FakePersistence(ctx)
+    const body = await (await ctx.agentHttp.fetch(addressedRequest('session.history', await issueToken('acme'), 'session-unknown'))).json() as {
+      result: { error?: { code: string } }
+    }
+    expect(body.result.error?.code).toBe('session-not-found')
+  })
+})
 
 describe('AgentHttp', () => {
   it('authenticates a bearer token and runs the gateway inside the resolved tenant', async () => {
@@ -333,7 +412,7 @@ describe('AgentHttp', () => {
       expect(doc.status).toBe(200)
       const docBody = await doc.json() as { openapi?: string; paths?: Record<string, unknown> }
       expect(docBody.openapi).toBe('3.1.0')
-      expect(docBody.paths?.['/api/tenant.admin.create']).toBeDefined()
+      expect(docBody.paths?.['/api/session.create']).toBeDefined()
 
       const ui = await fetch(`${origin}/swagger`)
       expect(ui.status).toBe(200)
@@ -381,8 +460,9 @@ describe('AgentHttp', () => {
       expect(page.status).toBe(200)
       expect(page.headers.get('content-type')).toContain('text/html')
       const html = await page.text()
-      // The page must drive the real wire contract, not a private surface.
-      expect(html).toContain("rpc('tenant.admin.list'")
+      // The page must drive the real wire contracts, not a private surface: the
+      // tenant tab talks to the management carrier's own prefix.
+      expect(html).toContain("admin('tenants.list'")
       expect(html).toContain("rpc('session.prompt'")
       expect(html).toContain("rpc('credentials.set'")
       expect(html).toContain("rpc('credentials.describe'")
@@ -427,6 +507,252 @@ describe('AgentHttp', () => {
       expect((await fetch(`${origin}/openapi.json`)).status).toBe(200)
     } finally {
       await ctx.fiber.dispose()
+    }
+  })
+})
+
+/**
+ * Boot the business surface over the question channel: the same carrier and
+ * authority as the rest of `/api`, plus the seam, the channel, and one live
+ * session with an open turn asking a question.
+ */
+async function bootQuestions(options: { channel?: boolean; invariant?: boolean } = {}): Promise<{
+  ctx: Context
+  token: string
+  otherToken: string
+  session: Session
+  sessionId: string
+  asked: Promise<unknown>
+  live: () => unknown[]
+}> {
+  const ctx = new Context()
+  await ctx.plugin(JwtTenantAuthenticator, { issuer: ISSUER, secret: 'test-secret' })
+  await ctx.plugin(TenantRegistry)
+  ctx.tenants.register(tenant('acme'))
+  await ctx.plugin(SessionStore)
+  await ctx.plugin(AgentRegistry)
+  new FakeGateway(ctx)
+  await ctx.plugin(UserQuestionService)
+  if (options.invariant === true) {
+    await ctx.plugin(InvariantRegistry)
+    await ctx.plugin(TenantQuestionInvariant)
+  }
+  if (options.channel !== false) await ctx.plugin(TenantQuestionService)
+  await ctx.plugin(AgentHttp)
+  const scope = { tenant: tenant('acme'), user: UserId('user-1') }
+  const session = runWithTenant(scope.tenant, () => runWithUser(scope.user, () => ctx.sessions.create()))
+  const agent = { id: session.id, session } as unknown as Agent
+  ctx.agents.enter(agent, undefined)
+  session.append('turn/start', { turn: 1 })
+  const asked = runWithTenant(scope.tenant, () => runWithUser(scope.user, () => ctx.userQuestions.ask({
+    agent,
+    questions: [{ id: 'target', question: 'Which target?', options: [{ label: 'staging' }, { label: 'production' }] }],
+  })))
+  // Disposal aborts whatever a test leaves unanswered; a test that means to
+  // assert that rejection awaits this same promise.
+  void asked.catch(() => undefined)
+  return {
+    ctx,
+    token: await issueToken('acme'),
+    otherToken: await issueToken('acme', 'user-2'),
+    session,
+    sessionId: String(session.id),
+    asked,
+    live: () => runWithTenant(tenant('acme'), () => runWithUser(UserId('user-1'), () => ctx.tenantQuestions.list())),
+  }
+}
+
+/** One client-request envelope over the question channel. */
+function questionRequest(method: string, payload: unknown, token?: string): Request {
+  const headers: Record<string, string> = { 'content-type': 'application/json' }
+  if (token !== undefined) headers.authorization = `Bearer ${token}`
+  return new Request(`http://localhost/api/${method}`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ type: 'client-request', rpcId: 'q1', method, payload }),
+  })
+}
+
+describe('AgentHttp question channel', () => {
+  it('admits the answer with the same authority as the rest of the business surface', async () => {
+    const h = await bootQuestions()
+    try {
+      const denial = await h.ctx.agentHttp.fetch(questionRequest('tenantQuestion.list', {}, undefined))
+      expect(denial.status).toBe(401)
+      expect(await denial.json()).toMatchObject({ error: { code: 'MISSING_CREDENTIAL' } })
+      expect(h.live()).toHaveLength(1)
+    } finally {
+      await h.ctx.fiber.dispose()
+    }
+  })
+
+  it('lists the waiting question and answers it', async () => {
+    const h = await bootQuestions()
+    try {
+      const listed = await h.ctx.agentHttp.fetch(questionRequest('tenantQuestion.list', {}, h.token))
+      expect(listed.status).toBe(200)
+      const listBody = await listed.json() as { rpcId: string; result: { ok: boolean; value: unknown[] } }
+      expect(listBody.rpcId).toBe('q1')
+      expect(listBody.result.ok).toBe(true)
+      expect(listBody.result.value).toHaveLength(1)
+
+      const answered = await h.ctx.agentHttp.fetch(questionRequest('tenantQuestion.answer', {
+        sessionId: h.sessionId,
+        questionId: (listBody.result.value[0] as { id: string }).id,
+        answer: { answers: [{ id: 'target', selected: ['production'] }] },
+      }, h.token))
+      expect(answered.status).toBe(200)
+      expect(await answered.json()).toMatchObject({ result: { ok: true } })
+      await expect(h.asked).resolves.toEqual({ answers: [{ id: 'target', selected: ['production'] }] })
+    } finally {
+      await h.ctx.fiber.dispose()
+    }
+  })
+
+  it('refuses an answer from another subject in the same tenant', async () => {
+    const h = await bootQuestions()
+    try {
+      const listed = await h.ctx.agentHttp.fetch(questionRequest('tenantQuestion.list', {}, h.token))
+      const value = (await listed.json() as { result: { value: Array<{ id: string }> } }).result.value
+      const response = await h.ctx.agentHttp.fetch(questionRequest('tenantQuestion.answer', {
+        sessionId: h.sessionId,
+        questionId: value[0]?.id,
+        answer: { answers: [{ id: 'target', selected: ['production'] }] },
+      }, h.otherToken))
+
+      // A business error travels in the 200 ServerResponse body, as the gateway's do.
+      expect(response.status).toBe(200)
+      expect(await response.json()).toMatchObject({
+        result: { ok: false, error: { code: 'bad-request', message: 'invalid payload for tenantQuestion.answer' } },
+      })
+      // The refusal changed nothing: the ask still waits for its own subject.
+      expect(h.live()).toHaveLength(1)
+    } finally {
+      await h.ctx.fiber.dispose()
+    }
+  })
+
+  it('rejects a malformed payload with the field-level detail', async () => {
+    const h = await bootQuestions()
+    try {
+      const response = await h.ctx.agentHttp.fetch(questionRequest('tenantQuestion.answer', {
+        sessionId: h.sessionId,
+        questionId: 'not-asked',
+        answer: { answers: [{ id: 'target', selected: ['production'] }] },
+      }, h.token))
+
+      expect(response.status).toBe(200)
+      const body = await response.json() as { result: { error: { details: { issues: unknown[] } } } }
+      expect(body.result.error.details.issues).toHaveLength(1)
+      expect(h.live()).toHaveLength(1)
+    } finally {
+      await h.ctx.fiber.dispose()
+    }
+  })
+
+  it('applies the gateway’s carrier statuses and envelope rules to the same paths', async () => {
+    const h = await bootQuestions()
+    try {
+      const wrongType = new Request('http://localhost/api/tenantQuestion.list', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${h.token}`, 'content-type': 'text/plain' },
+        body: '{}',
+      })
+      expect((await h.ctx.agentHttp.fetch(wrongType)).status).toBe(415)
+
+      const notJson = new Request('http://localhost/api/tenantQuestion.list', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${h.token}`, 'content-type': 'application/json' },
+        body: 'not json',
+      })
+      expect((await h.ctx.agentHttp.fetch(notJson)).status).toBe(400)
+
+      // An unreadable envelope is a 200 bad-request ServerResponse, not a carrier failure.
+      const badEnvelope = await h.ctx.agentHttp.fetch(new Request('http://localhost/api/tenantQuestion.list', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${h.token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ nope: true }),
+      }))
+      expect(badEnvelope.status).toBe(200)
+      expect(await badEnvelope.json()).toMatchObject({
+        rpcId: 'invalid-request',
+        result: { ok: false, error: { code: 'bad-request', message: 'invalid client-request message' } },
+      })
+
+      const mismatched = await h.ctx.agentHttp.fetch(new Request('http://localhost/api/tenantQuestion.answer', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${h.token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ type: 'client-request', rpcId: 'q2', method: 'tenantQuestion.list', payload: {} }),
+      }))
+      expect(mismatched.status).toBe(200)
+      expect(await mismatched.json()).toMatchObject({
+        rpcId: 'q2',
+        result: { ok: false, error: { message: 'method "tenantQuestion.list" does not match path "tenantQuestion.answer"' } },
+      })
+
+      // A non-POST on a channel path stays the gateway's to answer: unknown route.
+      const get = await h.ctx.agentHttp.fetch(new Request('http://localhost/api/tenantQuestion.list', {
+        method: 'GET',
+        headers: { authorization: `Bearer ${h.token}` },
+      }))
+      expect(get.status).toBe(404)
+
+      // A salvageable rpcId is echoed even when the envelope itself is unusable.
+      const salvageable = await h.ctx.agentHttp.fetch(new Request('http://localhost/api/tenantQuestion.list', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${h.token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ type: 'client-request', rpcId: 'q3', method: 42, payload: {} }),
+      }))
+      expect(await salvageable.json()).toMatchObject({ rpcId: 'q3', result: { ok: false, error: { code: 'bad-request' } } })
+
+      // The channel answers under its own prefix only: the same method name on any
+      // other path is the gateway's request, not an answer hole.
+      const outsideThePrefix = await h.ctx.agentHttp.fetch(new Request('http://localhost/tenantQuestion.list', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${h.token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ type: 'client-request', rpcId: 'q4', method: 'tenantQuestion.list', payload: {} }),
+      }))
+      expect(outsideThePrefix.status).toBe(404)
+    } finally {
+      await h.ctx.fiber.dispose()
+    }
+  })
+
+  it('reports a channel failure the envelope cannot describe as a carrier crash', async () => {
+    const h = await bootQuestions({ invariant: true })
+    try {
+      // The turn ends between the ask and the answer, so the audit invariant refuses
+      // the resolution and the channel fails with something other than a payload
+      // rejection — the carrier's own 500, not a silent success.
+      h.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+      const response = await h.ctx.agentHttp.fetch(questionRequest('tenantQuestion.answer', {
+        sessionId: h.sessionId,
+        questionId: (h.live()[0] as { id: string }).id,
+        answer: { answers: [{ id: 'target', selected: ['production'] }] },
+      }, h.token))
+
+      expect(response.status).toBe(500)
+      expect(await response.text()).toContain('handler failure')
+      // The model is not left waiting for a decision the log will never carry.
+      await expect(h.asked).rejects.toMatchObject({ message: expect.stringMatching(/outside any open turn/) as unknown as string })
+    } finally {
+      await h.ctx.fiber.dispose()
+    }
+  })
+
+  it('reports an unmounted channel instead of silently dropping the method', async () => {
+    const h = await bootQuestions({ channel: false })
+    try {
+      const response = await h.ctx.agentHttp.fetch(questionRequest('tenantQuestion.list', {}, h.token))
+      expect(response.status).toBe(503)
+      expect(await response.text()).toContain('tenantQuestion.list')
+      // The seam itself is still mounted; nothing answered the question, so the
+      // model's own ask fails rather than waiting forever.
+      expect(h.ctx.get('userQuestions')).toBeDefined()
+      expect(h.ctx.get('tenantQuestions')).toBeUndefined()
+      await expect(h.asked).rejects.toMatchObject({ code: 'NO_PROVIDER' })
+    } finally {
+      await h.ctx.fiber.dispose()
     }
   })
 })

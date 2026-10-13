@@ -1,20 +1,18 @@
 # @deepseek-ai/dsh-storage-postgres
 
-English | [中文](README.zh.md)
+存储 hub 的 (租户, 用户) 键控 PostgreSQL 后端。它提供 `kv` facet 并注册为后端 `postgres`；每个按用户单位操作解析环境租户与用户，并指向该租户的私有 schema 加主键内嵌的 `user_id`，因此漏掉的谓词在结构上也无法寻址另一租户或另一用户的元组。案件共享单位（`shared: true`）只按租户存储，无 `user_id`。
 
-(Tenant, user)-keyed PostgreSQL backend for the storage hub. It serves the `kv` facet and registers as backend `postgres`; every per-user unit operation resolves the ambient tenant and user and targets that tenant's private schema plus the in-primary-key `user_id`, so a dropped predicate cannot structurally address another tenant's or another user's tuples. A case-shared unit (`shared: true`) stores under the tenant alone, with no `user_id`.
+## 隔离模型
 
-## Isolation model
+- **每租户一个 schema。** schema 名是 `tenantPartitionName(id)` —— 消毒后的租户 id 前缀加 12 位十六进制哈希后缀，始终是安全的 PostgreSQL 标识符且 ≤63 字符。
+- **每条记录一个用户行。** `kv_record` 以 `(unit, user_id, table_name, key)` 为键，`kv_global` 以 `(unit, user_id)` 为键，因此同一租户的两个用户在同一 schema 中各持独立的记录。
+- **案件共享单位（`shared: true`）只按租户存储。** `KvUnitDescriptor.shared`（默认按用户）让单位的记录与全局槽不带按用户的 `user_id`，写入 `kv_case_record`（主键 `(unit, table_name, key)`）与 `kv_case_global`（主键 `(unit)`），于是该租户的每个主体都读写同一份案件级记忆。这种单位只解析 `requireTenant()`，其双重打开守卫键是 `${schema}.${name}` 而非 `${schema}.${user}.${name}`。
+- **逐操作目标绑定，而非逐次打开。** `ctx.storageDomain` 每个单位每个进程按 (租户, 用户) 只打开一次，因此后端在每次 `loadAll`/`putRecord`/`deleteRecord`/`setGlobal` 开始时解析 `requireTenant()` 与 `requireUser()`，并在整个调用中携带捕获的作用域。在认证请求之外，操作以 `NO_TENANT_IN_SCOPE`（或租户无用户时的 `NO_USER_IN_SCOPE`）失败关闭。
+- **版本盖章按租户进行。** 每个租户的 schema 在首次使用时盖自己的 `kv_meta.version`；不匹配时以 `version-mismatch` 拒绝。
 
-- **One schema per tenant.** The schema name is `tenantPartitionName(id)` — a sanitized tenant-id prefix plus a 12-hex hash suffix, always a safe PostgreSQL identifier and ≤63 characters.
-- **One user row per record.** `kv_record` keys by `(unit, user_id, table_name, key)` and `kv_global` by `(unit, user_id)`, so two users of one tenant keep separate records in the same schema.
-- **Case-shared units (`shared: true`) store under the tenant alone.** `KvUnitDescriptor.shared` (default per-user) keeps a unit's records and global slot with no per-user `user_id`, in `kv_case_record` (primary key `(unit, table_name, key)`) and `kv_case_global` (primary key `(unit)`), so every subject of a tenant reads and writes the same case-level memory. Such a unit resolves `requireTenant()` only, and its double-open guard key is `${schema}.${name}` rather than `${schema}.${user}.${name}`.
-- **Target-bound per operation, not per open.** `ctx.storageDomain` opens each unit once per process per (tenant, user), so the backend resolves `requireTenant()` and `requireUser()` at the start of every `loadAll`/`putRecord`/`deleteRecord`/`setGlobal` and carries the captured scope through the whole call. Outside an authenticated request the operation fails closed with `NO_TENANT_IN_SCOPE` (or `NO_USER_IN_SCOPE` for a tenant without a user).
-- **Version stamping is per tenant.** Each tenant's schema stamps its own `kv_meta.version` at first use; a mismatch rejects with `version-mismatch`.
+每个租户 schema 有五张表：`kv_meta`（单位版本，在租户内共享）、`kv_record`（每个 `(unit, user_id, table, key)` 一条 `jsonb` 记录）、`kv_global`（每个 `(unit, user_id)` 一个值）、`kv_case_record`（每个 `(unit, table, key)` 一条 `jsonb` 记录，无 `user_id`，供案件共享单位用）、`kv_case_global`（每个 `(unit)` 一个值，供案件共享单位用）。
 
-Each tenant schema hosts five tables: `kv_meta` (unit version, shared across the tenant), `kv_record` (`jsonb` record per `(unit, user_id, table, key)`), `kv_global` (one value per `(unit, user_id)`), `kv_case_record` (`jsonb` record per `(unit, table, key)`, no `user_id`, for case-shared units), and `kv_case_global` (one value per `(unit)`, for case-shared units).
-
-## Configuration
+## 配置
 
 ```yaml
 - name: '@deepseek-ai/dsh-storage-postgres'
@@ -22,7 +20,7 @@ Each tenant schema hosts five tables: `kv_meta` (unit version, shared across the
     connectionString: 'postgres://dsh:dsh@localhost:5432/dsh'
 ```
 
-The role must hold `CREATE` on the target database: each tenant's first write creates its own schema.
+角色必须在目标数据库持有 `CREATE`：每个租户的首次写入会创建其自己的 schema。
 
 ## Model Experience
 
@@ -30,18 +28,18 @@ The role must hold `CREATE` on the target database: each tenant's first write cr
 
 #### What the model sees
 
-Nothing. This backend serves the storage hub as backend `postgres`, below the model: no tools, prompts, or session events.
+无。此后端以 `postgres` 后端身份服务模型之下的存储 hub：没有工具、提示词或会话事件。
 
 #### Token effect
 
-Zero direct tokens on every request.
+每个请求零直接 token。
 
 #### KV Cache effect
 
-Independent of live requests: the package never touches a request prefix.
+与在线请求无关：本包从不触碰请求前缀。
 
 ## Known Limitations and Deferred Work
 
-- **Single-process version stamping.** The `ensured` memo is host-local and not transactional; the `kv_meta` version is stamped without a concurrency guard for horizontally scaled processes.
-- **Ambient-scope writes only.** Domains whose writes outlive the request's `runWithTenant`+`runWithUser` scope (e.g. async projection-cache flush) are not supported by a resolver that reads the ambient scope; such domains are out of scope for the vertical slice.
-- **No connection liveness probe.** A dead pool surfaces as a query error rather than being detected at load; reconnect behavior is left to `pg`.
+- **单进程版本盖章。** `ensured` 记忆是宿主本地的、非事务的；对于水平扩展的进程，`kv_meta` 版本盖章没有并发守护。
+- **只支持环境作用域写入。** 其写入活过请求 `runWithTenant`+`runWithUser` 作用域（例如异步投影缓存 flush）的域，不受读取环境作用域的解析器支持；此类域不在纵向切片范围内。
+- **没有连接活跃性探针。** 失效连接池表现为查询错误而非加载时检测；重连行为留给 `pg`。

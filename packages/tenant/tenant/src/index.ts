@@ -19,6 +19,12 @@
  * `tenant_id`/schema binding they own, so a request can only address the tenant
  * its authentication minted.
  *
+ * This plugin also mounts the ambient request partition
+ * (`ctx.partitionScope`) over that same authority, so a state-owning consumer
+ * partitions through `@deepseek-ai/dsh-partition-scope` instead of importing
+ * this package: the dependency runs provider → consumer, and a deployment that
+ * mounts tenancy cannot mount it without partitioning.
+ *
  * @module @deepseek-ai/dsh-tenant
  */
 
@@ -27,6 +33,7 @@ import { createHash } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Branded } from '@deepseek-ai/dsh-brand'
+import type { PartitionScope, RequestPartition } from '@deepseek-ai/dsh-partition-scope'
 
 /** Opaque cross-boundary tenant id. */
 export type TenantId = Branded<'TenantId'>
@@ -96,6 +103,33 @@ export function userPartitionName(user: UserId): string {
   const suffix = createHash('sha256').update(user).digest('hex').slice(0, 12)
   const name = `user_${prefix}_${suffix}`
   return name.length <= MAX_PARTITION_LENGTH ? name : name.slice(0, MAX_PARTITION_LENGTH)
+}
+
+/**
+ * Ambient request partition over the authority above, mounted as
+ * `ctx.partitionScope` by {@link TenantRegistry}.
+ *
+ * Stateless: every call peeks the ambient authority, so a tree that switches
+ * tenant or user observes the switch immediately and no provider state can
+ * leak between requests. The partition-name derivation stays here, so a
+ * consumer reads the safe identifier form without owning the rule.
+ */
+export class TenantPartitionScope implements PartitionScope {
+  /**
+   * The partition the ambient request acts as.
+   * @returns the tenant and subject in scope, or `undefined` outside any tenant run.
+   */
+  current(): RequestPartition | undefined {
+    const tenant = currentTenant()
+    if (tenant === undefined) return undefined
+    const user = currentUser()
+    return {
+      tenant: tenant.id,
+      tenantName: tenantPartitionName(tenant.id),
+      dataRoot: tenant.dataRoot,
+      ...(user === undefined ? {} : { user, userName: userPartitionName(user) }),
+    }
+  }
 }
 
 /**
@@ -339,6 +373,10 @@ export class TenantRegistry extends Service {
 
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'tenants')
+    // One plugin carries both the identity registry and the ambient partition
+    // its consumers read, so mounting tenancy cannot leave partitioning
+    // unregistered.
+    ctx.provide('partitionScope', new TenantPartitionScope())
     for (const input of config.tenants ?? []) {
       const record: Tenant = {
         id: TenantId(input.id),

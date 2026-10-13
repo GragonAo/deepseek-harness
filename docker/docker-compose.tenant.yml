@@ -1,0 +1,85 @@
+# 本地开发：租户服务宿主（dsh-tenant:latest）+ 按 (租户,用户) 分区的 Postgres 后端。
+# 生产形态是 k8s，走 docker/k8s/tenant-host.yaml；这份 compose 只服务本地联调。
+#
+# 前置：先在宿主机上把两个镜像构建好，compose 自己不构建镜像。
+#
+#   bash docker/build-images.sh
+#   cp docker/tenant.config.example.yaml docker/tenant.config.yaml   # 按需改路径与端口
+#   export DSH_TENANT_OIDC_SECRET=<与签发方共享的密钥>
+#   docker compose -f docker/docker-compose.tenant.yml up -d
+#
+# 三个硬约束，改错就是起不来、或者租户沙箱连不上：
+#
+# 1. network_mode: host —— docker 沙箱后端把沙箱的工具执行端口发布到【宿主】loopback
+#    （`-p 127.0.0.1::8642`），再 POST 到 http://127.0.0.1:<port>/exec
+#    （packages/tenant/container-docker/src/index.ts 的 publishHost / connectHost）。
+#    bridge 网络里容器自己的 127.0.0.1 是它本身，够不到宿主 loopback，沙箱会一直起不来。
+#    要在容器里改用别的网络形态，就必须同时改配置里的 publishHost / connectHost 与这里的
+#    network_mode，并接受把没有鉴权的命令通道暴露出去的风险。
+#
+# 2. 挂载路径宿主与容器必须完全一致 —— 租户记录里的 dataRoot / workspaceRoot / toolsRoot
+#    与 pythonRoot 都会被原样交给 `docker -v`，由宿主 daemon 解析；同一路径又必须在这个容器里
+#    可见（建目录、skill/settings/tools 分层挂载都直接读它）。所以下面每一行都是 /x:/x。
+#    Docker 会把不存在的挂载源建成空目录，而空目录会被拒绝：pythonRoot 里
+#    bin/pyvenv.cfg/lib/python3.*/site-packages 缺任何一个，加载就直接失败，不会静默降级。
+#    路径要和 docker/tenant.config.example.yaml 里那四条一致；改一处就要改另一处。
+#
+# 3. /etc/dsh/tenant.config.yaml —— 镜像 CMD 的默认配置文件路径。挂进来的那份是宿主上的
+#    普通文件；示例文件里 auth.verify.secret 是占位值，由下面的环境变量覆盖。
+
+# 固定项目名：这份文件被复制到哪，卷名和容器名都不跟着目录名变。
+name: dsh-tenant
+
+services:
+  tenant:
+    image: dsh-tenant:latest
+    container_name: dsh-tenant
+    # 硬约束 1，见文件头。
+    network_mode: host
+    restart: unless-stopped
+    # 若复用已有 Postgres，删掉这个 depends_on 和下面的 postgres 服务，
+    # 并把配置里的 connectionString 指过去。
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # 覆盖示例配置里的占位密钥：两处必须一致，否则签发的 token 验不过。
+      DSH_TENANT_OIDC_SECRET: ${DSH_TENANT_OIDC_SECRET:?需要设置 DSH_TENANT_OIDC_SECRET}
+      # 部署级兜底 key。凭据解析顺序是「继承环境 > 按 (租户,用户) 的 PG 存储 > .env」，
+      # 空值等同于未设置，所以留空不会挡住运营按租户配 key。
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+    volumes:
+      # 宿主用 docker CLI 为每个 (租户,用户) 拉起沙箱容器，需要 daemon socket。
+      # CLI 在镜像里（Dockerfile.tenant 的 dockercli 阶段），socket 在这里进来。
+      - /var/run/docker.sock:/var/run/docker.sock
+      # 硬约束 3。
+      - ${TENANT_CONFIG_FILE:-tenant.config.yaml}:/etc/dsh/tenant.config.yaml:ro
+      # 硬约束 2：租户数据、用户全局层、工具目录与 Python 运行时都在这棵树里。
+      # 只读挂 Python 运行时不够：宿主还要按同一路径探测它，所以整棵树一起挂。
+      - /opt/dsh-dev:/opt/dsh-dev
+    # 默认只绑宿主的 0.0.0.0:8787（宿主网络即本机）。要从别的机器访问 /swagger 与 /api，
+    # 建议 ssh -L 8787:127.0.0.1:8787 <dev-host>，而不是把带 RCE 能力的 API 直接放到网络上。
+
+  postgres:
+    image: ${POSTGRES_IMAGE:-pgvector/pgvector:pg16}
+    container_name: dsh-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dsh
+      # 默认值是本地联调用的，只发到 127.0.0.1；正式部署请显式设置 POSTGRES_PASSWORD。
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dsh-local}
+      POSTGRES_DB: dsh
+    # 只发到宿主 loopback：宿主用宿主网络，127.0.0.1:5432 直接可达，也不把库暴露到局域网。
+    # 宿主 5432 已被占用时改 POSTGRES_PORT，并同步改配置里的 connectionString。
+    ports:
+      - 127.0.0.1:${POSTGRES_PORT:-5432}:5432
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U dsh -d dsh']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  postgres-data:

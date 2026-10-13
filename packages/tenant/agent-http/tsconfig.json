@@ -30,6 +30,9 @@
       "path": "../tenant-auth"
     },
     {
+      "path": "../tenant-questions"
+    },
+    {
       "path": "../../runtime-diagnostics/invariants"
     }
   ]

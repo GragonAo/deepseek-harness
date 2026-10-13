@@ -12,8 +12,8 @@
 # own absolute path (packages/tenant/container-docker/README.md). One portable
 # Python lives on the host, so a version bump or a new dependency is one directory
 # change for every sandbox rather than an image rebuild, the interpreter version
-# cannot drift from the packages installed beside it, and this build reaches no
-# package index. A sandbox started without that mount has no `python3` at all,
+# cannot drift from the packages installed beside it, and no package index supplies
+# the interpreter. A sandbox started without that mount has no `python3` at all,
 # which is the intended failure — the mount is a hard requirement, not an
 # optimization.
 #
@@ -38,15 +38,41 @@ FROM ${NODE_IMAGE}
 RUN command -v bash >/dev/null 2>&1 || (apt-get update \
   && apt-get install -y --no-install-recommends bash \
   && rm -rf /var/lib/apt/lists/*)
-# Case skills are written against their original host layout: the bundled report
-# builder is invoked as /opt/data/skills/<skill>/report_html/build_report_html.py
-# with /opt/hermes/.venv/bin/python3. /opt/data/skills is the case-shared skill
-# directory it is mounted from; the interpreter is not in this image, so that path
-# is a wrapper around `python3` from PATH, where the provider puts the mounted
-# environment's bin directory first. With no environment mounted the wrapper fails
-# as `python3: not found` instead of running some other interpreter.
-RUN mkdir -p /opt/data /opt/hermes/.venv/bin \
-  && ln -s /shared/skills /opt/data/skills \
+# Signal delivery runs `kill` as a program, not as a shell builtin (session-probe.ts:142-153),
+# so the binary must exist: without it a terminal session cannot be signalled or torn down.
+# The slim base ships no kill binary, and the guard is a path test rather than `command -v`,
+# which succeeds on the shell builtin and would silently skip this install.
+RUN [ -x /usr/bin/kill ] || (apt-get update \
+  && apt-get install -y --no-install-recommends procps \
+  && rm -rf /var/lib/apt/lists/*)
+# ripgrep backs the glob/grep tools, whose execution side is THIS container: the
+# harness resolves @vscode/ripgrep on the host, and that absolute path does not
+# exist here, so the tenant stack points dsh-tool-fs-search's `ripgrepPath` at the
+# path installed below (packages/tenant/tenant-app/src/spine.ts). The platform
+# package carries the static binary, so this install reaches no GitHub release —
+# only the npm registry the build already uses. The version matches the host-side
+# @vscode/ripgrep dependency range, and the package installed is the linux-x64 one
+# this amd64-hosted image uses; a build for another architecture trips the final
+# assertion instead of shipping a binary the container cannot exec, and the
+# assertion equally keeps a registry failure, a vanished file, or an unloadable
+# binary out of a shipped image.
+ARG NPM_REGISTRY=https://registry.npmjs.org
+RUN mkdir -p /tmp/rg \
+  && cd /tmp/rg \
+  && npm install --no-save --registry="$NPM_REGISTRY" @vscode/ripgrep-linux-x64@1.18.0 >/dev/null \
+  && install -m 0755 /tmp/rg/node_modules/@vscode/ripgrep-linux-x64/bin/rg /usr/local/bin/rg \
+  && rm -rf /tmp/rg /root/.npm \
+  && test -x /usr/local/bin/rg \
+  && /usr/local/bin/rg --version
+# Case scripts discover skills by enumerating one root, and the provider mounts each
+# skill tier under it: /opt/data/skills/<tier>/<skill>/. Tiers keep their own
+# subdirectory because a mount carries one source to one path, and one skill name may
+# exist in more than one tier at once. The interpreter is not in this image, so
+# /opt/hermes/.venv/bin/python3 is a wrapper around `python3` from PATH, where the
+# provider puts the mounted environment's bin directory first. With no environment
+# mounted the wrapper fails as `python3: not found` instead of running some other
+# interpreter.
+RUN mkdir -p /opt/data/skills /opt/hermes/.venv/bin \
   && printf '#!/bin/sh\nexec python3 "$@"\n' > /opt/hermes/.venv/bin/python3 \
   && chmod 0755 /opt/hermes/.venv/bin/python3
 WORKDIR /opt/tool-exec

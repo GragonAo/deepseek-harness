@@ -1,0 +1,390 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib/types"
+  },
+  "include": [
+    "src"
+  ],
+  "references": [
+    {
+      "path": "../../../vendor/cordis/tsconfig.json"
+    },
+    {
+      "path": "../../../vendor/hmr/tsconfig.json"
+    },
+    {
+      "path": "../../../vendor/timer/tsconfig.json"
+    },
+    {
+      "path": "../../api/gateway/tsconfig.host.json"
+    },
+    {
+      "path": "../../attachment/attachment-local/tsconfig.json"
+    },
+    {
+      "path": "../../code-runtime/code-runtime-container/tsconfig.json"
+    },
+    {
+      "path": "../../code-runtime/code-runtime-worker-thread/tsconfig.json"
+    },
+    {
+      "path": "../../compaction/command-compact/tsconfig.json"
+    },
+    {
+      "path": "../../compaction/compaction-basic/tsconfig.json"
+    },
+    {
+      "path": "../../compaction/compaction-tool-result-pruner/tsconfig.json"
+    },
+    {
+      "path": "../../context/agent-instructions/tsconfig.json"
+    },
+    {
+      "path": "../../context/file-reference-local/tsconfig.json"
+    },
+    {
+      "path": "../../context/session-reference/tsconfig.json"
+    },
+    {
+      "path": "../../core/agent-default-model/tsconfig.json"
+    },
+    {
+      "path": "../../core/agent-loop/tsconfig.json"
+    },
+    {
+      "path": "../../core/agent/tsconfig.json"
+    },
+    {
+      "path": "../../core/session/tsconfig.json"
+    },
+    {
+      "path": "../../core/system-prompt/tsconfig.json"
+    },
+    {
+      "path": "../../core/tools/tsconfig.json"
+    },
+    {
+      "path": "../../credentials/credentials-local/tsconfig.json"
+    },
+    {
+      "path": "../../credentials/credentials-postgres/tsconfig.json"
+    },
+    {
+      "path": "../../extensions/cordis-host-runner/tsconfig.json"
+    },
+    {
+      "path": "../../feedback/command-feedback/tsconfig.json"
+    },
+    {
+      "path": "../../feedback/message-feedback/tsconfig.json"
+    },
+    {
+      "path": "../../fs/fs-observation-policy/tsconfig.json"
+    },
+    {
+      "path": "../../fs/fs-sandbox/tsconfig.json"
+    },
+    {
+      "path": "../../fs/tool-fs-search/tsconfig.json"
+    },
+    {
+      "path": "../../fs/tool-fs/tsconfig.json"
+    },
+    {
+      "path": "../../fs/tool-str-replace-editor/tsconfig.json"
+    },
+    {
+      "path": "../../goal/command-goal/tsconfig.json"
+    },
+    {
+      "path": "../../goal/goal-round-driver/tsconfig.json"
+    },
+    {
+      "path": "../../goal/goal/tsconfig.json"
+    },
+    {
+      "path": "../../goal/tool-goal/tsconfig.json"
+    },
+    {
+      "path": "../../guard/repeat-tool-reminder/tsconfig.json"
+    },
+    {
+      "path": "../../guard/timeout-policy/tsconfig.json"
+    },
+    {
+      "path": "../../host/apiproxy/tsconfig.json"
+    },
+    {
+      "path": "../../host/directory-picker-auto/tsconfig.json"
+    },
+    {
+      "path": "../../host/directory-picker-browse/tsconfig.json"
+    },
+    {
+      "path": "../../host/plugin-inventory/tsconfig.json"
+    },
+    {
+      "path": "../../host/webserver/tsconfig.json"
+    },
+    {
+      "path": "../../interaction/commands/tsconfig.json"
+    },
+    {
+      "path": "../../interaction/permission-presets/tsconfig.json"
+    },
+    {
+      "path": "../../interaction/user-approval/tsconfig.json"
+    },
+    {
+      "path": "../../interaction/user-questions/tsconfig.json"
+    },
+    {
+      "path": "../../jobs/jobs-local/tsconfig.json"
+    },
+    {
+      "path": "../../jobs/tool-jobs/tsconfig.json"
+    },
+    {
+      "path": "../../llm/llm-deepseek/tsconfig.json"
+    },
+    {
+      "path": "../../llm/llm-pi-ai/tsconfig.json"
+    },
+    {
+      "path": "../../llm/llm-retry/tsconfig.json"
+    },
+    {
+      "path": "../../llm/llm/tsconfig.json"
+    },
+    {
+      "path": "../../llm/token-meter/tsconfig.json"
+    },
+    {
+      "path": "../../mcp/mcp-client/tsconfig.json"
+    },
+    {
+      "path": "../../plan/plan-mode/tsconfig.json"
+    },
+    {
+      "path": "../../preset/agent-presets/tsconfig.json"
+    },
+    {
+      "path": "../../runtime-diagnostics/invariants"
+    },
+    {
+      "path": "../../sandbox/sandbox-local/tsconfig.json"
+    },
+    {
+      "path": "../../sandbox/sandbox-policy/tsconfig.json"
+    },
+    {
+      "path": "../../session-query/session-log-export/tsconfig.json"
+    },
+    {
+      "path": "../../session-query/session-query-sqlite/tsconfig.json"
+    },
+    {
+      "path": "../../session/session-checkpoint-policy/tsconfig.json"
+    },
+    {
+      "path": "../../session/session-persistence-jsonl/tsconfig.json"
+    },
+    {
+      "path": "../../session/session-projection-cache/tsconfig.json"
+    },
+    {
+      "path": "../../session/session-projection/tsconfig.json"
+    },
+    {
+      "path": "../../session/session-stats/tsconfig.json"
+    },
+    {
+      "path": "../../session/session-telemetry-otel/tsconfig.json"
+    },
+    {
+      "path": "../../session/session-title-first-prompt-llm/tsconfig.json"
+    },
+    {
+      "path": "../../session/session-title/tsconfig.json"
+    },
+    {
+      "path": "../../settings/settings-file/tsconfig.json"
+    },
+    {
+      "path": "../../settings/settings-postgres/tsconfig.json"
+    },
+    {
+      "path": "../../shell/bash-local/tsconfig.json"
+    },
+    {
+      "path": "../../shell/bash-sandbox/tsconfig.json"
+    },
+    {
+      "path": "../../shell/pwsh-sandbox/tsconfig.json"
+    },
+    {
+      "path": "../../shell/shell-env/tsconfig.json"
+    },
+    {
+      "path": "../../shell/tool-bash/tsconfig.json"
+    },
+    {
+      "path": "../../shell/tool-pwsh/tsconfig.json"
+    },
+    {
+      "path": "../../skill/skill-badge/tsconfig.json"
+    },
+    {
+      "path": "../../skill/skill-filesystem/tsconfig.json"
+    },
+    {
+      "path": "../../skill/skill-install/tsconfig.json"
+    },
+    {
+      "path": "../../skill/skill/tsconfig.json"
+    },
+    {
+      "path": "../../skill/tool-skill/tsconfig.json"
+    },
+    {
+      "path": "../../spill/spill-local/tsconfig.json"
+    },
+    {
+      "path": "../../spill/spill-policy/tsconfig.json"
+    },
+    {
+      "path": "../../storage/storage-domain/tsconfig.json"
+    },
+    {
+      "path": "../../storage/storage-json/tsconfig.json"
+    },
+    {
+      "path": "../../storage/storage/tsconfig.json"
+    },
+    {
+      "path": "../../subagent/subagent-fork-in-process/tsconfig.json"
+    },
+    {
+      "path": "../../subagent/subagent-spawn-in-process/tsconfig.json"
+    },
+    {
+      "path": "../../subagent/subagent/tsconfig.json"
+    },
+    {
+      "path": "../../subagent/tool-subagent-control/tsconfig.json"
+    },
+    {
+      "path": "../../subagent/tool-subagent-report/tsconfig.json"
+    },
+    {
+      "path": "../../subagent/tool-subagent/tsconfig.json"
+    },
+    {
+      "path": "../../subprocess/subprocess-local/tsconfig.json"
+    },
+    {
+      "path": "../../todo/tool-todo/tsconfig.json"
+    },
+    {
+      "path": "../../typert/loader/tsconfig.json"
+    },
+    {
+      "path": "../../typert/registry/tsconfig.json"
+    },
+    {
+      "path": "../../web/tool-web/tsconfig.json"
+    },
+    {
+      "path": "../../web/web-search-deepseek/tsconfig.json"
+    },
+    {
+      "path": "../../web/web/tsconfig.json"
+    },
+    {
+      "path": "../../workflow/tool-ralph/tsconfig.json"
+    },
+    {
+      "path": "../../workflow/tool-workflow/tsconfig.json"
+    },
+    {
+      "path": "../../workflow/workflow-container/tsconfig.json"
+    },
+    {
+      "path": "../../workspace/workspace/tsconfig.json"
+    },
+    {
+      "path": "../agent-http/tsconfig.json"
+    },
+    {
+      "path": "../container-docker/tsconfig.json"
+    },
+    {
+      "path": "../container-k8s/tsconfig.json"
+    },
+    {
+      "path": "../fs-container/tsconfig.json"
+    },
+    {
+      "path": "../object-store/tsconfig.json"
+    },
+    {
+      "path": "../session-persistence-postgres/tsconfig.json"
+    },
+    {
+      "path": "../settings-tier/tsconfig.json"
+    },
+    {
+      "path": "../skill-tier/tsconfig.json"
+    },
+    {
+      "path": "../storage-postgres/tsconfig.json"
+    },
+    {
+      "path": "../subprocess-container/tsconfig.json"
+    },
+    {
+      "path": "../tenant-admin-http/tsconfig.json"
+    },
+    {
+      "path": "../tenant-admin-postgres/tsconfig.json"
+    },
+    {
+      "path": "../tenant-admin/tsconfig.json"
+    },
+    {
+      "path": "../tenant-auth-jwt/tsconfig.json"
+    },
+    {
+      "path": "../tenant-questions/tsconfig.json"
+    },
+    {
+      "path": "../tenant/tsconfig.json"
+    },
+    {
+      "path": "../terminal-container/tsconfig.json"
+    },
+    {
+      "path": "../../terminal/terminal/tsconfig.json"
+    },
+    {
+      "path": "../../terminal/tool-terminal/tsconfig.json"
+    },
+    {
+      "path": "../../shell/tool-bash-persistent/tsconfig.json"
+    },
+    {
+      "path": "../tools-manifest/tsconfig.json"
+    },
+    {
+      "path": "../tools-restriction/tsconfig.json"
+    },
+    {
+      "path": "../tools-tier/tsconfig.json"
+    },
+    {
+      "path": "../../interaction/tool-ask-user/tsconfig.json"
+    }
+  ]
+}

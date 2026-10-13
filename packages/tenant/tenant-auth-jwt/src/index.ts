@@ -126,17 +126,20 @@ export class JwtTenantAuthenticator extends TenantAuthenticator {
   }
 
   private principalOf(payload: JWTPayload): TenantPrincipal {
-    const rawTenant = payload[this.tenantIdClaim]
-    if (typeof rawTenant !== 'string' || rawTenant === '') {
-      throw new TenantAuthError('INVALID_TOKEN', `missing tenant id claim '${this.tenantIdClaim}'`)
-    }
     if (typeof payload.sub !== 'string' || payload.sub === '') {
       throw new TenantAuthError('INVALID_TOKEN', 'missing subject claim')
     }
+    const rawTenant = payload[this.tenantIdClaim]
+    // A token without the tenant claim authenticates as a platform principal:
+    // the claim's absence is the statement that the credential names no tenant,
+    // and each carrier decides whether it can serve such a principal.
+    const tenantId = typeof rawTenant === 'string' && rawTenant !== '' ? TenantId(rawTenant) : undefined
     const scopes = this.scopesOf(payload)
-    return scopes === undefined
-      ? { tenantId: TenantId(rawTenant), subject: payload.sub }
-      : { tenantId: TenantId(rawTenant), subject: payload.sub, scopes }
+    return {
+      ...(tenantId !== undefined ? { tenantId } : {}),
+      subject: payload.sub,
+      ...(scopes !== undefined ? { scopes } : {}),
+    }
   }
 
   private scopesOf(payload: JWTPayload): readonly string[] | undefined {

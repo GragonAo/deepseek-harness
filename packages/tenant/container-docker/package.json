@@ -36,6 +36,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-container": "workspace:^",
+    "@deepseek-ai/dsh-container-transport": "workspace:^",
     "@deepseek-ai/dsh-invariants": "workspace:^",
     "@deepseek-ai/dsh-tenant": "workspace:^",
     "@deepseek-ai/dsh-timeout": "workspace:^",
@@ -43,6 +44,7 @@
   },
   "devDependencies": {
     "@deepseek-ai/dsh-container": "workspace:^",
+    "@deepseek-ai/dsh-container-transport": "workspace:^",
     "@deepseek-ai/dsh-invariants": "workspace:^",
     "@deepseek-ai/dsh-tenant": "workspace:^",
     "@deepseek-ai/dsh-timeout": "workspace:^",

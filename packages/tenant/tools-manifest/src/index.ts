@@ -16,7 +16,7 @@
  */
 
 import { readdirSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type Schema from '@deepseek-ai/schemastery'
@@ -96,12 +96,14 @@ function registerTierTools(ctx: Context, agent: Agent, config: ResolvedConfig, s
 /**
  * Read, parse, and build every manifest file in one tier directory. A missing
  * directory is an empty tier; a duplicate manifest name within the directory
- * or an invalid document fails loud.
+ * or an invalid document fails loud. A tier's restriction document is not a
+ * manifest and is skipped here.
  */
 function loadManifests(dir: string, config: ResolvedConfig, subprocess: SubprocessRuntime): ToolDefinition[] {
   const seen = new Set<string>()
   const definitions: ToolDefinition[] = []
   for (const file of listManifestFiles(dir)) {
+    if (isRestrictionDocument(file)) continue
     const manifest = parseManifest(readFileSync(file, 'utf8'), file)
     if (seen.has(manifest.name)) {
       throw new Error(`${dir}: duplicate manifest tool name ${JSON.stringify(manifest.name)}`)
@@ -110,6 +112,17 @@ function loadManifests(dir: string, config: ResolvedConfig, subprocess: Subproce
     definitions.push(toDefinition(manifest, config, subprocess))
   }
   return definitions
+}
+
+/**
+ * Whether a tier directory entry is the document
+ * `@deepseek-ai/dsh-tools-restriction` reserves for one tier's tool
+ * restriction. It declares no tool, so parsing it as a manifest would fail
+ * every tier that restricts tools; the restriction plugin reads it instead.
+ */
+function isRestrictionDocument(file: string): boolean {
+  const base = basename(file)
+  return base === 'restriction.yaml' || base === 'restriction.yml'
 }
 
 /** @returns sorted `*.yaml` / `*.yml` file paths under `dir`, empty when the directory is absent. */

@@ -384,6 +384,32 @@ const CONSOLE_HTML = `<!doctype html>
     })
   }
 
+  // The tenant tab talks to the management surface, not this carrier's own
+  // gateway: /admin/<method> takes the payload as its body and answers one
+  // { ok, value | error } envelope, and it is gated on the administrative scope
+  // alone, so the operator's token needs no tenant membership.
+  function admin(method, payload) {
+    return fetch('/admin/' + method, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer ' + state.token },
+      body: JSON.stringify(payload || {})
+    }).then(function (res) {
+      return res.text().then(function (text) {
+        if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + text.slice(0, 300))
+        var parsed
+        try { parsed = JSON.parse(text) } catch (e) { throw new Error('响应不是 JSON：' + text.slice(0, 200)) }
+        if (parsed.ok !== true) {
+          var err = parsed.error || {}
+          var failure = new Error((err.code || 'error') + '：' + (err.message || ''))
+          failure.code = err.code
+          failure.details = err.details
+          throw failure
+        }
+        return parsed.value
+      })
+    })
+  }
+
   function b64url(text) {
     var pad = text.replace(/-/g, '+').replace(/_/g, '/')
     while (pad.length % 4) pad += '='
@@ -793,16 +819,16 @@ const CONSOLE_HTML = `<!doctype html>
 
   // ---------- tenants ----------
   function loadTenants() {
-    return rpc('tenant.admin.list', {}).then(function (value) {
+    return admin('tenants.list', {}).then(function (value) {
       state.tenants = value.items || []
       renderTenants()
       $('t-count').textContent = state.tenants.length + ' 个租户'
       show($('t-empty'), state.tenants.length === 0)
-      log('tenant.admin.list → ' + state.tenants.length + ' 条')
+      log('tenants.list → ' + state.tenants.length + ' 条')
     }).catch(function (error) {
       show($('t-empty'), true)
       $('t-empty').textContent = '读取租户失败：' + error.message
-      log('tenant.admin.list 失败：' + error.message, 'err')
+      log('tenants.list 失败：' + error.message, 'err')
     })
   }
 
@@ -844,7 +870,7 @@ const CONSOLE_HTML = `<!doctype html>
         remove.addEventListener('click', function (event) {
           event.stopPropagation()
           tenantAction('移除成员 ' + subject,
-            rpc('tenant.admin.members.remove', { id: tenant.id, subject: subject }))
+            admin('members.remove', { id: tenant.id, subject: subject }))
         })
         chip.appendChild(remove)
         list.appendChild(chip)
@@ -858,7 +884,7 @@ const CONSOLE_HTML = `<!doctype html>
         var subject = addSubject.value.trim()
         if (!subject) return
         tenantAction('添加成员 ' + subject,
-          rpc('tenant.admin.members.add', { id: tenant.id, subject: subject }))
+          admin('members.add', { id: tenant.id, subject: subject }))
       })
       list.appendChild(addSubject)
       members.appendChild(list)
@@ -870,7 +896,7 @@ const CONSOLE_HTML = `<!doctype html>
       toggle.addEventListener('click', function (event) {
         event.stopPropagation()
         tenantAction((tenant.enabled ? '禁用 ' : '启用 ') + tenant.id,
-          rpc(tenant.enabled ? 'tenant.admin.disable' : 'tenant.admin.enable', { id: tenant.id }))
+          admin(tenant.enabled ? 'tenants.disable' : 'tenants.enable', { id: tenant.id }))
       })
       row.appendChild(toggle)
 
@@ -880,7 +906,7 @@ const CONSOLE_HTML = `<!doctype html>
         event.stopPropagation()
         var subject = window.prompt('为哪个 subject 预建 /global 目录？')
         if (!subject) return
-        rpc('tenant.admin.users.ensure', { subject: subject })
+        admin('users.ensure', { subject: subject })
           .then(function (value) { log('users.ensure ' + subject + ' → ' + value.root, 'ok') })
           .catch(function (error) { log('users.ensure 失败：' + error.message, 'err') })
       })
@@ -891,7 +917,7 @@ const CONSOLE_HTML = `<!doctype html>
         event.stopPropagation()
         var purge = window.confirm('删除 ' + tenant.id + '？\\n\\n确定 = 同时清除分区（purge）\\n取消 = 仅删除注册记录')
         tenantAction('删除 ' + tenant.id,
-          rpc('tenant.admin.remove', { id: tenant.id, purge: purge }))
+          admin('tenants.remove', { id: tenant.id, purge: purge }))
       })
       row.appendChild(remove)
       actions.appendChild(row)
@@ -922,7 +948,7 @@ const CONSOLE_HTML = `<!doctype html>
       log('id / name / dataRoot / workspaceRoot 都是必填', 'err')
       return
     }
-    tenantAction('创建租户 ' + payload.id, rpc('tenant.admin.create', payload)).then(function () {
+    tenantAction('创建租户 ' + payload.id, admin('tenants.create', payload)).then(function () {
       show($('t-form'), false)
       $('t-form').reset()
     })
@@ -1443,7 +1469,7 @@ const CONSOLE_HTML = `<!doctype html>
     $('token').value = stored
     log('已载入上次的 token，点「连接」继续')
   } else {
-    log('填入 bearer token 后点「连接」。token 需要 tenant.admin 作用域才能管租户。')
+    log('填入 bearer token 后点「连接」。租户标签页需要 dsh:tenant-admin 作用域，会话与凭据标签页需要一个租户内的成员身份。')
   }
 })()
 </script>

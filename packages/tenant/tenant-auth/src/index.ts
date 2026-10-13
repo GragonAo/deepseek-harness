@@ -2,10 +2,12 @@
  * Tenant-authentication Service Definition (`ctx.tenantAuth`).
  *
  * A provider verifies one credential and returns the {@link TenantPrincipal} it
- * proves. The principal carries only an authenticated `tenantId` and `subject`;
- * the API layer resolves the tenant record through `ctx.tenants` and enters
- * `runWithTenant` — authentication never mints authorization, and a request can
- * only address the tenant its credential proves.
+ * proves. A tenant-scoped credential proves a `tenantId` and a `subject`; a
+ * platform credential proves a `subject` and its scopes and names no tenant at
+ * all, which is what lets the management surface admit it. The API layer
+ * resolves the tenant record through `ctx.tenants` and enters `runWithTenant` —
+ * authentication never mints authorization, and a request can only address the
+ * tenant its credential proves.
  *
  * @module @deepseek-ai/dsh-tenant-auth
  */
@@ -15,7 +17,12 @@ import type { TenantId } from '@deepseek-ai/dsh-tenant'
 
 /** The principal an authenticated credential proves. */
 export interface TenantPrincipal {
-  readonly tenantId: TenantId
+  /**
+   * The tenant the credential proves. Absent when the credential is
+   * platform-scoped: a carrier that serves a tenant refuses such a principal,
+   * while the management surface admits it on its scope alone.
+   */
+  readonly tenantId?: TenantId
   /** The authenticated subject (`sub`) the credential vouches for. */
   readonly subject: string
   /** Optional space-derived scopes, carried forward for authorization policies. */

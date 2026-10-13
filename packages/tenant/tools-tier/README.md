@@ -1,10 +1,8 @@
 # @deepseek-ai/dsh-tools-tier
 
-English | [中文](README.zh.md)
+把当前 (租户, 用户) 作用域解析为多租户载体声明式工具加载器要用的三个宿主机工具清单目录：案件层 `<tenant.workspaceRoot>/shared/tools`、用户全局层 `<usersRoot>/<sub>/tools`、系统层（默认 `$DSH_HOME/system/tools`）。本插件注册可选的 `ctx.toolTiers` 服务；工具清单加载器读取它，按 case < user-global < system 的 rank 合并这三个根，于是同名者近层胜出、异名者并集。这三个根都是租户容器外的宿主机路径，provider 将其标记为 trusted host，从而用宿主机 I/O 读取，而不是走容器作用域的文件服务。
 
-Resolves the current (tenant, user) scope into three host tool-manifest directories for the multi-tenant carrier's declarative tool loader: the case tier `<tenant.workspaceRoot>/shared/tools`, the user-global tier `<usersRoot>/<sub>/tools`, and the system tier (default `$DSH_HOME/system/tools`). The plugin registers the optional `ctx.toolTiers` service; the tool-manifest loader reads it and merges the three roots ranked case < user-global < system, so a same-named nearer tier wins while distinct names union. All three roots are host paths outside the tenant container, and the provider marks them trusted host so the loader reads them with host I/O rather than the container-scoped file service.
-
-## Configuration
+## 配置
 
 ```yaml
 - name: '@deepseek-ai/dsh-tools-tier'
@@ -19,9 +17,9 @@ Indirectly, through the declarative tool loader, which turns each manifest into 
 
 #### KV Cache effect
 
-None directly; each manifest-declared tool consumes the same tool-schema slot every registered tool uses.
+无直接影响；每个清单声明的工具占用任何已注册工具都相同的工具 schema 插槽。
 
 ## Known Limitations and Deferred Work
 
-- **The case and user-global tiers need an active (tenant, user) scope.** Directory resolution reads the ambient tenant and user authority on each `roots()` call; a host-side caller without a scope can only see the system tier.
-- **The system tier is read-only by convention, not enforcement.** This package supplies its path and rank but does not block writes; deployment owns creating that directory and keeping it const.
+- **案件层与用户全局层需要活跃的 (租户, 用户) 作用域。** 目录解析在每次 `roots()` 调用时读取环境中的租户与用户权威；没有作用域的宿主机侧调用方只能看到系统层。
+- **系统层是约定只读，而非强制。** 本包只提供它的路径与 rank，不阻止写入；创建并保持该目录只读由部署方负责。

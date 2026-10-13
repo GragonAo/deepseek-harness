@@ -31,6 +31,9 @@
     "lib/types/**/*.d.ts"
   ],
   "license": "MIT",
+  "dependencies": {
+    "node-pty": "1.2.0-beta.15"
+  },
   "peerDependencies": {
     "@deepseek-ai/dsh-container": "workspace:^",
     "@deepseek-ai/dsh-invariants": "workspace:^",

@@ -74,9 +74,19 @@ describe('JwtTenantAuthenticator', () => {
     await expect(auth.authenticate(right)).resolves.toMatchObject({ tenantId: 'acme' })
   })
 
-  it('rejects a token missing the tenant id claim', async () => {
+  it('authenticates a token without a tenant claim as a platform principal', async () => {
     const auth = await mount()
-    const token = await mint({})
+    const token = await mint({ scope: 'dsh:tenant-admin' })
+    await expect(auth.authenticate(token)).resolves.toEqual({ subject: 'user-1', scopes: ['dsh:tenant-admin'] })
+  })
+
+  it('rejects a token missing the subject claim', async () => {
+    const auth = await mount()
+    const token = await new SignJWT({ tenantId: 'acme' })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setIssuer(ISSUER)
+      .setExpirationTime('1h')
+      .sign(key)
     await expect(auth.authenticate(token)).rejects.toMatchObject({ code: 'INVALID_TOKEN' })
   })
 

@@ -1,10 +1,8 @@
 # @deepseek-ai/dsh-fs-container
 
-English | [中文](README.zh.md)
+[`dsh-fs`](../../fs/fs) capability seam 的容器 provider。路径、内容、列出、写入与编辑都在环境租户的容器内操作 — 与子进程 provider 服务的是同一执行世界 — 因此文件操作绝不脱离租户的隔离边界。
 
-Container provider for the [`dsh-fs`](../../fs/fs) capability seam. Paths, contents, listings, writes, and edits operate inside the ambient tenant's container — the same execution world the subprocess provider serves — so file operations never escape the tenant's isolation boundary.
-
-## Configuration
+## 配置
 
 ```yaml
 - name: '@deepseek-ai/dsh-fs-container'
@@ -12,7 +10,7 @@ Container provider for the [`dsh-fs`](../../fs/fs) capability seam. Paths, conte
     root: '/workspace'   # container path relative requests resolve against
 ```
 
-The provider injects `containerRuntime` (e.g. [`dsh-container-docker`](../container-docker)); `/workspace` must be the tenant workspace mount that provider publishes. The image must carry GNU coreutils (`stat`, `cat`, `find`, `base64`).
+provider 注入 `containerRuntime`（例如 [`dsh-container-docker`](../container-docker)）；`/workspace` 必须是该 provider 发布的租户工作空间挂载。镜像必须携带 GNU coreutils（`stat`、`cat`、`find`、`base64`）。
 
 ## Model Experience
 
@@ -20,21 +18,21 @@ The provider injects `containerRuntime` (e.g. [`dsh-container-docker`](../contai
 
 #### What the model sees
 
-Nothing. The `ctx.fs` provider serves the file tools and shell consumers below the model: no tools, prompts, or session events.
+无。`ctx.fs` provider 服务模型之下的文件工具与 shell 消费者：没有工具、提示词或会话事件。
 
 #### Token effect
 
-Zero direct tokens on every request.
+每个请求零直接 token。
 
 #### KV Cache effect
 
-Independent of live requests: the package never touches a request prefix.
+与在线请求无关：本包从不触碰请求前缀。
 
 ## Known Limitations and Deferred Work
 
-- **Path identity is lexical, not realpath.** `resolve` normalizes but does not resolve symlinks, so aliases do not share identity; `lstat` still reports the link type.
-- **Version tokens are stat identities** (`kind|size|mtime`). A rewrite within the same mtime second may not advance the version.
-- **`streamText` is one chunk**: the whole file is captured over `cat` rather than streamed; very large files are not streamed.
-- **Binary detection is NUL-based** and `readBytes` round-trips `base64`; close to full size-capped reads, not a streaming raw path.
-- **CRLF files are LF-normalized on edit** and not restored afterwards.
-- **Write is rename-atomic but not durability-verified**: `cat > tmp && mv` is atomic within the container filesystem; no `fsync` wait.
+- **路径身份是词法的，而非 realpath。**`resolve` 规范化但不解析符号链接，因此别名不共享身份；`lstat` 仍会报告链接类型。
+- **版本 token 是 stat 身份**（`kind|size|mtime`）。在同一 mtime 秒内的重写可能不会推进版本。
+- **`streamText` 是单块**：整个文件经 `cat` 捕获而非流式；非常大的文件不流式。
+- **二进制检测基于 NUL**，`readBytes` 走 `base64` 往返；接近全量但有大小上限的读取，而非流式原始路径。
+- **CRLF 文件在编辑时被 LF 规范化**，之后不还原。
+- **写入是重命名原子的但不验证持久性**：`cat > tmp && mv` 在容器文件系统内是原子的；无 `fsync` 等待。

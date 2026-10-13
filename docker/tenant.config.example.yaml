@@ -1,0 +1,246 @@
+# 租户服务（packages/tenant/tenant-app）的本地开发配置示例。
+#
+# docker/docker-compose.tenant.yml 把它挂到镜像里固定的 /etc/dsh/tenant.config.yaml，
+# 也就是镜像 CMD 的默认路径。配置里的字符串值可以被同名环境变量覆盖
+# （DSH_TENANT_POSTGRES_URL / DSH_TENANT_OIDC_SECRET / DSH_TENANT_SANDBOX_BACKEND 等，
+# 见 packages/tenant/tenant-app/src/config.ts 的覆盖表），compose 就是用这个机制给密钥的，
+# 所以这里不写真实密钥。
+#
+# 生产形态是 k8s（backend: k8s），配置随 ConfigMap 走，见 docker/k8s/tenant-host.yaml。
+http:
+  host: 0.0.0.0
+  port: 8787
+
+database:
+  # compose 里的 postgres 服务只发布到宿主 loopback；宿主用的是宿主网络，所以它就在本机。
+  connectionString: postgres://dsh:dsh-local@127.0.0.1:5432/dsh
+
+auth:
+  issuer: dsh-dev
+  verify:
+    kind: secret
+    # 占位值。compose 用 DSH_TENANT_OIDC_SECRET 覆盖它，两边不能不一致。
+    secret: dev-shared-secret
+  audience: dsh-tenant
+  tenantIdClaim: tenant_id
+
+admin:
+  scope: dsh:tenant-admin
+
+tenants:
+  # 四条目录都是宿主绝对路径，且会被原样交给 `docker -v`，所以容器内外的字符串必须逐字符相同：
+  # compose 把 /opt/dsh-dev 整棵树按同路径挂进来。
+  usersRoot: /opt/dsh-dev/.dsh/users
+  archiveRoot: /opt/dsh-dev/.dsh/archive
+  defaults:
+    dataRoot: /opt/dsh-dev/.dsh/tenants
+    workspaceRoot: /opt/dsh-dev/tenants
+    toolsRoot: /opt/dsh-dev/tools
+    network: none
+
+permissions:
+  mode: workspace-write
+  approval: ask
+
+surfaces:
+  # 浏览器控制台页面需要前端产物，租户镜像不构建它；接口面看 /openapi.json 与 /swagger。
+  openapi: true
+  console: false
+  adminOpenapi: true
+
+sandbox:
+  backend: docker
+  runtime: docker
+  # 沙箱容器自己的网络；租户记录里的 network 选 none 时可以覆盖它。
+  network: bridge
+  image: dsh-tool-exec:latest
+  # 宿主与沙箱之间走发布到宿主 loopback 的端口，所以这份 compose 必须用宿主网络。
+  publishHost: 127.0.0.1
+  connectHost: 127.0.0.1
+  systemRoot: /opt/dsh-dev/.dsh/system
+  # 沙箱镜像里没有 Python：解释器与全部依赖都来自这个目录，由构建之外维护
+  # （packages/tenant/container-docker/README.md）。docker 后端在容器内探测它。
+  pythonRoot: /opt/dsh-dev/.dsh/pyenv
+  toolsRoot: /opt/dsh-dev/tools
+  # 空闲预算：provider 把它注入沙箱（k8s 走 Pod 的 env，docker 走 -e），沙箱自己在
+  # 「没有在途请求、且距上一次请求超过预算」时退出；宿主不自己计时，因为在多副本下
+  # 宿主看不见另一个副本正在用这个沙箱。省略即沙箱永不自行退出。
+  idleTimeoutMs: 900000
+  startTimeoutMs: 180000
+  toolTimeoutMs: 600000
+
+tools:
+  # 呈现方式：both 两种形态同时给——每个工具的原生 schema，加上 run_code 与一份生成的 SDK 类型
+  # 声明，模型按当下这件事挑一种；code 只留 run_code 通道，模型必须写一段程序来调用；native 只给
+  # 原生 schema。租户栈的默认值是 both，读一个文件、问一句这类会话不必写程序。
+  mode: both
+  # 全局天花板：一个 run_code 程序在途的子调用总数不超过它。插件自己的默认值是 10，对按分片/表
+  # 撒开的数据挖掘扇出偏低。它按**程序**算，每个会话各享有一份，所以并发会话下打到 MCP 后端的并发
+  # 还会乘上同时活跃的程序数；真正钉住后端的是每条 server 自己的 cap（见下）。
+  maxParallelSubCalls: 32
+
+# 每个 MCP 服务器挂成一个 mcp-client 实例，它的工具以 mcp__<serverName>__<原工具名> 注册。
+# 一个案件能看到哪些工具由案件自己的 restriction.yaml 决定：文件落在案件目录的
+# `<tenant.workspaceRoot>/shared/tools/restriction.yaml`，内容是 allow/deny 两份全局工具名列表，
+# 案件层只能收紧、不能放宽系统层已经挡掉的；上百个工具的原生 schema 与 SDK 声明都由它收窄，
+# 详见 @deepseek-ai/dsh-tools-restriction 的 README。
+#
+# 这些 MCP server 全部按第三方对待：不由我们维护，所以不能指望它们声明 `readOnlyHint` /
+# `idempotentHint`，mcp-client 默认策略 annotations 在它们身上读不出并发意图。因此每条 server 都
+# 显式写 `toolConcurrency.policy: parallel`：并发的判断与责任由我们承担，逐条 server 定。
+# 一条 server 内部一旦真的并发，它收到的提交顺序就不再有任何保证：写数据的工具必须放进
+# `exclusiveTools`（它认的是这条 server 的 tools/list 报出的原名；写错会在那次工具同步时报出它真正
+# 提供的名字，而不是静默地不串行）。名单里的工具永远独占一次调用——但只管顺序：重发是另一件事，
+# 由 `retryTools` 或工具自己声明的 `readOnlyHint: true` 决定，所以串行的写工具不再自动等于永不重发。
+# 不写 `retryTools` ⇒ 只有声明只读的工具会被重发，写工具一律不重发：写工具要不要允许重发是部署的
+# 判断（重复导入安全吗），示例逐条保持不写。
+# 上限默认是自适应的（`mode: adaptive`）：从各条 `maxConcurrentCalls` 起步，被拒一次就往下调、静默
+# 一阵再回升，所以没量过容量的组写 `policy: parallel` 加一个起步值就够，量过的组写 `mode: fixed`。
+#
+# 两层上限的关系。下面这组入口的真实形状是：12 条 server 共用同一个后端进程（同一个 host:port，
+# 只有路径不同），所以 12 条 cap 之和就是打到那个后端的并发。于是：
+#   - 每条 server 的 `maxConcurrentCalls` 是**分配**，而且它是一道全宿主共用的硬闸：所有会话、
+#     所有 run_code 程序一起走它；
+#   - 全局 `maxParallelSubCalls` 是**天花板**，按程序算，决定单个程序撒多宽。
+# 组合方式：天花板设成后端扛得住的总量，再按各组扇出把 cap 分下去。下面 12 条 cap 之和 = 32，
+# 正好等于上面的 maxParallelSubCalls: 32；任何一条想再调高，先确认后端总量还够、并同时抬天花板。
+# 最保守的起步是 12 条全写 1（合计 12），天花板也降到 12：那时后端看到的并发不超过 12。
+#
+# 认证走 `headers`（mcp-client 把它作为 requestInit.headers 附在每个 MCP 请求上）。header 的值只能
+# 来自配置文件：环境变量覆盖的清单在 config.ts 的 applyEnvOverrides 里，mcpServers 不在其中，所以
+# 要保密的 token 应当让这份配置从 Secret 挂进来，而不是放进 ConfigMap。
+#
+# 每条都写 `failOnStartupError: true`：mcp-client 的默认值是 false，那时一次连不上只留一条日志，
+# 这一行安静地挂成“这个 server 没有工具”，与“配置错误必须响亮失败”相反。写成 true 之后，地址写错、
+# 端口不通或对方没起来会让启动直接失败，错误里指名是那一行（组合行 mcp-<序号>-<serverName>）。
+# 单次调用的超时同样可以逐条给（`toolCallTimeoutMs`，毫秒；不写就是客户端默认的 60 秒）。数据挖掘的
+# 查询比一般工具跑得久，所以导入组按 10 分钟给，与 sandbox.toolTimeoutMs 取同一个数。
+#
+# 整段省略就是用 mcp-client 自己的默认值（annotations 策略、10 路、60 秒超时、连不上只记日志）：
+# 那是它作为通用客户端的正确默认，租户侧不替它改；对第三方入口按上面那样逐条写明。
+#
+# mcpServers:
+#   # 案件组（1 个工具）
+#   - serverName: icac-case
+#     transport: streamable-http
+#     url: http://mcp-gateway:19830/mcp/case
+#     headers: { Authorization: Bearer <token> }
+#     failOnStartupError: true
+#     toolConcurrency: { policy: parallel, maxConcurrentCalls: 2 }
+#   # 账单组（31 个工具）
+#   - serverName: icac-bill
+#     transport: streamable-http
+#     url: http://mcp-gateway:19830/mcp/bill
+#     headers: { Authorization: Bearer <token> }
+#     failOnStartupError: true
+#     toolConcurrency: { policy: parallel, maxConcurrentCalls: 6 }
+#   # 话单组（17 个工具）
+#   - serverName: icac-callrecord
+#     transport: streamable-http
+#     url: http://mcp-gateway:19830/mcp/callrecord
+#     headers: { Authorization: Bearer <token> }
+#     failOnStartupError: true
+#     toolConcurrency: { policy: parallel, maxConcurrentCalls: 3 }
+#   # 资产组（12 个工具）
+#   - serverName: icac-property
+#     transport: streamable-http
+#     url: http://mcp-gateway:19830/mcp/property
+#     headers: { Authorization: Bearer <token> }
+#     failOnStartupError: true
+#     toolConcurrency: { policy: parallel, maxConcurrentCalls: 3 }
+#   # 关系组
+#   - serverName: icac-relationship
+#     transport: streamable-http
+#     url: http://mcp-gateway:19830/mcp/relationship
+#     headers: { Authorization: Bearer <token> }
+#     failOnStartupError: true
+#     toolConcurrency: { policy: parallel, maxConcurrentCalls: 1 }
+#   # 轨迹组
+#   - serverName: icac-trajectory
+#     transport: streamable-http
+#     url: http://mcp-gateway:19830/mcp/trajectory
+#     headers: { Authorization: Bearer <token> }
+#     failOnStartupError: true
+#     toolConcurrency: { policy: parallel, maxConcurrentCalls: 1 }
+#   # 时光轴组
+#   - serverName: icac-timeline
+#     transport: streamable-http
+#     url: http://mcp-gateway:19830/mcp/timeline
+#     headers: { Authorization: Bearer <token> }
+#     failOnStartupError: true
+#     toolConcurrency: { policy: parallel, maxConcurrentCalls: 1 }
+#   # 画像组（42 个工具，扇出最大）
+#   - serverName: icac-persona
+#     transport: streamable-http
+#     url: http://mcp-gateway:19830/mcp/persona
+#     headers: { Authorization: Bearer <token> }
+#     failOnStartupError: true
+#     toolConcurrency: { policy: parallel, maxConcurrentCalls: 6 }
+#   # 专项组（29 个工具）
+#   - serverName: icac-specialized
+#     transport: streamable-http
+#     url: http://mcp-gateway:19830/mcp/specialized
+#     headers: { Authorization: Bearer <token> }
+#     failOnStartupError: true
+#     toolConcurrency: { policy: parallel, maxConcurrentCalls: 5 }
+#   # 疑点组（5 个工具）
+#   - serverName: icac-doubt
+#     transport: streamable-http
+#     url: http://mcp-gateway:19830/mcp/doubt
+#     headers: { Authorization: Bearer <token> }
+#     failOnStartupError: true
+#     toolConcurrency: { policy: parallel, maxConcurrentCalls: 1 }
+#   # 导入组（3 个工具，写数据）
+#   - serverName: icac-import
+#     transport: streamable-http
+#     url: http://mcp-gateway:19830/mcp/import
+#     headers: { Authorization: Bearer <token> }
+#     failOnStartupError: true
+#     toolCallTimeoutMs: 600000
+#     toolConcurrency:
+#       policy: parallel
+#       # 起步 1：这条 server 内部先串行，超出的调用排队而不是失败。验证过它扛得住并发之后再把
+#       # 这个数调高，并且调高的同时把这条 server 上写数据的工具名放进下面那份名单——名单里的
+#       # 工具永不与任何别的调用重叠，这是并发下唯一还管用的保护。
+#       # 重发另说：`import_data` 要不要允许重发取决于重复导入是否安全，所以这里不写 `retryTools`
+#       # ——不写就只有声明只读的工具会重发，写工具一律不重发。
+#       maxConcurrentCalls: 1
+#       exclusiveTools: [import_data]
+#   # 自然语言查询组（11 个工具）
+#   - serverName: icac-ai-analysis
+#     transport: streamable-http
+#     url: http://mcp-gateway:19830/mcp/ai-analysis
+#     headers: { Authorization: Bearer <token> }
+#     failOnStartupError: true
+#     toolConcurrency: { policy: parallel, maxConcurrentCalls: 2 }
+
+# 要让会话真的说话，就启用一个 LLM 插件行。下面是本地联调用过的一套；不启用时服务能起、
+# 会话能建，但下发 prompt 会以 model-unavailable 拒绝。
+#
+# plugins:
+#   # 逐行覆盖组合清单：停用某一行（enabled: false），或给某一行追加配置（config）。
+#   # 行的 id 就是组合清单里的 id，见 tenant-app 的 spine.ts。
+#   llm-pi-ai:
+#     enabled: true
+#     config:
+#       providers:
+#         newapi:
+#           api: openai-completions
+#           baseURL: https://coding.300188.cn/v1
+#           apiKeyEnv: NEWAPI_API_KEY
+#           models:
+#             - id: qwen3.8-flash
+#               name: Qwen3.8 Flash
+#               maxTokens: 8192
+#               contextWindow: 131072
+#   plan-mode:
+#     config:
+#       # 计划模式生效时下发给模型的策略段落。plan-mode 按契约要求部署方写这段文案，
+#       # 不给或给空串会让这一行启动失败（它不会替部署选一段）。
+#       section: 计划模式已开启：先给出计划并等待确认，确认前不要修改文件，也不要执行有副作用的命令。
+#   # 例：整行停用（终端工具只留 tool-terminal 那一条常驻 PTY 时）
+#   # terminal:
+#   #   enabled: false
+# model:
+#   provider: newapi
+#   model: qwen3.8-flash

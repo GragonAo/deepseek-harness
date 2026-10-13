@@ -38,10 +38,12 @@
     "@deepseek-ai/dsh-invariants": "workspace:^",
     "@deepseek-ai/dsh-tenant": "workspace:^",
     "@deepseek-ai/dsh-tenant-auth": "workspace:^",
+    "@deepseek-ai/dsh-tenant-questions": "workspace:^",
     "@deepseek-ai/schemastery": "workspace:^"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "workspace:^",
+    "@deepseek-ai/dsh-agent": "workspace:^",
     "@deepseek-ai/dsh-host-apiproxy": "workspace:^",
     "@deepseek-ai/dsh-host-webserver": "workspace:^",
     "@deepseek-ai/dsh-invariants": "workspace:^",
@@ -49,10 +51,13 @@
     "@deepseek-ai/dsh-tenant": "workspace:^",
     "@deepseek-ai/dsh-tenant-auth": "workspace:^",
     "@deepseek-ai/dsh-tenant-auth-jwt": "workspace:^",
+    "@deepseek-ai/dsh-tenant-questions": "workspace:^",
+    "@deepseek-ai/dsh-user-questions": "workspace:^",
     "@deepseek-ai/schemastery": "workspace:^",
     "jose": "^5.9.6"
   },
   "dependencies": {
-    "swagger-ui-dist": "^5.32.15"
+    "swagger-ui-dist": "^5.32.15",
+    "zod": "^4.4.3"
   }
 }

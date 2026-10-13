@@ -1,19 +1,18 @@
 # @deepseek-ai/dsh-tenant
 
-English | [中文](README.zh.md)
+多租户 DeepSeek Harness 部署的租户身份、请求作用域权威与注册表。此包不拥有持久状态、不注册工具；它是各多租户 provider 读取的边界。
 
-Tenant identity, request-scoped authority, and registry for multi-tenant DeepSeek Harness deployments. This package owns nothing durable and registers no tools; it is the boundary the multi-tenant providers read.
+## 形态
 
-## Shape
+- `TenantId` —— 不透明的 `Branded<'TenantId'>` id，配 `TenantId(id)` 工厂；`UserId` —— 不透明的 `Branded<'UserId'>` 主体，配 `UserId(id)` 工厂。
+- `Tenant` —— 认证请求所充当的已解析记录：`id`、`name`、`dataRoot`、`workspaceRoot`、可选 `toolsRoot`、可选 `enabled`、可选 `network` 出站策略，以及可选 `members`（被接纳的主体列表；缺省或为空表示对任意已认证主体开放）。
+- `runWithTenant(tenant, fn)` / `currentTenant()` / `requireTenant()` —— 请求作用域租户权威；`runWithUser(user, fn)` / `currentUser()` / `requireUser()` 以同样方式携载认证主体。每项权威是一个模块级 `AsyncLocalStorage`（`withInitiator` 模式），因此每个租户或用户感知的 provider 读同一份存储。`requireTenant()` 在无 run 环境外抛 `TenantError` code `NO_TENANT_IN_SCOPE`，`requireUser()` 抛 `NO_USER_IN_SCOPE`。
+- `isTenantMember(tenant, subject)` —— 主体是否被接纳进租户：`members` 缺省或为空即开放，否则主体必须在列表中。
+- `tenantPartitionName(tenantId)` / `userPartitionName(user)` —— 确定性的存储分区名：消毒后的 id 前缀加抗碰撞哈希后缀，始终是安全的 PostgreSQL 标识符（≤63 字符）。租户名是 Postgres 后端所用的每租户 schema；用户名是持久 `user_id` 的安全 token 形式，供内存守卫键与容器名使用。
+- `TenantRegistry`（`ctx.tenants`）—— 部署的租户记录：`register(tenant)` 返回精确 disposer、`get`、`resolve`（失败关闭地拒绝 `TENANT_UNKNOWN` / `TENANT_DISABLED`）、`resolveMember(id, subject)`（当租户列出的成员不包含该主体时追加 `NOT_A_MEMBER`）、`list`。租户也可经 cordis.yml 的 `Config.tenants` 声明（`{ id, name, dataRoot, workspaceRoot, toolsRoot?, enabled?, network?, members? }` 线上形态，其 `id` 在注册时被品牌铸造为 `TenantId`）；每条记录以 effect 挂载。
+- `ctx.partitionScope`（`TenantPartitionScope`）—— 本挂载为 harness 的分区中立消费者（`settings`、`settings-file`、`credentials-local`、`storage-domain`、`workspace`）安装的请求分区。`current()` 从环境权威解析出 `{ tenant, tenantName, user?, userName?, dataRoot }` —— 名字来自 `tenantPartitionName`/`userPartitionName`，`dataRoot` 给出每租户根目录 —— 无租户时返回 `undefined`，使这些消费者留在单分区路径上。它们经 `@deepseek-ai/dsh-partition-scope` 读取，因此本包是它们唯一的 provider，删除本包不会让它们加载失败。
 
-- `TenantId` — an opaque `Branded<'TenantId'>` id with the `TenantId(id)` factory; `UserId` — an opaque `Branded<'UserId'>` subject with the `UserId(id)` factory.
-- `Tenant` — the resolved record an authenticated request acts as: `id`, `name`, `dataRoot`, `workspaceRoot`, optional `toolsRoot`, optional `enabled`, optional `network` egress policy, and optional `members` (the admitted subjects; absent or empty means open to any authenticated subject).
-- `runWithTenant(tenant, fn)` / `currentTenant()` / `requireTenant()` — the request-scoped tenant authority; `runWithUser(user, fn)` / `currentUser()` / `requireUser()` carry the authenticated subject the same way. Each authority is one module `AsyncLocalStorage` (the `withInitiator` pattern), so every tenant- or user-aware provider reads the same store. `requireTenant()` throws `TenantError` code `NO_TENANT_IN_SCOPE` and `requireUser()` throws `NO_USER_IN_SCOPE` outside any run.
-- `isTenantMember(tenant, subject)` — whether a subject is admitted to a tenant: `members` absent or empty is open, otherwise the subject must be listed.
-- `tenantPartitionName(tenantId)` / `userPartitionName(user)` — deterministic storage-partition names: a sanitized id prefix plus a collision-resistant hash suffix, always a safe PostgreSQL identifier (≤63 chars). The tenant name is the per-tenant schema the Postgres backends use; the user name is the safe token form of the durable `user_id` used for in-memory guard keys and container names.
-- `TenantRegistry` (`ctx.tenants`) — the deployment's tenant records: `register(tenant)` returns the exact disposer, `get`, `resolve` (rejects `TENANT_UNKNOWN` / `TENANT_DISABLED` fail-closed), `resolveMember(id, subject)` (adds `NOT_A_MEMBER` when the tenant lists members excluding the subject), and `list`. Tenants can also be declared in cordis.yml through `Config.tenants` (a `{ id, name, dataRoot, workspaceRoot, toolsRoot?, enabled?, network?, members? }` wire shape whose `id` is brand-cast to `TenantId` on registration); each record mounts as an effect.
-
-Isolation is layered here, not in core: multi-tenant providers call `requireTenant()` for every open operation and enforce the durable `tenant_id`/schema binding they own, so a request can only address the tenant its authentication minted.
+隔离叠在此处而非 core：多租户 provider 对每个打开类操作调用 `requireTenant()`，并强制执行它们自持的持久 `tenant_id`/schema 绑定，因此一个请求只能寻址其认证所铸出的那个租户。
 
 ## Model Experience
 
@@ -21,17 +20,17 @@ Isolation is layered here, not in core: multi-tenant providers call `requireTena
 
 #### What the model sees
 
-Nothing. `ctx.tenants` and the tenant authority serve host-side providers only: the package registers no tools, injects no prompts, and writes no session events.
+无。`ctx.tenants` 与租户权威只服务 host 侧 provider：本包不注册工具、不注入提示、不写会话事件。
 
 #### Token effect
 
-Zero direct tokens on every request.
+每次请求零直接 token。
 
 #### KV Cache effect
 
-Independent of live requests: the package never touches a request prefix.
+与活动请求无关：本包从不触碰请求前缀。
 
 ## Known Limitations and Deferred Work
 
-- **Tenant records are in-memory** — provisioning is registration in the assembly, not a durable store; durable tenant provisioning and de-provisioning (with schema lifecycle) is deferred to the Postgres providers and their administrative contract.
-- **The authority is process-local** — `AsyncLocalStorage` propagates within one Node.js process; cross-replica fan-out carries the tenant id on the wire and re-enters with `runWithTenant` on the receiving side.
+- **租户记录在内存中** —— 开通即「装配中的注册」，不是持久存储；持久租户开通/注销（连同 schema 生命周期）延后到 Postgres provider 及其运维契约。
+- **权威是进程本地的** —— `AsyncLocalStorage` 在单个 Node.js 进程内传播；跨副本转发在线上携带租户 id，并在接收侧用 `runWithTenant` 重新进入。

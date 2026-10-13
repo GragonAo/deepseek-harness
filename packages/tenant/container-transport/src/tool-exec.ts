@@ -24,10 +24,17 @@ export interface ToolExecRequest {
 export interface ToolExecResult {
   /** The spawned process exit code (spawn failure rejects instead). */
   exitCode: number
-  /** Captured stdout decoded as UTF-8. */
+  /** Captured stdout decoded as UTF-8（被沙箱内上界截断时只保留末尾一段）。 */
   stdout: string
-  /** Captured stderr decoded as UTF-8. */
+  /** Captured stderr decoded as UTF-8（被沙箱内上界截断时只保留末尾一段）。 */
   stderr: string
+  /**
+   * stdout 被沙箱内的上界截断时为 true：这段文本是末尾一段，前面还有已经丢弃的字节。
+   * 没有截断时这个字段不出现，调用方据此区分「这就是全部输出」。
+   */
+  stdoutTruncated?: boolean
+  /** stderr 的同一件事，语义与 {@link ToolExecResult.stdoutTruncated} 相同。 */
+  stderrTruncated?: boolean
 }
 
 /**

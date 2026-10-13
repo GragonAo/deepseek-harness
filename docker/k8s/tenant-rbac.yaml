@@ -1,0 +1,56 @@
+# 多租户宿主在 k8s 沙箱后端下所需的授权（唯一来源：集群上不再另建角色）。
+#
+# 权限按后端实际发出的 kubectl 调用写（证据在 packages/tenant/container-k8s/src）：
+#   kubectl -n <ns> exec -i -t <pod> -- …      ⇒ pods/exec 的 create。交互式会话（终端能力）的唯一入口；
+#                                                缺这条会以 Forbidden 失败。
+#   kubectl create -f - <Pod/PVC 清单>         ⇒ pods、persistentvolumeclaims 的 create。
+#   kubectl get pod <name> -o json             ⇒ pods 的 get。
+#   kubectl get events --field-selector …      ⇒ events 的 get、list（沙箱起不来时解释原因）。
+#   kubectl delete pod <name> | -l <label> …   ⇒ pods 的 list、delete（含按标签批量收尸）。
+#
+# watch 与 pods/log 不是当前代码读的路径，但既有部署已经授予：保留它们是为了不悄悄收回既有权能，
+# 若确认无用可一并删除（删前请确认没有依赖它的等待或排障路径）。
+#
+# 刻意不授予：pods/portforward、secrets 与 configmaps 的任何权限、以及任何 * 资源。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dsh-host
+  namespace: dsh
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dsh-host
+  namespace: dsh
+rules:
+  - apiGroups: ['']
+    resources: ['pods']
+    verbs: ['get', 'list', 'watch', 'create', 'delete']
+  # 交互式会话走 pods/exec；去掉这条，terminal_open 会以 Forbidden 失败。
+  - apiGroups: ['']
+    resources: ['pods/exec']
+    verbs: ['create']
+  - apiGroups: ['']
+    resources: ['persistentvolumeclaims']
+    verbs: ['get', 'list', 'create', 'delete']
+  - apiGroups: ['']
+    resources: ['events']
+    verbs: ['get', 'list', 'watch']
+  - apiGroups: ['']
+    resources: ['pods/log']
+    verbs: ['get']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dsh-host
+  namespace: dsh
+subjects:
+  - kind: ServiceAccount
+    name: dsh-host
+    namespace: dsh
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dsh-host

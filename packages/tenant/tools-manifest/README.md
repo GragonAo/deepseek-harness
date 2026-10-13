@@ -1,14 +1,12 @@
 # @deepseek-ai/dsh-tools-manifest
 
-English | [中文](README.zh.md)
+在不接受任何可执行代码的前提下，把多租户 carrier 的环境工具目录变成工具。每次 `agent/created` 事件，插件读取 `ctx.toolTiers` 提供的案件级、用户全局、系统级三个根目录，把每个 `*.yaml` / `*.yml` 解析为纯数据清单，并按该根目录的 rank 注册到已创建 agent 自身的作用域——案件级（`30`）遮蔽用户全局（`40`），后者又遮蔽系统级（`50`），异名则取并集。因为注册表带 rank 的 `register` 会遮蔽同名内置工具，而一个不注册任何环境名的作用域里不存在同名覆盖，所以系统级同样可以覆盖某个同名的内置工具。层级目录里那份保留文件名的 `restriction.yaml` 不是清单、也不会被这里解析：它属于 `@deepseek-ai/dsh-tools-restriction`，由后者把 agent 继承来的工具收窄到它允许的名字。
 
-Turns the multi-tenant carrier's ambient tool directories into tools without accepting any executable code. For every `agent/created` event, the plugin reads the case, user-global, and system roots supplied by `ctx.toolTiers`, parses each `*.yaml` / `*.yml` as a data-only manifest, and registers the declared tool in the created agent's own scope at that root's rank — case (`30`) shadows user-global (`40`), which shadows system (`50`), and distinct names union. Because the registry's ranked `register` shadows same-named native tools while an unregistered scope holds no ambient names, the system tier can also override a built-in tool of the same name.
+一份清单只映射到一种固定的执行器家族：通过 `ctx.subprocess`（在多租户 carrier 里就是租户容器）启动的子进程，其 argv 是清单 `executor.args` 模板，`$field` 占位符由校验后的字符串参数替换。文件里没有脚本宿主、没有模块导入、也没有 `execute` 函数体：声明字段是唯一输入，且命令在租户容器内运行，因此租户编写的案件级清单无法逃逸隔离。输出是有界的字符串；默认原样返回命令的 stdout，非零退出码则让工具调用失败。
 
-A manifest maps onto exactly one fixed executor family: a subprocess launched through `ctx.subprocess` — the tenant container in the multi-tenant carrier — whose argv is the manifest's `executor.args` template with `$field` placeholders substituted from the validated string arguments. There is no script host, no module import, and no `execute` body in the file: the declarative fields are the only inputs, and the command runs inside the tenant container, so a tenant-authored case manifest cannot escape isolation. Output is a bounded string; by default the command's stdout is returned verbatim and a non-zero exit fails the tool.
+## 清单格式
 
-## Manifest format
-
-One YAML document per tool, with a kebab-case name, a description, flat string parameters, and a fixed executor:
+每个工具一份 YAML 文档，包含 kebab-case 名称、描述、扁平字符串参数和固定执行器：
 
 ```yaml
 name: mytool
@@ -27,9 +25,9 @@ executor:
     TOOL_MODE: batch
 ```
 
-`$field` placeholders in `executor.args` are replaced by the corresponding string argument; a referenced argument the model did not supply substitutes an empty string, but a `required` parameter is validated before execution.
+`executor.args` 中的 `$field` 占位符会替换为对应的字符串参数；模型未提供的被引用参数会替换为空字符串，但 `required` 参数会在执行前先校验。
 
-## Configuration
+## 配置
 
 ```yaml
 - name: '@deepseek-ai/dsh-tools-manifest'
@@ -45,47 +43,48 @@ executor:
 
 #### What the model sees
 
-One tool per manifest enters the assembled tool list as any registered tool does: its `name`, `description`, and flat-string `parameters` become the schema the model reads for selection and invocation, while `timeoutMs` stays a deployment budget, not a model argument. Distinct manifest names across the three tiers union into the catalog, and a name shared across tiers resolves once to the nearest tier (case over user-global over system) at the tier rank.
+每份清单在组装的工具列表里呈现为一个工具，和其他已注册工具一样：它的 `name`、`description` 与扁平字符串 `parameters` 构成模型用于选择与调用的 schema，而 `timeoutMs` 只是部署预算、不是模型参数。三层中不同的清单名并入目录并集，跨层共享的名称按层级 rank 只解析一次为最近一层（案件级 优先于 用户全局 优先于 系统级）。
 
 #### Token effect
 
-Fixed schema cost per registered manifest tool per request, linear in the number of manifests the current (tenant, user) tiers resolve; changing which tier directories exist, or which manifests they hold, changes the assembled tool list.
+每个注册的清单工具在每次请求中都有固定的 schema 成本，随当前（租户、用户）层级解析出的清单数量线性增长；改变存在哪些层级目录、或其中包含哪些清单，都会改变组装的工具列表。
 
 #### KV Cache effect
 
-Prefix-stable while the merged tier manifests and the request's (tenant, user) scope are unchanged; editing a manifest or resolving under a different scope invalidates reuse from the first changed schema token.
+在合并后的层级清单与请求的（租户、用户）作用域不变时前缀稳定；编辑清单、增删层级目录或在不同作用域下解析会使复用失效，失效点从第一个变化的 schema token 开始。
 
 ### Tool result
 
 #### What the model sees
 
-The command's stdout, truncated to the loader's `maxOutputBytes`, is rendered as one `text` block through the tool's `render`.
+命令的 stdout 截断到加载器的 `maxOutputBytes`，经工具的 `render` 渲染为一个 `text` 块。
 
 #### Token effect
 
-Data-dependent and resent until compaction; the byte cap bounds a single call's emitted text.
+数据相关，且在压缩前会被重复发送；字节上限约束单次调用发出的文本。
 
 #### KV Cache effect
 
-Append-only; the result follows the reusable request prefix and does not invalidate existing KV-cache entries.
+仅追加；结果跟在可复用的请求前缀之后，不会使已有的 KV-cache 条目失效。
 
 ### Tool failure
 
 #### What the model sees
 
-A non-zero exit renders `Error: tool "<name>" exited <code>: <stderr-tail>` as the failed call's result, where the stderr tail is omitted when empty.
+非零退出码会把 `Error: tool "<name>" exited <code>: <stderr-tail>` 渲染为失败调用的结果，其中 stderr 尾部为空时省略。
 
 #### Token effect
 
-Only the retained error text adds tokens; nothing else from the failed call enters history.
+只有保留的错误文本增加 token；失败调用的其他内容都不进入历史。
 
 #### KV Cache effect
 
-Append-only; the failure follows the reusable request prefix.
+仅追加；失败跟在可复用的请求前缀之后。
 
 ## Known Limitations and Deferred Work
 
-- **Flat string parameters only.** Parameter values reach the command as `$field` argv substitutions, so no richer ValueSchemaSpec shape (numbers, enums, arrays) is expressible in this version.
-- **Manifests are re-read per agent creation.** The tier directories are read synchronously inside the `agent/created` hook; this is fine for a small set of manifests but an async `prepare()` warm-up and cache are deferred.
-- **Within one tier directory a duplicate name still fails loud.** Ranked shadowing resolves a name shared across tiers, but two manifests in the same directory must keep distinct names.
-- **Credentials do not belong in manifests.** Declarative manifests hold no credential surface; the operator provisions any command-line secret through the provider, never through a tier manifest file.
+- **仅支持扁平字符串参数。** 参数值以 `$field` argv 替换的方式传给命令，因此当前版本无法表达更丰富的 ValueSchemaSpec 形式（数字、枚举、数组）。
+- **每次创建 agent 都会重新读取层级目录。** 清单在 `agent/created` 钩子里同步读取；对少量文件可以接受，但异步的 `prepare()` 预热与缓存留待后续。
+- **同一层级目录内重名仍然会大声失败。** 带 rank 的遮蔽解决跨层级共享名称，但同一目录里的两份清单必须保持名称不同。
+- **`restriction.yaml` 这个文件名被 `@deepseek-ai/dsh-tools-restriction` 占用。** 层级目录里叫这个名字的文件不会被当作清单解析，因此一份真的想叫这个名字的清单必须改名。
+- **凭据不属于清单。** 声明式文件不承载任何凭据面；命令行密钥由运营方通过 provider 预置，绝不能写进层级目录里的文件。

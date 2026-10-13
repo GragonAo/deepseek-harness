@@ -21,6 +21,9 @@
       "path": "../container"
     },
     {
+      "path": "../container-transport"
+    },
+    {
       "path": "../tenant"
     },
     {

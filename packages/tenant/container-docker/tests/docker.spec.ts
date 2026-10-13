@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import type { ContainerCommandResult } from '@deepseek-ai/dsh-container'
+import type { ContainerCommandResult, ContainerPtyOutcome } from '@deepseek-ai/dsh-container'
+import type { ContainerPtyRunner, ContainerPtyTransport } from '@deepseek-ai/dsh-container-transport'
 import { TenantId, UserId, runWithTenant, runWithUser } from '@deepseek-ai/dsh-tenant'
 import type { Tenant } from '@deepseek-ai/dsh-tenant'
 import { DockerContainerRuntime } from '../src/index.ts'
@@ -20,6 +21,12 @@ function tenant(id: string): Tenant {
     workspaceRoot: `/workspace/${id}`,
     toolsRoot: `/tools/${id}`,
   }
+}
+
+/** The same tenant without a `toolsRoot` on its record, for the /tools fallback rule. */
+function tenantWithoutTools(): Tenant {
+  const record = tenant('acme')
+  return { id: record.id, name: record.name, dataRoot: record.dataRoot, workspaceRoot: record.workspaceRoot }
 }
 
 /** Enter the ambient (tenant, user) scope most request paths run under. */
@@ -46,6 +53,11 @@ class FakeClient implements ToolExecClient {
   readonly requests: { baseUrl: string; req: ToolExecRequest }[] = []
   async exec(baseUrl: string, req: ToolExecRequest): Promise<ToolExecResult> {
     this.requests.push({ baseUrl, req })
+    // The identity probe of an interactive session reports a live session and its
+    // leading process group; every other request succeeds with a fixed body.
+    if (req.argv[0] === 'sh' && req.argv.join(' ').includes('DSH_PTY_MEMBER')) {
+      return { exitCode: 0, stdout: 'DSH_PTY_MEMBER 42 42\nDSH_PTY_LEADER 42 42\n', stderr: '' }
+    }
     return { exitCode: 0, stdout: 'ok', stderr: '' }
   }
 }
@@ -76,8 +88,9 @@ function mount(
   client: ToolExecClient,
   config: Config = { runtime: 'docker' },
   probe: HostPathProbe = presentProbe,
+  pty?: ContainerPtyRunner,
 ): DockerContainerRuntime {
-  return new DockerContainerRuntime(new Context(), config, runner, client, probe)
+  return new DockerContainerRuntime(new Context(), config, runner, client, probe, pty)
 }
 
 /**
@@ -132,6 +145,33 @@ function probeWithMounts(directories: readonly string[], files: readonly string[
 }
 
 /**
+ * The interactive terminal seam: it records what the provider asked the host to
+ * launch and answers the session handshake, which is all the container side of
+ * an interactive session can be asserted without a browser-side TTY.
+ */
+class FakePtyRunner implements ContainerPtyRunner {
+  readonly starts: { args: readonly string[]; rows: number; cols: number; graceMs: number }[] = []
+
+  async start(args: readonly string[], spec: { rows: number; cols: number; graceMs: number }): Promise<ContainerPtyTransport> {
+    this.starts.push({ args, ...spec })
+    const listeners = new Set<(data: string) => void>()
+    return {
+      pid: 1,
+      done: new Promise<ContainerPtyOutcome>(() => {}),
+      onData: (listener: (data: string) => void): (() => void) => {
+        listeners.add(listener)
+        return () => { listeners.delete(listener) }
+      },
+      async write(data: string): Promise<void> {
+        if (!data.includes('DSH_PTY_SESSION')) return
+        for (const listener of listeners) listener('DSH_PTY_SESSION 42\r\nbash-5.2# ')
+      },
+      async terminate(): Promise<void> {},
+    }
+  }
+}
+
+/**
  * A runner whose CLI calls never return while `wedged`, modelling a container
  * daemon that accepted the request and stopped answering. It ignores the signal
  * a real `docker` child would be killed by, so only the provider's own deadline
@@ -142,9 +182,12 @@ class WedgedRunner implements DockerRunner {
   wedged = true
   calls = 0
   starts = 0
+  /** 除启动收尸的那次 `ps` 之外的调用次数：那些才是「碰了某个容器」。 */
+  containerCalls = 0
 
   async run(args: readonly string[], opts?: { stdin?: string; signal?: AbortSignal }): Promise<ContainerCommandResult> {
     this.calls += 1
+    if (args[0] !== 'ps') this.containerCalls += 1
     if (this.wedged) return await new Promise<ContainerCommandResult>(() => {})
     if (args[0] === 'run') this.starts += 1
     return await this.inner.run(args, opts)
@@ -163,6 +206,40 @@ describe('DockerContainerRuntime', () => {
       .rejects.toMatchObject({ code: 'NO_USER_IN_SCOPE' })
   })
 
+  it('opens an interactive session with a TTY on the tenant\'s own container', async () => {
+    const runner = new FakeRunner()
+    const client = new FakeClient()
+    const pty = new FakePtyRunner()
+    const runtime = mount(runner, client, { runtime: 'docker' }, presentProbe, pty)
+    const session = await scoped(tenant('acme'), 'user-1', () =>
+      runtime.openPty({ command: 'bash', rows: 24, cols: 80, maxOutputBytes: 4_096, disposeGraceMs: 500 }))
+
+    const [started] = pty.starts
+    expect(started?.args.slice(0, 3)).toEqual(['exec', '-i', '-t'])
+    // The container is the one this tenant and user own, under their partition names.
+    expect(started?.args[3]).toMatch(/^dsh-tenant_acme_.+-user_user_1_.+$/)
+    expect(started?.args.slice(4)).toEqual(['bash'])
+    expect(started).toMatchObject({ rows: 24, cols: 80, graceMs: 500 })
+    // The session's identity comes from the sandbox's own process table, over the
+    // same tool-exec client every one-shot command uses.
+    expect(session.pid).toBe(42)
+    expect(client.requests.some(request => request.req.argv.join(' ').includes('DSH_PTY_MEMBER'))).toBe(true)
+  })
+
+  it('承认为可写时案件共享与用户全局目录不再只读，技能层始终只读', async () => {
+    const runner = new FakeRunner()
+    const runtime = mount(runner, new FakeClient(), {
+      runtime: 'docker', usersRoot: '/users', sharedReadOnly: false, usersReadOnly: false,
+    })
+    await scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi']))
+    const runCall = runner.calls.find(c => c[0] === 'run')
+    expect(runCall).toContain('/workspace/acme/shared:/shared')
+    expect(runCall).not.toContain('/workspace/acme/shared:/shared:ro')
+    expect(runCall).toContain('/users/user-1:/global')
+    expect(runCall).not.toContain('/users/user-1:/global:ro')
+    expect(runCall).toContain('/workspace/acme/shared/skills:/opt/data/skills/case:ro')
+  })
+
   it('starts a tool-exec container with the three-layer mounts after publishing its loopback port, then POSTs /exec', async () => {
     const runner = new FakeRunner()
     const client = new FakeClient()
@@ -175,14 +252,22 @@ describe('DockerContainerRuntime', () => {
     expect(runCall).toContain('host.docker.internal:host-gateway')
     // The 3 case/user layers plus the read-only tool layer.
     expect(runCall).toContain('/workspace/acme/users/user-1:/workspace')
-    expect(runCall).toContain('/workspace/acme/shared:/shared')
-    expect(runCall).toContain('/users/user-1:/global')
+    expect(runCall).toContain('/workspace/acme/shared:/shared:ro')
+    expect(runCall).toContain('/users/user-1:/global:ro')
     expect(runCall).toContain('/tools/acme:/tools:ro')
     expect(runCall).toContain('/opt/.dsh/system:/opt/.dsh/system:ro')
     // The case-shared skill tier's own directory must resolve in the sandbox: a skill
     // body resolves relative paths against that base directory.
     expect(runCall).toContain('/workspace/acme/shared/skills:/workspace/acme/shared/skills:ro')
+    // The same three tiers again under the root the case scripts enumerate: a mount carries
+    // one source to one path, so each tier keeps its own subdirectory there.
+    expect(runCall).toContain('/workspace/acme/shared/skills:/opt/data/skills/case:ro')
+    expect(runCall).toContain('/users/user-1/skills:/opt/data/skills/user-global:ro')
+    expect(runCall).toContain('/opt/.dsh/system/skills:/opt/data/skills/system:ro')
     expect(runCall).toContain('dsh-tool-exec:latest')
+    // The image's entrypoint takes the port as its first argument, so the image
+    // name is followed by the port the provider publishes and dials.
+    expect(runCall?.slice(-2)).toEqual(['dsh-tool-exec:latest', '8642'])
     expect(runCall).not.toContain('tail')
     const name = runCall?.[runCall?.indexOf('--name') + 1]
     expect(name).toMatch(/^dsh-tenant_acme_[0-9a-f]{12}-user_user_1_[0-9a-f]{12}$/)
@@ -193,6 +278,16 @@ describe('DockerContainerRuntime', () => {
       { baseUrl: 'http://127.0.0.1:43210', req: { argv: ['sh', '-c', 'true'] } },
       { baseUrl: 'http://127.0.0.1:43210', req: { argv: ['echo', 'hi'] } },
     ])
+  })
+
+  it('publishes a configured container port and hands the same port to the image entrypoint', async () => {
+    const runner = new FakeRunner()
+    const runtime = mount(runner, new FakeClient(), { runtime: 'docker', toolExecPort: 9000 })
+    await scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi']))
+    const runCall = runner.calls.find(c => c[0] === 'run')
+    expect(runCall).toContain('127.0.0.1::9000')
+    expect(runCall?.slice(-2)).toEqual(['dsh-tool-exec:latest', '9000'])
+    expect(runner.calls.find(c => c[0] === 'port')).toEqual(['port', expect.any(String), '9000'])
   })
 
   it('refuses to start when a bind-mount source is missing, naming the path, its mount point, and the (tenant, member)', async () => {
@@ -210,8 +305,9 @@ describe('DockerContainerRuntime', () => {
     // The directory to create belongs to a (tenant, member) pair, so both are named.
     expect(error.message).toContain("tenant 'acme' member 'user-1'")
     // The failure is this check, not a container CLI error: nothing ran, and no
-    // same-name container was cleared either.
-    expect(runner.calls).toHaveLength(0)
+    // same-name container was cleared either. The startup sweep's `ps` does not
+    // touch any container, so it is not one of these calls.
+    expect(runner.calls.filter(call => call[0] !== 'ps')).toHaveLength(0)
   })
 
   it('names every missing bind-mount source in one failure', async () => {
@@ -237,7 +333,7 @@ describe('DockerContainerRuntime', () => {
     ]) {
       expect(error.message).toContain(source)
     }
-    expect(runner.calls).toHaveLength(0)
+    expect(runner.calls.filter(call => call[0] !== 'ps')).toHaveLength(0)
   })
 
   it('publishes the tool-exec port on, and dials it at, the configured host addresses', async () => {
@@ -284,7 +380,7 @@ describe('DockerContainerRuntime', () => {
     await scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi']))
     const runCall = runner.calls.find(c => c[0] === 'run')
     expect(runCall).toContain('/workspace/acme/users/user-1:/workspace')
-    expect(runCall).toContain('/workspace/acme/shared:/shared')
+    expect(runCall).toContain('/workspace/acme/shared:/shared:ro')
     expect(runCall).not.toContain('/global')
   })
 
@@ -503,19 +599,60 @@ describe('DockerContainerRuntime', () => {
     expect(runCall).toContain('none')
   })
 
-  it('reaps an idle container and lazily restarts on next use', async () => {
+  it('hands the idle budget to the container and collects what a container left behind', async () => {
     const runner = new FakeRunner()
     const runtime = mount(runner, new FakeClient(), { runtime: 'docker', idleTimeoutMs: 20 })
     await scoped(tenant('acme'), 'user-1', () => runtime.exec('a', []))
-    expect(runner.calls.filter(c => c[0] === 'run')).toHaveLength(1)
-    // One `rm -f` clears the same-name stale container before the first start.
-    expect(runner.calls.filter(c => c[0] === 'rm' && c[1] === '-f')).toHaveLength(1)
+    // 空闲由容器自己判定：宿主看不见别的副本对这个沙箱的使用，而每一个请求都要到达容器。
+    expect(runner.calls.find(call => call[0] === 'run')).toContain('DSH_TOOL_EXEC_IDLE_MS=20')
+    // 启动时收一次尸，只按标签收已经退出的容器：Running 的可能是另一个副本正在用的沙箱。
+    expect(runner.calls.find(call => call[0] === 'ps'))
+      .toEqual(['ps', '-a', '--filter', 'label=dsh.dev/managed', '--filter', 'status=exited', '-q'])
+  })
+
+  it('hands the output bound to the container, which enforces it itself', async () => {
+    const runner = new FakeRunner()
+    const runtime = mount(runner, new FakeClient(), { runtime: 'docker', maxOutputBytes: 4096 })
+    await scoped(tenant('acme'), 'user-1', () => runtime.exec('a', []))
+    // 原始流是容器先攒满、宿主才轮得到加界的：上界不注入容器就等于没设。
+    expect(runner.calls.find(call => call[0] === 'run')).toContain('DSH_TOOL_EXEC_MAX_OUTPUT_BYTES=4096')
+  })
+
+  it('injects the default output bound when the config leaves it unset', async () => {
+    const runner = new FakeRunner()
+    const runtime = mount(runner, new FakeClient(), { runtime: 'docker' })
+    await scoped(tenant('acme'), 'user-1', () => runtime.exec('a', []))
+    // 与空闲预算不同，这条上界总有一个值：省略配置不等于「不加界」。
+    expect(runner.calls.find(call => call[0] === 'run')).toContain('DSH_TOOL_EXEC_MAX_OUTPUT_BYTES=67108864')
+  })
+
+  it('takes /tools from the configured root when the tenant record has none', async () => {
+    const runner = new FakeRunner()
+    const runtime = mount(runner, new FakeClient(), { runtime: 'docker', toolsRoot: '/shared-tools' })
+    // The same rule as container-k8s: the tenant's own toolsRoot wins, and only a
+    // tenant record without one falls back to the configured root.
+    await scoped(tenantWithoutTools(), 'user-1', () => runtime.exec('a', []))
+    expect(runner.calls.find(c => c[0] === 'run')).toContain('/shared-tools:/tools:ro')
+  })
+
+  it('mounts no /tools at all when neither the tenant record nor the configuration names a root', async () => {
+    const runner = new FakeRunner()
+    const runtime = mount(runner, new FakeClient())
+    await scoped(tenantWithoutTools(), 'user-1', () => runtime.exec('a', []))
+    expect(runner.calls.find(c => c[0] === 'run')?.some(argument => argument.includes(':/tools'))).toBe(false)
+  })
+
+  it('re-confirms a cached container with `docker port` once its handle TTL expired', async () => {
+    const runner = new FakeRunner()
+    const runtime = mount(runner, new FakeClient(), { runtime: 'docker', sandboxCacheTtlMs: 20 })
+    await scoped(tenant('acme'), 'user-1', () => runtime.exec('a', []))
+    expect(runner.calls.filter(c => c[0] === 'port')).toHaveLength(1)
     await new Promise(resolve => setTimeout(resolve, 60))
-    // The idle reap fires the second `rm -f` on the same stable name.
-    expect(runner.calls.filter(c => c[0] === 'rm' && c[1] === '-f')).toHaveLength(2)
     await scoped(tenant('acme'), 'user-1', () => runtime.exec('b', []))
-    expect(runner.calls.filter(c => c[0] === 'run')).toHaveLength(2)
-    expect(runner.calls.filter(c => c[0] === 'rm' && c[1] === '-f')).toHaveLength(3)
+    // Expiry re-reads the published port; it does not rebuild a container that is
+    // still running.
+    expect(runner.calls.filter(c => c[0] === 'port')).toHaveLength(2)
+    expect(runner.calls.filter(c => c[0] === 'run')).toHaveLength(1)
   })
   it('bounds one container CLI call that never returns', async () => {
     const runner: DockerRunner = {
@@ -566,7 +703,8 @@ describe('DockerContainerRuntime', () => {
     controller.abort()
     await expect(scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi'], { signal: controller.signal })))
       .rejects.toThrow('aborted')
-    expect(runner.calls).toBe(0)
+    // 取消要发生在容器之前：那次启动收尸的 `ps` 不算碰容器。
+    expect(runner.containerCalls).toBe(0)
   })
 
   it('escapes a start that is still pending when the caller aborts', async () => {

@@ -12,7 +12,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { TenantId, currentTenant, currentUser, runWithTenant, runWithUser } from '@deepseek-ai/dsh-tenant'
+import TenantRegistry, { TenantId, currentTenant, currentUser, runWithTenant, runWithUser } from '@deepseek-ai/dsh-tenant'
 import type { Tenant, UserId } from '@deepseek-ai/dsh-tenant'
 import {
   SettingsProvider,
@@ -87,6 +87,9 @@ describe('settings-tier real composition', () => {
     writeFileSync(join(workspaceRoot, 'config', 'demo.yaml'), 'v: session-v\n')
 
     const ctx = new Context()
+    // The tenant plugin mounts the ambient partition the settings base keys its
+    // snapshot by; without it the partition-keyed seam resolves partitionless.
+    const tenantFiber = await ctx.plugin(TenantRegistry)
     const settingsFiber = await ctx.plugin(UserMemorySettings)
     applySettingsTier(ctx, { usersRoot, systemConfigDir: sysDir })
     const ns = settingsNamespace('demo')
@@ -107,6 +110,7 @@ describe('settings-tier real composition', () => {
       }))
     } finally {
       await settingsFiber.dispose()
+      await tenantFiber.dispose()
     }
   })
 })

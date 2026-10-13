@@ -1,0 +1,82 @@
+# 租户服务镜像：Node 22 + 仓库构建产物 + kubectl + docker CLI。
+#
+# 启动路径只有一条：`packages/tenant/tenant-app` 的 bin（`dsh-tenant --config <文件>`）。
+# 镜像里没有 `dsh` CLI、没有 Loader、没有 profile 补丁层。数据库与沙箱镜像都在镜像之外：
+# PostgreSQL 由配置的 connectionString 指过去，沙箱镜像由 sandbox.image 指定。
+#
+# 两个沙箱后端各要一个客户端，所以两个都装：k8s 后端每次沙箱操作都调 kubectl（生产形态），
+# docker 后端调 docker（socket 运行时以绑定挂载进来，本地开发那份
+# docker/docker-compose.tenant.yml 走的就是它）。
+#
+# 构建（仓库根目录）：
+#   docker build -f Dockerfile.tenant -t dsh-tenant:latest \
+#     --build-arg DSH_COMMIT=$(git rev-parse --short HEAD) .
+# 导入集群（containerd）：
+#   docker save dsh-tenant:latest | ssh <节点> 'ctr -n k8s.io images import -'
+ARG NODE_IMAGE=node:22-bookworm
+ARG KUBECTL_VERSION=v1.31.4
+ARG DOCKER_CLI_IMAGE=docker:27-cli
+
+# kubectl 放在最前面：k8s 沙箱后端对每次沙箱操作都调用它，构建网络不通时在这里立刻失败，
+# 而不是等运行时才发现沙箱起不来。
+FROM ${NODE_IMAGE} AS kubectl
+ARG KUBECTL_VERSION
+RUN curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
+ && chmod +x /usr/local/bin/kubectl \
+ && kubectl version --client
+
+# docker CLI 是静态二进制，直接取过来即可；它连的是运行时挂载进来的 socket。
+FROM ${DOCKER_CLI_IMAGE} AS dockercli
+
+FROM ${NODE_IMAGE} AS build
+ARG NPM_REGISTRY=https://registry.npmjs.org
+# 构建记录源码版本：上下文排除了 .git，所以由构建参数传入（非 Git 构建环境的输入）。
+ARG DSH_COMMIT=0000000
+ENV COREPACK_NPM_REGISTRY=$NPM_REGISTRY
+ENV DSH_CLIENT_COMMIT_HASH=$DSH_COMMIT
+ENV PNPM_HOME=/pnpm
+ENV PATH=/pnpm:$PATH
+RUN corepack enable
+WORKDIR /src
+# 先只拷依赖清单，再装依赖：源码改动只影响它下面那两层，不会让依赖安装层失效。
+# 清单必须按工作区实际深度全部列出——少一个，`--frozen-lockfile` 就会因为工作区项目集合与
+# 锁文件不符而失败（这一层是构建期的硬失败，不会静默退化成「装了个不完整的树」）。
+# 打补丁要用到的 patches/ 必须在 `pnpm install` 之前就位。
+COPY --parents package.json pnpm-lock.yaml pnpm-workspace.yaml patches \
+  */package.json */*/package.json */*/*/package.json */*/*/*/package.json ./
+# pnpm store 挂在 cache 里跨构建复用：容器里没有宿主那份 store，冷装的代价是纯重复劳动。
+# 两个配置都写死成绝对路径，避免 store 位置随 PNPM_HOME 取值漂移而让 cache 永远命中不到。
+# 这一层必须 `--ignore-scripts`：工作区包（例如 subprocess-local）的 postinstall 要读自己仓库里的
+# 脚本文件，而此刻源码还没拷进来。依赖树的安装因此与源码内容无关，源码改动不再让它失效；
+# 安装期该跑的脚本由下一层的 `pnpm rebuild` 补上，位置在源码就位之后。
+RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
+  pnpm config set registry "$NPM_REGISTRY" \
+ && pnpm config set store-dir /pnpm/store \
+ && pnpm install --frozen-lockfile --ignore-scripts
+COPY . .
+RUN pnpm rebuild
+# 干净检出上的生效顺序不能只用 `build:lib:host`：host 依赖图里有包引用 client 工程，而 client 工程要读
+# Host tsdown 才生成的 `/remote` 声明，所以第一轮 `tsc` 必然报错、但它的 `lib/types` 产物是 tsdown 的输入。
+# 于是先发射（这一轮的报错是“尚未生成”的假象，最后一轮才判定）→ tsdown host 生成 Typert 约定并出 host 产物
+# → 两个 face 各自重跑 `tsc`（都是真正的类型门）→ tsdown client 出 client 侧产物（有的包，例如 typert-registry
+# 与 client 插件，运行时入口只在这一轮产出）。浏览器前端不构建：租户服务不装载它。
+RUN pnpm exec tsc -b tsconfig.host.json || true \
+ && pnpm exec tsdown --env.DSH_BUILD_FACE host \
+ && pnpm exec tsc -b tsconfig.host.json \
+ && pnpm exec tsc -b tsconfig.client.json \
+ && pnpm exec tsdown --env.DSH_BUILD_FACE client
+
+FROM ${NODE_IMAGE}
+# 与部署机上的检出同路径：租户工作区里的绑定挂载路径由配置给出，容器内外的路径字符串
+# 必须逐字符相同，沙箱才挂到同一个目录。
+WORKDIR /opt/work/deepseek-harness
+COPY --from=build /src /opt/work/deepseek-harness
+COPY --from=kubectl /usr/local/bin/kubectl /usr/local/bin/kubectl
+COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker
+ENV NODE_ENV=production \
+    DSH_TENANT_CONFIG=/etc/dsh/tenant.config.yaml
+EXPOSE 8787
+HEALTHCHECK --interval=15s --timeout=5s --start-period=180s --retries=10 \
+  CMD node -e "fetch('http://127.0.0.1:8787/openapi.json').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+ENTRYPOINT ["node", "packages/tenant/tenant-app/lib/bin.js"]
+CMD ["--config", "/etc/dsh/tenant.config.yaml"]

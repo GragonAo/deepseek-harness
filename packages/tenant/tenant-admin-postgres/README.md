@@ -1,15 +1,13 @@
 # @deepseek-ai/dsh-tenant-admin-postgres
 
-English | [中文](README.zh.md)
+租户管理面的 PostgreSQL 持久化提供方。它注册 `@deepseek-ai/dsh-tenant-admin` 消费的两个接缝 —— `tenantRecordStore` 与 `tenantSchemaLifecycle` —— 使租户列表在重启后仍存在，并让每个租户拥有独立的 schema。
 
-PostgreSQL durability provider for the tenant-administration surface. It registers the two seams `@deepseek-ai/dsh-tenant-admin` consumes — `tenantRecordStore` and `tenantSchemaLifecycle` — so the tenant list survives restarts and each tenant owns a private schema.
+## 存储内容
 
-## What it stores
+- **`tenant_record`**（共享表）。每个租户一行：`id`、`name`、`data_root`、`workspace_root`、`tools_root`、`enabled`、`network`、`members`（`jsonb`）、`updated_at`。首次启动幂等创建。
+- **每个租户一个 schema。** `provision` 执行 `CREATE SCHEMA IF NOT EXISTS <tenantPartitionName(id)>`；`purge` 执行 `DROP SCHEMA IF EXISTS <…> CASCADE`，因此硬删除会同时删除分区内所有提供方的表。
 
-- **`tenant_record`** (shared table). One row per tenant: `id`, `name`, `data_root`, `workspace_root`, `tools_root`, `enabled`, `network`, `members` (`jsonb`), `updated_at`. Created idempotently on first boot.
-- **One schema per tenant.** `provision` runs `CREATE SCHEMA IF NOT EXISTS <tenantPartitionName(id)>`; `purge` runs `DROP SCHEMA IF EXISTS <…> CASCADE` so a hard remove also drops every provider table inside the partition.
-
-## Configuration
+## 配置
 
 ```yaml
 - name: '@deepseek-ai/dsh-tenant-admin-postgres'
@@ -17,7 +15,7 @@ PostgreSQL durability provider for the tenant-administration surface. It registe
     connectionString: 'postgres://dsh:dsh@localhost:5432/dsh'
 ```
 
-The role must hold `CREATE` on the target database: provisioning issues `CREATE SCHEMA` per tenant, and the provider creates `tenant_record` on first boot.
+角色必须对目标数据库持有 `CREATE` 权限：预置会为每个租户执行 `CREATE SCHEMA`，提供方在首次启动时创建 `tenant_record`。
 
 ## Model Experience
 
@@ -25,17 +23,17 @@ The role must hold `CREATE` on the target database: provisioning issues `CREATE 
 
 #### What the model sees
 
-Nothing. This provider answers the `tenantRecordStore` / `tenantSchemaLifecycle` seams only; it adds no tools, prompts, or session events.
+无。该提供方只应答 `tenantRecordStore` / `tenantSchemaLifecycle` 接缝；不新增任何工具、提示词或会话事件。
 
 #### Token effect
 
-Zero tokens on every request.
+每次请求零 Token。
 
 #### KV Cache effect
 
-Independent of the model request prefix.
+与模型请求前缀无关。
 
 ## Known Limitations and Deferred Work
 
-- **No migration story.** `tenant_record` is created once with its current columns; adding a column later requires a manual migration.
-- **Members round-trip through `jsonb`.** Member order is preserved but stored as a JSON array; invalid JSON in the column is treated as an empty member list on load.
+- **没有迁移方案。** `tenant_record` 以当前列一次性创建；后续加列需要手工迁移。
+- **members 经 `jsonb` 往返。** 成员顺序会保留，但以 JSON 数组存储；若该列是非法 JSON，加载时按空成员列表处理。

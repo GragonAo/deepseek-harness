@@ -24,6 +24,9 @@
       "path": "../tenant"
     },
     {
+      "path": "../../util/timeout"
+    },
+    {
       "path": "../../runtime-diagnostics/invariants"
     }
   ]

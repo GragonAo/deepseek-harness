@@ -11,13 +11,30 @@
  * cannot orphan an older execution world (the next start clears the same-name
  * container first). Every bind-mount source is checked on the host first, because
  * the container runtime creates a missing one as an empty directory instead of
- * failing. Idle containers are reaped after `idleTimeoutMs`, and the
- * execution world itself is stateless: everything a tenant and user own lives
- * on its mounts, never in the container. Every container CLI invocation, the
- * cold start as a whole, and each tool-exec round trip carry their own deadline,
- * so a wedged daemon or a tool-exec server that stopped answering fails the call
- * instead of leaving it pending — a pending start would otherwise stop every
- * later tool call for that subject until the host process restarts.
+ * failing. Idle containers exit by themselves after `idleTimeoutMs`: the
+ * provider injects the budget and the container judges its own idleness, because
+ * every request reaches the container while the host cache cannot see another
+ * replica's use of the same sandbox. The provider likewise injects
+ * `maxOutputBytes`, because the container holds a command's whole stream before
+ * the host's subprocess capability can bound the result: the container keeps
+ * draining past that bound, retains the tail of each stream, and marks the
+ * stream as truncated. The execution world itself is stateless: everything a
+ * tenant and user own lives on its mounts, never in the container. Every
+ * container CLI invocation, the cold start as a whole, and each tool-exec round
+ * trip carry their own deadline, so a wedged daemon or a tool-exec server that
+ * stopped answering fails the call instead of leaving it pending — a pending
+ * start would otherwise stop every later tool call for that subject until the
+ * host process restarts.
+ *
+ * 本包与 `container-k8s` 是 `ctx.containerRuntime` 上的两个实现，因此沙箱内的事实逐条对齐：
+ * 同一张挂载表（`/workspace`、`/shared`、`<workspaceRoot>/shared/skills`、`/global`、
+ * `systemRoot` 同路径、`/tools`、`pythonRoot` 同路径）、同一套 Python 三件套
+ * （`PATH` 前置、`VIRTUAL_ENV`、`PYTHONPATH`）、同一组身份变量
+ * （`DSH_CASE_ID`/`DSH_TENANT_ID`/`DSH_USER_ID`）、同一条 `/tools` 来源规则
+ * （租户记录优先，缺省回落配置），以及同名同义的 `idleTimeoutMs`（空闲回收）、
+ * `maxOutputBytes`（容器内的原始流上界）、`sandboxCacheTtlMs`（句柄缓存 TTL）、
+ * `cliTimeoutMs`、`startTimeoutMs`、`transportTimeoutMs`。
+ * 两边只在「事实从哪里来」上不同：容器在宿主上，Pod 在集群里。
  * @module @deepseek-ai/dsh-container-docker
  */
 
@@ -25,9 +42,16 @@ import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import { ContainerRuntime } from '@deepseek-ai/dsh-container'
-import type { ContainerCommandResult, ContainerExecOptions } from '@deepseek-ai/dsh-container'
+import type {
+  ContainerCommandResult,
+  ContainerExecOptions,
+  ContainerPtyOptions,
+  ContainerPtySession,
+} from '@deepseek-ai/dsh-container'
 import { requireTenant, requireUser, tenantPartitionName, userPartitionName } from '@deepseek-ai/dsh-tenant'
 import type { Tenant, UserId } from '@deepseek-ai/dsh-tenant'
+import { openContainerPty, ptyRunner } from '@deepseek-ai/dsh-container-transport'
+import type { ContainerPtyRunner, ContainerSessionExec } from '@deepseek-ai/dsh-container-transport'
 import { cliRunner } from './runner.ts'
 import type { DockerRunner } from './runner.ts'
 import { hostPathProbe, resolvePythonEnvironment } from './python-env.ts'
@@ -60,6 +84,11 @@ export interface ToolExecClient {
 interface TenantRuntime {
   name: string
   port: number
+  /**
+   * 这个句柄可以直接用到什么时候，单位毫秒（`Date.now()` 刻度）。到期后
+   * {@link DockerContainerRuntime.ensure} 先用一次 `docker port` 向运行时确认它。
+   */
+  expiresAt: number
 }
 
 /** Plugin configuration. */
@@ -70,7 +99,13 @@ export interface Config {
   network?: string
   /** In-container tool-exec image run as each (tenant, user)'s execution world. */
   toolExecImage?: string
-  /** Container port the tool-exec server binds (published to a random host port). */
+  /**
+   * Container port the tool-exec server binds (published to a random host port).
+   *
+   * 本 provider 把它同时用在两处：`-p` 发布的容器端口，以及镜像 entrypoint 的第一个位置参数
+   * （契约是 `entry.mjs <port> [host]`，见 `docker/entry.mjs`）。命令参数由本 provider 显式传下去，
+   * 不再依赖镜像 `CMD` 里那个 8642，因此改这个值真的会改沙箱内的监听端口。
+   */
   toolExecPort?: number
   /**
    * Host address the tool-exec port is published on. Defaults to the host
@@ -93,6 +128,20 @@ export interface Config {
    * mount is skipped (single-user deployments without a cross-case directory).
    */
   usersRoot?: string
+  /**
+   * `/shared`（案件级共享目录）是否对沙箱只读，默认只读。
+   *
+   * 它由一个案件下的所有用户共用，业务侧通过管理接口写入；沙箱可写就意味着任何用户的沙箱都能
+   * 改到别人的输入。`/shared/skills` 就在它下面，所以可写时那个只读的技能挂载形同虚设。
+   */
+  sharedReadOnly?: boolean
+  /**
+   * `/global`（该 subject 的跨案件目录）是否对沙箱只读，默认只读。
+   *
+   * 它盛放用户全局提交上来的文件与用户全局技能，由业务侧写入；`/global/skills` 同样在它下面，
+   * 可写时 `user-global` 那一层只读挂载也形同虚设。
+   */
+  usersReadOnly?: boolean
   /**
    * Host directory holding the system-wide skill tree, bind-mounted read-only at
    * the same absolute path. A skill's instructions reference companion files
@@ -126,6 +175,12 @@ export interface Config {
    */
   pythonRoot?: string
   /**
+   * `/tools` 挂载的来源，供租户记录里没有 `toolsRoot` 的租户使用。来源规则是租户记录优先：
+   * `tenant.toolsRoot` 存在时用它，缺省才回落到这里。省略本字段则这类租户的沙箱没有
+   * `/tools` 挂载。（`container-k8s` 的同名字段逐字同义。）
+   */
+  toolsRoot?: string
+  /**
    * `PATH` the tool-exec image gives its commands, used when `pythonRoot` puts
    * a mounted interpreter's `bin` directory first: `docker run -e PATH=`
    * replaces the image's value instead of extending it, so the rest of PATH has
@@ -135,8 +190,32 @@ export interface Config {
    * or the directories it adds disappear from every sandbox command.
    */
   toolExecImagePath?: string
-  /** Milliseconds of exec idleness before the container is reaped. Omit to keep. */
+  /**
+   * 空闲多久后让该主体的沙箱容器自己退出，单位毫秒：provider 把它作为 `DSH_TOOL_EXEC_IDLE_MS`
+   * 注入容器，容器据此判定「没有在途请求、且距上一次请求已超过预算」后自行退出，留下一个终态
+   * 容器由下一次启动的收尸清掉（见 `tool-exec.ts`）。宿主不自己计时：它看不见别的副本对这个
+   * 沙箱的使用，而每一个请求都要到达容器。正在执行的命令不算空闲。省略则容器永不自行退出
+   * （长期不用的主体会一直占着一份容器资源）。粒度是这个主体，不是全局。
+   */
   idleTimeoutMs?: number
+  /**
+   * 沙箱内每次 exec 里**每条输出流**最多保留多少字节：provider 把它作为
+   * `DSH_TOOL_EXEC_MAX_OUTPUT_BYTES` 注入容器，容器超过上界后继续读完这条流（停止读会让子进程
+   * 在写满管道时阻塞），只保留末尾一段，并在结果里把该流标成已截断（见 `tool-exec.ts`）。
+   * 上界只需高于宿主自己的结果上界（`ctx.subprocess` 的每条流预算），它的用处是保护沙箱自己：
+   * 原始流是容器先攒满、宿主才轮得到加界的，所以一条大输出命令能撑死沙箱。调低它会连带截断那些
+   * 本来整段读得回来的大结果（整份文件读取、`run_code` 自己 64 MiB 的载荷上界），所以它要留在
+   * 部署里那些上界之上。与 `container-k8s` 的同名字段逐字同义。默认 67108864。
+   */
+  maxOutputBytes?: number
+  /**
+   * 一个已解析的沙箱句柄在多少毫秒内可以直接复用，过后先用一次 `docker port` 向运行时确认它，
+   * 并顺手刷新发布端口（容器被 OOM 杀掉、被运维删掉、daemon 重启时句柄都会失效）。
+   * 沙箱自行退出后句柄也留在缓存里，所以这个上限是唯一约束「过期端口还能用多久」的地方：
+   * 过期后第一次 exec 会失败一次，由 exec 的重试路径重建。
+   * 与 `container-k8s` 的同名字段逐字同义。默认 5000。
+   */
+  sandboxCacheTtlMs?: number
   /**
    * Milliseconds allowed for one `docker`/`podman` invocation — the same-name
    * clear, `run`, `port`, and removal all pass through it. The CLI blocks for as
@@ -207,7 +286,7 @@ function missingMountMessage(missing: readonly MountSource[], tenant: Tenant, us
   return `container-docker: refusing to start the sandbox of tenant '${String(tenant.id)}' member '${user}': ${noun} ${listed} ${verb} missing on this host. `
     + 'Docker creates a missing bind-mount source as an empty directory, so the start would report success and hand that subject an empty mount. '
     + "Create each path on the host, or drop the configuration that names it: tenant-admin creates '<workspaceRoot>/shared/<tier>' and '<workspaceRoot>/users/<subject>' on tenant create and member add, "
-    + "and the deployment owns 'usersRoot', 'systemRoot', 'pythonRoot', and a tenant's 'toolsRoot'."
+    + "and the deployment owns 'usersRoot', 'systemRoot', 'pythonRoot', and the '/tools' root — a tenant's own 'toolsRoot', or the provider-wide fallback of the same name."
 }
 
 const PUBLISHED_PORT = /(?:\d+\.\d+\.\d+\.\d+|\[?::\]?):(\d+)/
@@ -232,6 +311,31 @@ const DEFAULT_READY_TIMEOUT_MS = 10_000
 const DEFAULT_READY_POLL_MS = 30
 /** Default for {@link Config.toolExecImagePath}. */
 const DEFAULT_TOOL_EXEC_IMAGE_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+/** Default for {@link Config.sandboxCacheTtlMs}. */
+const DEFAULT_SANDBOX_CACHE_TTL_MS = 5_000
+/**
+ * {@link Config.sharedReadOnly} 与 {@link Config.usersReadOnly} 的默认值：都只读。
+ *
+ * 这两棵目录树由业务侧写入，沙箱只是读取方；可写就会让一个用户的沙箱改到同案件其他用户的输入，
+ * 也会让它们下面那两层只读的技能挂载失去意义。
+ */
+const DEFAULT_DATA_READ_ONLY = true
+/**
+ * {@link Config.maxOutputBytes} 的默认值：每条输出流 64 MiB。
+ *
+ * 它只受一个约束——**高于**宿主自己的结果上界（`ctx.subprocess` 的每条流预算默认 64 KB，
+ * 见 `dsh-bash-local` 的 `maxOutputBytes`），容器这一层只负责让沙箱不被一条大输出命令撑死，
+ * 所以取值与仓库里已有的两个 64 MiB 量级预算一致：`dsh-bash-local` 的 `maxSpillBytes` 与
+ * `dsh-code-runtime-container` 的 `maxOutputBytes`（后者是沙箱内那次 exec 载荷自己的上界，
+ * 调大它就必须同步调大这里）。
+ */
+const DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+/** 沙箱容器的托管标签：与 `container-k8s` 打在 Pod 上的是同一个键值，收尸时认它。 */
+const MANAGED_LABEL = 'dsh.dev/managed'
+/** 承载沙箱空闲预算的环境变量名：`docker/entry.mjs` 读它，`container-k8s` 注入同名变量。 */
+const TOOL_EXEC_IDLE_ENV = 'DSH_TOOL_EXEC_IDLE_MS'
+/** 承载沙箱输出上界的变量名：`docker/entry.mjs` 读它，`container-k8s` 注入同名变量。 */
+const TOOL_EXEC_MAX_OUTPUT_ENV = 'DSH_TOOL_EXEC_MAX_OUTPUT_BYTES'
 
 function parsePublishedPort(stdout: string): number | undefined {
   const match = PUBLISHED_PORT.exec(stdout)
@@ -255,7 +359,11 @@ function raceAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const onAbort = (): void => {
       const reason: unknown = signal.reason
-      reject(reason instanceof Error ? reason : new Error(String(reason ?? 'container-docker: the call was aborted')))
+      // 取消者没有义务给出 Error：非 Error 的 reason 只能字符串化后包一层，
+      // 否则调用方拿到的是一个既读不出也说不出用途的东西。
+      reject(reason instanceof Error
+        ? reason
+        : new Error(typeof reason === 'string' ? `container-docker: the call was aborted: ${reason}` : 'container-docker: the call was aborted'))
     }
     signal.addEventListener('abort', onAbort, { once: true })
     work.then(
@@ -265,7 +373,8 @@ function raceAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
       },
       (error: unknown) => {
         signal.removeEventListener('abort', onAbort)
-        reject(error)
+        // 共享操作自己的失败原样转交：在这里换成另一种错误，等于抹掉调用方唯一能读到的东西。
+        reject(error instanceof Error ? error : new Error(String(error)))
       },
     )
   })
@@ -281,10 +390,15 @@ export class DockerContainerRuntime extends ContainerRuntime {
     publishHost: z.string().default('127.0.0.1'),
     connectHost: z.string().default('127.0.0.1'),
     usersRoot: z.string(),
+    sharedReadOnly: z.boolean().default(DEFAULT_DATA_READ_ONLY),
+    usersReadOnly: z.boolean().default(DEFAULT_DATA_READ_ONLY),
     systemRoot: z.string(),
     pythonRoot: z.string(),
+    toolsRoot: z.string(),
     toolExecImagePath: z.string().default(DEFAULT_TOOL_EXEC_IMAGE_PATH),
     idleTimeoutMs: z.natural().min(1),
+    maxOutputBytes: z.natural().min(1).default(DEFAULT_MAX_OUTPUT_BYTES),
+    sandboxCacheTtlMs: z.natural().min(1).default(DEFAULT_SANDBOX_CACHE_TTL_MS),
     cliTimeoutMs: z.natural().min(1).default(DEFAULT_CLI_TIMEOUT_MS),
     startTimeoutMs: z.natural().min(1).default(DEFAULT_START_TIMEOUT_MS),
     transportTimeoutMs: z.natural().min(1).default(DEFAULT_TRANSPORT_TIMEOUT_MS),
@@ -295,6 +409,7 @@ export class DockerContainerRuntime extends ContainerRuntime {
   })
 
   private readonly runner: DockerRunner
+  private readonly pty: ContainerPtyRunner
   private readonly client: ToolExecClient
   private readonly probe: HostPathProbe
   private readonly runtimeName: string
@@ -304,10 +419,15 @@ export class DockerContainerRuntime extends ContainerRuntime {
   private readonly publishHost: string
   private readonly connectHost: string
   private readonly usersRoot: string | undefined
+  private readonly sharedReadOnly: boolean
+  private readonly usersReadOnly: boolean
   private readonly systemRoot: string | undefined
+  private readonly toolsRoot: string | undefined
   private readonly pythonEnv: PythonEnvironment | undefined
   private readonly toolExecImagePath: string
   private readonly idleTimeoutMs: number | undefined
+  private readonly maxOutputBytes: number
+  private readonly sandboxCacheTtlMs: number
   private readonly cliTimeoutMs: number
   private readonly startTimeoutMs: number
   private readonly transportTimeoutMs: number
@@ -317,7 +437,6 @@ export class DockerContainerRuntime extends ContainerRuntime {
   private readonly cpuLimit: number | undefined
   private readonly tenants = new Map<string, TenantRuntime>()
   private readonly starting = new Map<string, Promise<TenantRuntime>>()
-  private readonly idleTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
   /**
    * @param ctx - the Cordis context this provider registers its effects on.
@@ -326,6 +445,8 @@ export class DockerContainerRuntime extends ContainerRuntime {
    * @param client - tool-exec HTTP seam; production posts to the published port.
    * @param probe - host filesystem reads, for the mounted Python environment and
    *   for the bind-mount sources of every start; production reads the host.
+   * @param pty - interactive-terminal seam; production runs the container CLI on
+   *   a terminal the host allocates.
    */
   constructor(
     ctx: Context,
@@ -333,10 +454,12 @@ export class DockerContainerRuntime extends ContainerRuntime {
     runner?: DockerRunner,
     client?: ToolExecClient,
     probe: HostPathProbe = hostPathProbe,
+    pty?: ContainerPtyRunner,
   ) {
     super(ctx)
     this.runtimeName = config.runtime ?? 'docker'
     this.runner = runner ?? cliRunner(this.runtimeName)
+    this.pty = pty ?? ptyRunner(this.runtimeName)
     this.probe = probe
     this.client = client ?? { exec: execToolCommand }
     this.network = config.network ?? 'bridge'
@@ -345,7 +468,10 @@ export class DockerContainerRuntime extends ContainerRuntime {
     this.publishHost = config.publishHost ?? '127.0.0.1'
     this.connectHost = config.connectHost ?? '127.0.0.1'
     this.usersRoot = config.usersRoot
+    this.sharedReadOnly = config.sharedReadOnly ?? DEFAULT_DATA_READ_ONLY
+    this.usersReadOnly = config.usersReadOnly ?? DEFAULT_DATA_READ_ONLY
     this.systemRoot = config.systemRoot
+    this.toolsRoot = config.toolsRoot
     // Probed once, on the host: the environment's layout fixes the container's
     // start arguments for its lifetime. Packages installed into that directory
     // reach the next sandbox, but creating its bin/pyvenv.cfg/lib after boot
@@ -355,6 +481,8 @@ export class DockerContainerRuntime extends ContainerRuntime {
       : resolvePythonEnvironment(config.pythonRoot, probe)
     this.toolExecImagePath = config.toolExecImagePath ?? DEFAULT_TOOL_EXEC_IMAGE_PATH
     this.idleTimeoutMs = config.idleTimeoutMs
+    this.maxOutputBytes = config.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES
+    this.sandboxCacheTtlMs = config.sandboxCacheTtlMs ?? DEFAULT_SANDBOX_CACHE_TTL_MS
     this.cliTimeoutMs = config.cliTimeoutMs ?? DEFAULT_CLI_TIMEOUT_MS
     this.startTimeoutMs = config.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS
     this.transportTimeoutMs = config.transportTimeoutMs ?? DEFAULT_TRANSPORT_TIMEOUT_MS
@@ -362,15 +490,22 @@ export class DockerContainerRuntime extends ContainerRuntime {
     this.readyPollMs = config.readyPollMs ?? DEFAULT_READY_POLL_MS
     this.memoryLimit = config.memoryLimit
     this.cpuLimit = config.cpuLimit
-    ctx.effect(() => async () => {
-      for (const timer of this.idleTimers.values()) clearTimeout(timer)
-      this.idleTimers.clear()
-      const names = new Set([...this.tenants.values()].map(runtime => runtime.name))
-      const settled = await Promise.allSettled([...this.starting.values()])
-      for (const result of settled) {
-        if (result.status === 'fulfilled') names.add(result.value.name)
+    ctx.effect(() => {
+      // 启动时收一次尸：容器自己的空闲 watchdog 退出后留下的终态容器，以及宿主非优雅退出
+      // 时没来得及清掉的那些，都不再属于任何人。只碰已退出的容器——正在运行的可能是另一个
+      // 副本正在用的沙箱，删它就是两个实例互相替换对方的工作。
+      void this.reapTerminalContainers().catch(() => {
+        // 收尸是尽力而为的清洁：失败与成功没有区别，下一次启动还会再收一次，
+        // 而这里没有别的行为依赖它的结果。
+      })
+      return async () => {
+        const names = new Set([...this.tenants.values()].map(runtime => runtime.name))
+        const settled = await Promise.allSettled([...this.starting.values()])
+        for (const result of settled) {
+          if (result.status === 'fulfilled') names.add(result.value.name)
+        }
+        await Promise.allSettled([...names].map(name => this.runCli(['rm', '-f', name])))
       }
-      await Promise.allSettled([...names].map(name => this.runCli(['rm', '-f', name])))
     }, 'container-docker teardown')
   }
 
@@ -382,11 +517,13 @@ export class DockerContainerRuntime extends ContainerRuntime {
     const tenant = requireTenant()
     const user = requireUser()
     const key = this.scopeKey(tenant.id, user)
+    /* jscpd:ignore-start -- 这一段与 container-k8s/src/index.ts 的对应段落是同一套语义：
+       两个 provider 都必须让调用方的取消只脱离本次调用，并把取消与这一轮传输期限融在一起。
+       抽到共享位置会把 provider 生命周期塞进传输接缝，而那里只该有 CLI 与 HTTP 两个接缝。 */
     // The start blocks in the container CLI, so the caller's cancellation is
     // honored here as well: a cancelled call must not wait out a start it no
     // longer wants.
     const runtime = await this.awaitStart(key, tenant, user, opts?.signal)
-    this.resetIdle(key)
     const req: ToolExecRequest = { argv: [command, ...args] }
     if (opts?.cwd !== undefined) req.cwd = opts.cwd
     if (opts?.env !== undefined) req.env = { ...opts.env }
@@ -395,6 +532,7 @@ export class DockerContainerRuntime extends ContainerRuntime {
     // tool-exec server can stop answering, and a request with no deadline never
     // settles.
     using transport = deadline(opts?.signal, this.transportTimeoutMs, TRANSPORT_TIMEOUT)
+    /* jscpd:ignore-end */
     try {
       return await this.client.exec(this.toolExecBaseUrl(runtime.port), req, transport.signal)
     } catch (error: unknown) {
@@ -417,9 +555,51 @@ export class DockerContainerRuntime extends ContainerRuntime {
         )
       }
       const fresh = await this.ensure(key, tenant, user)
-      this.resetIdle(key)
       return await this.client.exec(this.toolExecBaseUrl(fresh.port), req, transport.signal)
     }
+  }
+
+  /**
+   * Open an interactive terminal inside the ambient tenant's sandbox.
+   *
+   * `docker exec -i -t` makes the daemon allocate a real PTY in the container,
+   * so `isatty` is true and line editing and interactive programs work — what
+   * the one-shot `POST /exec` cannot give. The container CLI itself needs a
+   * terminal for `-i -t` (it refuses to start when its own stdin is a pipe), so
+   * it runs on one the host allocates.
+   *
+   * The sandbox is pinned here rather than re-resolved per probe: after this
+   * session is published its caller may no longer be inside the request that
+   * opened it, and resolving (tenant, user) from the ambient scope then would
+   * reach another subject's container.
+   *
+   * @param options - command line inside the sandbox, terminal size, retained
+   *   output bound, and cancellation.
+   * @returns the live session.
+   * @throws `TenantError` code `NO_TENANT_IN_SCOPE` outside an authenticated
+   * request, and the provider's own failure when the container cannot be
+   * started or the command never took over its terminal.
+   */
+  async openPty(options: ContainerPtyOptions): Promise<ContainerPtySession> {
+    const tenant = requireTenant()
+    const user = requireUser()
+    const key = this.scopeKey(tenant.id, user)
+    const runtime = await this.awaitStart(key, tenant, user, options.signal)
+    const port = runtime.port
+    const exec: ContainerSessionExec = async (command, args, signal) => {
+      // A probe is a round trip like any other, so it carries the same
+      // transport deadline: a tool-exec server that stopped answering must fail
+      // the probe instead of leaving every later one pending.
+      using transport = deadline(signal, this.transportTimeoutMs, TRANSPORT_TIMEOUT)
+      return await this.client.exec(this.toolExecBaseUrl(port), { argv: [command, ...args] }, transport.signal)
+    }
+    return await openContainerPty({
+      argv: ['exec', '-i', '-t', runtime.name, options.command, ...options.args ?? []],
+      options,
+      runner: this.pty,
+      exec,
+      roundTripTimeoutMs: this.transportTimeoutMs,
+    })
   }
 
   /**
@@ -464,24 +644,25 @@ export class DockerContainerRuntime extends ContainerRuntime {
   }
 
   /**
-   * Resolve the subject's sandbox, starting one on first use.
+   * 解析该主体的沙箱：缓存仍有效就直接用，过期就先确认一次，没有才冷启动。
    *
-   * The returned promise always settles: `startTimeoutMs` bounds the start and
-   * both settlement paths clear the `starting` entry. A pending entry left behind
-   * would hand every later exec on this (tenant, user) the same unsettled
-   * promise.
+   * 返回的 promise 一定会 settle：`startTimeoutMs` 给启动上界，两条 settle 路径都清掉
+   * `starting` 里那一项。留下的 pending 项会把同一个永不 settle 的 promise
+   * 交给这个 (租户, 用户) 之后每一次 exec。
    *
-   * @param key - the (tenant, user) scope key.
-   * @param tenant - the ambient tenant.
-   * @param user - the ambient user.
-   * @returns the subject's live sandbox.
+   * @param key - (租户, 用户) 作用域键。
+   * @param tenant - 当前租户。
+   * @param user - 当前用户。
+   * @returns 该主体活着的沙箱。
    */
   private ensure(key: string, tenant: Tenant, user: UserId): Promise<TenantRuntime> {
-    const existing = this.tenants.get(key)
-    if (existing !== undefined) return Promise.resolve(existing)
+    const cached = this.tenants.get(key)
+    if (cached !== undefined && cached.expiresAt > Date.now()) return Promise.resolve(cached)
     const pending = this.starting.get(key)
     if (pending !== undefined) return pending
-    const start = this.startWithinDeadline(key, tenant, user)
+    const start = cached === undefined
+      ? this.startWithinDeadline(key, tenant, user)
+      : this.reconfirm(key, cached, tenant, user)
     this.starting.set(key, start)
     start.then(
       (runtime) => {
@@ -493,6 +674,51 @@ export class DockerContainerRuntime extends ContainerRuntime {
       },
     )
     return start
+  }
+
+  /**
+   * 句柄过了 `sandboxCacheTtlMs` 之后的处理：向运行时确认它一次，确认不了就重新冷启动。
+   *
+   * 这一步不重建容器——容器可能只是这个主体的句柄旧了，而它还在好好地跑着——所以只花一次
+   * `docker port`。容器真的不在了（被杀、被删、daemon 重启）时才走冷启动。
+   *
+   * @param key - (租户, 用户) 作用域键。
+   * @param cached - 已过期、仍待确认的句柄。
+   * @param tenant - 当前租户。
+   * @param user - 当前用户。
+   * @returns 确认后的句柄，或一次冷启动的结果。
+   */
+  private async reconfirm(
+    key: string,
+    cached: TenantRuntime,
+    tenant: Tenant,
+    user: UserId,
+  ): Promise<TenantRuntime> {
+    const port = await this.reconfirmedPort(cached.name)
+    if (port !== undefined) {
+      return { name: cached.name, port, expiresAt: Date.now() + this.sandboxCacheTtlMs }
+    }
+    // The handle is stale: drop it and its container, then start a replacement
+    // rather than keep dialing a port nothing publishes.
+    this.discard(key)
+    return await this.startWithinDeadline(key, tenant, user)
+  }
+
+  /**
+   * 读回一个已缓存容器当前发布的 host 端口。
+   * @param name - 容器的稳定名字。
+   * @returns 容器还在时它现在发布的端口；容器已不在、端口读不出来或这次调用自己超时（daemon 卡住）时为 undefined。
+   */
+  private async reconfirmedPort(name: string): Promise<number | undefined> {
+    let result: ContainerCommandResult
+    try {
+      result = await this.runCli(['port', name, String(this.toolExecPort)])
+    } catch {
+      // 这条调用只有 `cliTimeoutMs` 一种失败：daemon 卡住。容器是否还在无从判断，
+      // 因此按「句柄不可信」处理，让调用方退回一次冷启动。
+      return undefined
+    }
+    return result.exitCode === 0 ? parsePublishedPort(result.stdout) : undefined
   }
 
   /**
@@ -545,7 +771,11 @@ export class DockerContainerRuntime extends ContainerRuntime {
     const name = this.containerName(tenant, user)
     await this.runCli(['rm', '-f', name], signal)
     const args = [
-      'run', '-d', '--name', name, '--network', this.networkFor(tenant),
+      'run', '-d', '--name', name,
+      // 与 container-k8s 给 Pod 打的是同一个标签：它声明「这个容器由本 provider 管理」，
+      // 是收尸时唯一能认出自己人的依据——按名字前缀认会误伤别的租户与别的实例。
+      '--label', `${MANAGED_LABEL}=true`,
+      '--network', this.networkFor(tenant),
       // The host gateway is reachable from the container at this name, so a
       // mounted runtime (code-runtime-container) can bridge its declared
       // host-side bindings back over the loopback HTTP surface it publishes.
@@ -566,18 +796,32 @@ export class DockerContainerRuntime extends ContainerRuntime {
     // states it: a skill that must locate its own case otherwise infers identity
     // from the container name or the `/shared` directory name, and Docker sets
     // `/etc/hostname` to the container id, so that inference lands nowhere.
+    // 这三个变量是沙箱内命令的公共事实，`container-k8s` 给每个 Pod 设的是同一组同名变量；
+    // 都由平台给出，因此它们排在配置的环境变量之后，配置改不了身份。
     args.push(
       '-e', `DSH_CASE_ID=${tenant.id}`,
       '-e', `DSH_TENANT_ID=${tenant.id}`,
       '-e', `DSH_USER_ID=${user}`,
     )
-    args.push(this.toolExecImage)
+    // 空闲预算交给沙箱自己执行：宿主看不见别的副本对它的使用，而每一个请求都要到达容器，
+    // 所以「有没有人用」只有容器答得准。与身份变量一样由平台给出，排在配置的环境变量之后。
+    if (this.idleTimeoutMs !== undefined) {
+      args.push('-e', `${TOOL_EXEC_IDLE_ENV}=${String(this.idleTimeoutMs)}`)
+    }
+    // 输出上界同样由沙箱自己执行，理由比空闲更强：原始流是容器先攒满、宿主才轮得到加界的，
+    // 上界不注入容器就等于没设——一条 `find /` 的输出能把沙箱撑死。与身份变量、空闲预算一样
+    // 由平台给出，排在配置的环境变量之后。
+    args.push('-e', `${TOOL_EXEC_MAX_OUTPUT_ENV}=${String(this.maxOutputBytes)}`)
+    // 镜像名之后的位置参数会覆盖镜像的 `CMD`：entrypoint 的契约是 `entry.mjs <port> [host]`
+    // （见 docker/entry.mjs），把配置的端口显式传下去，沙箱监听的端口才真的等于 `-p` 发布、
+    // 也是 provider 拨号的那个端口；不传就等于把镜像 CMD 里的 8642 当成不可配置的事实。
+    args.push(this.toolExecImage, String(this.toolExecPort))
     const result = await this.runCli(args, signal)
     if (result.exitCode !== 0) {
       throw new Error(`container-docker: '${name}' failed to start (exit ${result.exitCode}): ${result.stderr}`)
     }
     const port = await this.readPublishedPort(name, signal)
-    const runtime = { name, port }
+    const runtime: TenantRuntime = { name, port, expiresAt: Date.now() + this.sandboxCacheTtlMs }
     await this.waitReady(runtime, signal)
     return runtime
   }
@@ -598,29 +842,45 @@ export class DockerContainerRuntime extends ContainerRuntime {
    * @param tenant - the ambient tenant.
    * @param user - the ambient user.
    * @returns the mounts, each absent when its configuring field is absent.
+   *
+   * 这张挂载表与 `container-k8s` 是同一张：挂载点逐条相同，只有把挂载交给容器运行时的方式不同
+   * （这里是 `-v`，那里是 Pod 的卷）。`/tools` 之外的每一层在两端都只来自配置，
+   * 因此同一个部署切后端时不需要改这些根。
+   *
+   * 三层技能在两端也都各多挂一份到聚合根 `/opt/data/skills/<kind>`：案件脚本遍历那个根去发现
+   * 技能，而一次挂载只能把一个来源放到一个位置，所以层与层之间只能靠子目录分开。
    */
   private mounts(tenant: Tenant, user: UserId): MountSource[] {
+    const SKILLS_ROOT = '/opt/data/skills'
+    const sharedReadOnly = this.sharedReadOnly
+    const usersReadOnly = this.usersReadOnly
     const mounts: MountSource[] = [
       { source: `${tenant.workspaceRoot}/users/${user}`, target: '/workspace', readOnly: false },
-      { source: `${tenant.workspaceRoot}/shared`, target: '/shared', readOnly: false },
-      // The case-shared skill tier reports its own host directory as a skill's base
-      // directory, and a skill body tells the model to resolve relative paths against
-      // it. That path must therefore resolve inside the sandbox too. The same tree is
-      // already writable at /shared, so this read-only view adds reachability without
-      // adding authority.
+      { source: `${tenant.workspaceRoot}/shared`, target: '/shared', readOnly: sharedReadOnly },
+      // 案件共享技能层报告的技能基目录是它自己的宿主目录，而技能正文让模型按该目录解析相对路径，
+      // 所以那个路径在沙箱里也必须能解析到。同一个来源按两个路径挂是必要的，不是冗余。
       { source: `${tenant.workspaceRoot}/shared/skills`, target: `${tenant.workspaceRoot}/shared/skills`, readOnly: true },
     ]
+    // Skills reach the sandbox as mounted tiers under one root the case scripts enumerate.
+    // A mount carries one source to one path, so each tier keeps its own subdirectory and
+    // the same skill name may appear in more than one. Names match `skill-tier`'s kinds.
+    mounts.push({ source: `${tenant.workspaceRoot}/shared/skills`, target: `${SKILLS_ROOT}/case`, readOnly: true })
     if (this.usersRoot !== undefined) {
-      mounts.push({ source: `${this.usersRoot}/${user}`, target: '/global', readOnly: false })
+      mounts.push({ source: `${this.usersRoot}/${user}`, target: '/global', readOnly: usersReadOnly })
+      mounts.push({ source: `${this.usersRoot}/${user}/skills`, target: `${SKILLS_ROOT}/user-global`, readOnly: true })
     }
     if (this.systemRoot !== undefined) {
       // Read-only at its own absolute path: skill bodies reach the model through the
       // host-side skill provider, but the companion files they cite are readable only
       // through the sandbox.
       mounts.push({ source: this.systemRoot, target: this.systemRoot, readOnly: true })
+      mounts.push({ source: `${this.systemRoot}/skills`, target: `${SKILLS_ROOT}/system`, readOnly: true })
     }
-    if (tenant.toolsRoot !== undefined) {
-      mounts.push({ source: tenant.toolsRoot, target: '/tools', readOnly: true })
+    // /tools 的来源规则：租户记录优先，缺省回落配置。一个 provider 实例服务所有租户，
+    // 所以租户记录里写明的工具图谱就是那个租户自己的；配置里的那份供没写明的租户使用。
+    const toolsRoot = tenant.toolsRoot ?? this.toolsRoot
+    if (toolsRoot !== undefined) {
+      mounts.push({ source: toolsRoot, target: '/tools', readOnly: true })
     }
     if (this.pythonEnv !== undefined) {
       // Read-only at its own absolute path, because the environment's scripts,
@@ -708,30 +968,36 @@ export class DockerContainerRuntime extends ContainerRuntime {
     throw new Error(`container-docker: tool-exec server '${runtime.name}' never answered: ${String(lastError)}`)
   }
 
-  private resetIdle(key: string): void {
-    if (this.idleTimeoutMs === undefined) return
-    const previous = this.idleTimers.get(key)
-    if (previous !== undefined) clearTimeout(previous)
-    const timer = setTimeout(() => { this.discard(key) }, this.idleTimeoutMs)
-    this.idleTimers.set(key, timer)
-  }
-
   /**
-   * Drop the cached sandbox for a subject and remove its container. Idleness and a
-   * failed exec both reach here: the next `ensure` starts a replacement.
+   * Drop the cached sandbox for a subject and remove its container. A failed exec
+   * reaches here: the next `ensure` starts a replacement.
+   *
+   * 空闲回收不在这里：一个沙箱有没有人用，只有沙箱自己看得见——每个请求都要到达容器，
+   * 而宿主的缓存只是「我上次拿到的那个地址」，多副本部署下它看不见别的副本正在用的沙箱，
+   * 按缓存计时就会删掉别人正在使唤的容器。容器各自按 `idleTimeoutMs` 自行退出
+   * （见 `tool-exec.ts` 的空闲 watchdog），这里只负责丢句柄与收尾。
    *
    * @param key - the (tenant, user) scope key whose sandbox is being discarded.
    */
   private discard(key: string): void {
-    const timer = this.idleTimers.get(key)
-    if (timer !== undefined) {
-      clearTimeout(timer)
-      this.idleTimers.delete(key)
-    }
     const runtime = this.tenants.get(key)
     if (runtime === undefined) return
     this.tenants.delete(key)
     this.removeContainer(runtime.name)
+  }
+
+  /**
+   * 收掉本 provider 标签下**已经退出**的容器：沙箱自己的空闲 watchdog 退出后留下的残骸，
+   * 以及宿主非优雅退出时没来得及清理的那些。只删已退出的——正在运行的容器可能是另一个副本
+   * 正在使用的沙箱，删它就是两个实例互相替换对方的工作。
+   */
+  private async reapTerminalContainers(): Promise<void> {
+    const listed = await this.runCli([
+      'ps', '-a', '--filter', `label=${MANAGED_LABEL}`, '--filter', 'status=exited', '-q',
+    ])
+    const ids = listed.stdout.split('\n').map(line => line.trim()).filter(line => line !== '')
+    if (ids.length === 0) return
+    await this.runCli(['rm', '-f', ...ids])
   }
 
   /**
