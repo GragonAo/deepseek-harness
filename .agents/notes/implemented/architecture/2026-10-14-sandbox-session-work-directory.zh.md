@@ -16,6 +16,7 @@ Status: implemented
 - provider 在该会话的第一条命令上建出它，按 `(租户, 用户, 会话)` 只建一次，用 `mkdir -p`。那一层可能已经存在——同一个用户的另一个沙箱、或更早一次宿主启动建的——而 `mkdir -p` 对两种情况都对。工作区是 claim，所以目录比建它的沙箱活得久。
 - 会话工作目录盖过调用方要求的工作目录：调用方手上的是它自己那台机器上的路径，而沙箱里的路径由挂载表决定。不带会话的 exec 保持调用方给的工作目录、因而保持容器默认值——provider 自己的探针与宿主的工具调用就是这种。
 - `DSH_WORKDIR` 在那条命令的环境里载着同一个绝对路径，技能与模型因此可以直接认领自己往哪写，而不需要自己推导。
+- 文件面按同一条规则解析：`dsh-fs-container` 把相对路径放进调用会话自己的目录，盖掉调用方传进来的 `cwd`。命令从一开始就走这个覆盖，文件工具却没有，于是会话的 `write`/`edit` 落进容器本地的 `workDir`——正是这份 note 要离开的那层共享且会被丢弃的目录——而它的命令写的是会话目录。`sandboxSessionDirOf(session)` 是同一个推导，输入换成文件 provider 手上直接有的会话 id；没有会话在作用域里时，配置的 `root` 仍然生效。
 - 会话 id 会成为一个路径分量，所以只接受普通目录名；`sandboxSessionDir` 拒绝其余一切，包括会让它变成 `mkdir` 参数的前导短横线。被拒绝的 id 让命令留在调用方的工作目录里，而不是在工作区之外造出什么。
 - `SANDBOX_WORKSPACE_MOUNT`、`SANDBOX_WORKDIR_ENV` 与 `sandboxSessionDir()` 都放在 `@deepseek-ai/dsh-tenant`，两个 provider 都用它们：挂载点只有一个名字，推导只有一份实现。
 
@@ -30,6 +31,7 @@ Status: implemented
 ## Consequences
 
 - 中间产物现在默认会留下来。想要一次性空间的会话仍然有容器自己的 `/tmp`；没有任何东西替它删。
+- 会话按相对路径写文件与按相对路径跑命令指的是同一个文件，因为两者都在会话目录里解析。文件面跟上这条覆盖之前，它们指的是两个不同的文件：模型用文件工具写完一份报告，再用自己的 `cat` 读同一个路径会读到空。
 - 会话目录现在有独立的挂载：一个主体的会话目录是 `<workspaceRoot>/users/<subject>/sessions/`，挂到 `/sessions`，因此露出该主体的工作目录不再连他的会话一起露出（[理由](2026-10-21-five-scope-file-surface.md)）。
 - 每个会话都会留下自己那层目录，所以 `/workspace` 会按会话数增长。何时清理属于业务侧的决定，不属于 provider。
 - 这反转了一条已写下的决定：container-k8s README 曾说模型按相对路径写出的东西必须随沙箱销毁而消失。现在它与被接受的行为正好相反，而这份 note 就是这次反转的记录。
@@ -42,4 +44,5 @@ Status: implemented
 
 - `packages/tenant/tenant/tests/layout.spec.ts` 钉住推导：一个会话 id 得到 `/sessions/<id>`，不带会话的 exec 什么也得不到，而 `../../etc`、`.`、`..`、`a/b`、空串、`session 7`、`-p` 全部被拒。
 - `packages/tenant/container-k8s/tests/runtime.spec.ts` 与 `packages/tenant/container-docker/tests/docker.spec.ts` 读 provider 真正发出去的请求：会话的第一条命令之前先有 `mkdir -p /sessions/<id>`，该命令以那个目录为 `cwd`、并以同一个值作为 `DSH_WORKDIR`，同一会话的第二条命令不再建，另一个会话会建，而不带会话的 exec 保持调用方的 `cwd` 与环境。
+- `packages/tenant/fs-container/tests/container.spec.ts` 在有会话在作用域里时解析一个相对路径：即使调用方传的是容器本地的 workDir，它也落进 `/sessions/<id>`；绝对路径保持绝对；没有会话时——完全没有、注册表已销毁、或 id 不能当目录名——依次退回调用方的 `cwd` 与配置的 `root`。
 - tenant、container-k8s、container-docker 三个包的 165 个测试通过，`pnpm run typecheck` 干净。

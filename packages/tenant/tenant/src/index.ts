@@ -260,9 +260,20 @@ const SESSION_DIR_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
  * @returns 沙箱内的绝对路径；这次 exec 不带会话、或会话 id 不能当目录名时为 `undefined`。
  */
 export function sandboxSessionDir(env: Readonly<Record<string, string>> | undefined): string | undefined {
-  const session = env?.[DSH_SESSION_ID_ENV]
-  if (session === undefined || !SESSION_DIR_NAME.test(session)) return undefined
-  return posix.join(SANDBOX_SESSIONS_MOUNT, session)
+  return sandboxSessionDirOf(env?.[DSH_SESSION_ID_ENV])
+}
+
+/**
+ * 由会话 id 直接得到它在沙箱里的工作目录：`<SANDBOX_SESSIONS_MOUNT>/<会话 id>`。
+ *
+ * 会话 id 不经过 env 也能拿到时（例如文件面在自己的调用上下文里读到当前会话）走这里，
+ * 得到的路径与 {@link sandboxSessionDir} 逐字一致——同一个会话的命令与文件读写必须落在同一层。
+ * @param sessionId - 会话 id。
+ * @returns 沙箱内的绝对路径；没有会话、或会话 id 不能当目录名时为 `undefined`。
+ */
+export function sandboxSessionDirOf(sessionId: string | undefined): string | undefined {
+  if (sessionId === undefined || !SESSION_DIR_NAME.test(sessionId)) return undefined
+  return posix.join(SANDBOX_SESSIONS_MOUNT, sessionId)
 }
 
 /**

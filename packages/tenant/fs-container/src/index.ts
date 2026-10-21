@@ -3,6 +3,14 @@
  * resolve inside the ambient tenant's container — the same execution world the
  * subprocess provider serves — so file reads, listings, writes, and edits stay
  * within that tenant's isolation boundary.
+ *
+ * Relative paths resolve against the calling session's own directory
+ * (`/sessions/<session id>`), the same place a shell command of that session
+ * runs: `ContainerRuntime.exec` already overrides the caller's `cwd` with it,
+ * and a relative path the caller hands to `resolve` is the same host-side guess
+ * that override exists to discard. Without an ambient session — host tooling,
+ * skill discovery, a caller that names its own cwd — the configured
+ * {@link Config.root} stays in effect.
  * @module @deepseek-ai/dsh-fs-container
  */
 
@@ -23,10 +31,15 @@ import type {
 } from '@deepseek-ai/dsh-fs'
 import type { SandboxExecutionPolicy } from '@deepseek-ai/dsh-sandbox'
 import type { ContainerCommandResult, ContainerExecOptions, ContainerRuntime } from '@deepseek-ai/dsh-container'
+import { sandboxSessionDirOf } from '@deepseek-ai/dsh-tenant'
+import type {} from '@deepseek-ai/dsh-agent'
 
 /** Plugin configuration. */
 export interface Config {
-  /** Container path relative requests resolve against (the tenant workspace mount). */
+  /**
+   * Container path relative requests resolve against when no ambient session
+   * supplies one (the tenant workspace mount).
+   */
   root?: string
 }
 
@@ -87,8 +100,38 @@ export class ContainerFileSystem extends FileSystem {
     return this.ctx.containerRuntime
   }
 
+  /**
+   * The calling session's own container directory, or `undefined` outside a
+   * session. Mirrors the override `ContainerRuntime.exec` applies: the session
+   * chooses the directory, and anything the caller passed is a path on its own
+   * machine rather than one inside this container.
+   * @returns `/sessions/<session id>` for an ambient session that can name a
+   * directory, otherwise `undefined`.
+   */
+  private sessionDir(): string | undefined {
+    try {
+      const id = this.ctx.get('agents')?.currentInitiator()?.session.header.id
+      return sandboxSessionDirOf(id === undefined ? undefined : String(id))
+    } catch {
+      // A disposed agent registry rejects every ambient read; a missing session
+      // fact must not fail the file operation, so resolution falls back exactly
+      // as it does outside any initiator boundary.
+      return undefined
+    }
+  }
+
   private normalize(path: string, cwd: string): string {
     return posix.normalize(posix.isAbsolute(path) ? path : posix.join(cwd, path))
+  }
+
+  /**
+   * The directory a relative path resolves against: the ambient session's own
+   * directory first, then the caller's cwd, then the configured root.
+   * @param cwd - the cwd the caller asked for, when it named one.
+   * @returns the container path to join a relative request onto.
+   */
+  private baseDir(cwd: string | undefined): string {
+    return this.sessionDir() ?? cwd ?? this.rootPath
   }
 
   private async statLine(path: string, follow: boolean, signal?: AbortSignal): Promise<StatLine | undefined> {
@@ -126,7 +169,7 @@ export class ContainerFileSystem extends FileSystem {
   }
 
   resolve(path: string, opts?: { cwd?: string; signal?: AbortSignal }): Promise<FsTarget> {
-    const resolved = this.normalize(path, opts?.cwd ?? this.rootPath)
+    const resolved = this.normalize(path, this.baseDir(opts?.cwd))
     return Promise.resolve({ targetKey: FsTargetKey(resolved), displayPath: resolved })
   }
 
@@ -151,7 +194,7 @@ export class ContainerFileSystem extends FileSystem {
   }
 
   async lstat(path: string, opts?: { cwd?: string }, signal?: AbortSignal): Promise<FsPathInfo | undefined> {
-    const resolved = this.normalize(path, opts?.cwd ?? this.rootPath)
+    const resolved = this.normalize(path, this.baseDir(opts?.cwd))
     const line = await this.statLine(resolved, false, signal)
     if (line === undefined) return undefined
     return { version: line.version, type: fsPathInfoType(line.rawKind), ...(line.size === undefined ? {} : { size: line.size }) }

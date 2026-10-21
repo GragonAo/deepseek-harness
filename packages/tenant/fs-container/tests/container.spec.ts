@@ -70,7 +70,18 @@ function mount() {
   }
   const ctx = new Context()
   ctx.provide('containerRuntime', containerRuntime)
-  return { fs: new ContainerFileSystem(ctx, { root: '/workspace' }), calls, store }
+  return { fs: new ContainerFileSystem(ctx, { root: '/workspace' }), calls, store, ctx }
+}
+
+/**
+ * Install an `agents` service whose ambient initiator reports the given session id.
+ * @param session - a mount whose context receives the service.
+ * @param id - the session id to report; throwing models a disposed registry.
+ */
+function mountSession(session: { ctx: Context }, id: () => string): void {
+  session.ctx.provide('agents', {
+    currentInitiator: () => ({ session: { header: { id: id() } } }),
+  })
 }
 
 describe('ContainerFileSystem', () => {
@@ -83,6 +94,35 @@ describe('ContainerFileSystem', () => {
     const parent = await fs.resolve('/workspace/sub')
     expect(fs.contains(parent, target)).toBe(true)
     expect(fs.contains(target, parent)).toBe(false)
+  })
+
+  it('resolves relative paths in the calling session directory, not the caller cwd', async () => {
+    const session = mount()
+    mountSession(session, () => 'session-7')
+
+    // The caller's cwd is a host-side path (the deployment's sandbox workDir); the session
+    // directory is the only one that exists in this container, so it wins — exactly as
+    // `ContainerRuntime.exec` overrides a caller-supplied cwd for a session-bearing command.
+    const target = await session.fs.resolve('交付产物/研判报告.md', { cwd: '/tmp/work' })
+    expect(target.displayPath).toBe('/sessions/session-7/交付产物/研判报告.md')
+    expect(session.fs.processPath(target)).toBe('/sessions/session-7/交付产物/研判报告.md')
+
+    // Absolute paths stay absolute: the model may name another mounted scope.
+    expect((await session.fs.resolve('/case/笔录.pdf')).displayPath).toBe('/case/笔录.pdf')
+  })
+
+  it('falls back to the caller cwd without an ambient session', async () => {
+    const withoutSession = mount()
+    expect((await withoutSession.fs.resolve('a.txt', { cwd: '/workspace' })).displayPath).toBe('/workspace/a.txt')
+    expect((await withoutSession.fs.resolve('a.txt')).displayPath).toBe('/workspace/a.txt')
+
+    const disposed = mount()
+    mountSession(disposed, () => { throw new Error('disposed') })
+    expect((await disposed.fs.resolve('a.txt', { cwd: '/tmp/work' })).displayPath).toBe('/tmp/work/a.txt')
+
+    const unusableId = mount()
+    mountSession(unusableId, () => '../../etc')
+    expect((await unusableId.fs.resolve('a.txt')).displayPath).toBe('/workspace/a.txt')
   })
 
   it('reads text and rejects absent targets', async () => {

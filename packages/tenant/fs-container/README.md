@@ -2,12 +2,14 @@
 
 [`dsh-fs`](../../fs/fs) capability seam 的容器 provider。路径、内容、列出、写入与编辑都在环境租户的容器内操作 — 与子进程 provider 服务的是同一执行世界 — 因此文件操作绝不脱离租户的隔离边界。
 
+相对路径落在**调用方会话自己的目录** `/sessions/<会话 id>`，与那个会话的 shell 命令跑在同一层：调用方给的 `cwd` 是它自己那台机器上的路径，容器里不存在，这与 `ContainerRuntime.exec` 对带会话的命令所做的覆盖是同一条规则。没有会话在作用域里时（宿主自己的工具、技能发现、自己指定了 cwd 的调用方），配置的 `root` 生效。
+
 ## 配置
 
 ```yaml
 - name: '@deepseek-ai/dsh-fs-container'
   config:
-    root: '/workspace'   # container path relative requests resolve against
+    root: '/workspace'   # container path relative requests resolve against when no session is in scope
 ```
 
 provider 注入 `containerRuntime`（例如 [`dsh-container-docker`](../container-docker)）；`/workspace` 必须是该 provider 发布的租户工作空间挂载。镜像必须携带 GNU coreutils（`stat`、`cat`、`find`、`base64`）。

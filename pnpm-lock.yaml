@@ -8128,6 +8128,9 @@ importers:
       '@deepseek-ai/cordis':
         specifier: workspace:^
         version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-agent':
+        specifier: workspace:^
+        version: link:../../core/agent
       '@deepseek-ai/dsh-container':
         specifier: workspace:^
         version: link:../container
@@ -8140,6 +8143,9 @@ importers:
       '@deepseek-ai/dsh-sandbox':
         specifier: workspace:^
         version: link:../../sandbox/sandbox
+      '@deepseek-ai/dsh-tenant':
+        specifier: workspace:^
+        version: link:../tenant
 
   packages/tenant/fs-http:
     dependencies:

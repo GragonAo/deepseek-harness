@@ -27,6 +27,12 @@
       "path": "../container"
     },
     {
+      "path": "../tenant"
+    },
+    {
+      "path": "../../core/agent"
+    },
+    {
       "path": "../../runtime-diagnostics/invariants"
     }
   ]
