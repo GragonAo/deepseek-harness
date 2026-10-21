@@ -18,6 +18,8 @@ Settings 分节中的 `reasoningEffort` 在 agent-default-model 插件配置中�
 
 ## 约定层（`/api`）
 
+会话的工作目录取自创建请求（先 `workspaceId` 的路径、再 `cwd`），否则取网关的 `cwd` 配置——未配时就是宿主进程的 cwd。该配置里的 `{sessionId}` 会被替换成建出的会话 id，容器形态的载体就是靠它让每条会话在沙箱里各占一层，而不是共用一个路径；记入头部的是替换后的值，所以恢复的会话与重建的预分配 id 都落在同一目录。`createProjectDirectory: false` 则不让宿主去建它：该目录归沙箱的挂载所有，由沙箱在会话的第一条命令时建出。
+
 协议消息组成一个四象限可辨识联合：发起方 × 请求／响应，与物理通道解耦。四种消息分别是 `ClientRequest`（POST `/api/<method>` 的请求体）、`ServerResponse`（该 POST 的响应体）、`ServerRequest`（SSE（Server-Sent Events）帧）和 `ClientResponse`（POST `/api/respond` 的请求体）。响应始终回显对应请求的 `rpcId`，绝不签发新值。方法的参数与返回值结构只存在于领域接口签名（`SessionsApi`、`HostApi`、`EventsApi`）中；`RpcMethodMap` 注册方法，其他所有位置均通过 `RequestPayload<K>`／`ResponseValue<K>` 派生。Zod schema 以 `satisfies z.ZodType<Wire<T>>` 锚定类型，并分两层解析：先解析信封，再解析业务载荷，随后按方法分发。业务错误由 `RpcResult` 的错误分支承载（`RpcErrorDetailsMap` 封闭错误码集合）；HTTP 状态只表达载体层结果。每个 `/api` POST 都必须声明 `application/json` 媒体类型——否则在分发前即以 415 拒绝，因此跨站「简单请求」（浏览器不经 CORS 预检就会发出）永远无法盲目执行有副作用的方法。
 
 分层与协议决策记录在 [GUI 分层与 RPC 协议 RFC](../../../.agents/notes/implemented/architecture/2026-07-19-gui-layering-and-rpc-protocol.md) 中；浏览器侧消费架构记录在 [Web 客户端架构 RFC](../../../.agents/notes/implemented/architecture/2026-07-19-gui-web-client-architecture.md) 中。

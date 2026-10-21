@@ -65,11 +65,13 @@ dsh-tenant --config /etc/dsh/tenant.config.yaml
 
 ## 执行层
 
-`sandbox.backend` 决定沙箱怎么起，两个后端共享同一组语义字段：`workDir`（执行容器的工作目录，会话与常驻终端共用；必须是容器本地路径而不是挂载点，默认 `/tmp/work`；k8s 后端按同一个值在沙箱里挂 `emptyDir`，因此两处不同值时沙箱内没有这个目录，每次命令都会因为工作目录进不去而失败）、`caseReadOnly` 与 `usersReadOnly`（`/case` 案件工作目录与 `/global` 用户跨案件工作目录是否对沙箱只读，都默认只读：这两棵树由业务侧通过管理接口写入，沙箱只是读取方，可写就意味着一个用户的沙箱能改到同案件其他用户的输入）、`systemRoot`（全局技能树）、`pythonRoot`（沙箱内 Python 运行时）、`toolsRoot`（三级工具清单，租户记录自带时以记录为准）、`idleTimeoutMs`（空闲预算：provider 把它注入沙箱，由沙箱自己判定空闲并退出）、`sandboxCacheTtlMs`（句柄缓存）、`startTimeoutMs`（冷启动上限）、`toolTimeoutMs`（单次命令上限，k8s 侧对应传输期限）、`maxOutputBytes`（沙箱内每条输出流的上界，须留在宿主结果上界与 `run_code` 载荷上界之上）、`memoryLimit` 与 `cpuLimit`（沙箱容器自己的内存与 CPU 上界，两个后端同义，只是内存值的写法各按各家语法：docker 写 `2g`，k8s 写 quantity 如 `6Gi`；k8s 侧在加载期校验 quantity，写错立即报错；不配则沙箱没有内存上界，Pod 落在 BestEffort，可以一路吃到节点内存耗尽，生产必须配 `memoryLimit`）、`cliTimeoutMs`（单次容器 CLI 调用）、`readyTimeoutMs` 与 `readyPollMs`（冷启动后等待 tool-exec 答话的上限与轮询间隔）。
+`sandbox.backend` 决定沙箱怎么起，两个后端共享同一组语义字段：`workDir`（不带会话的 exec 与常驻终端的工作目录；必须是容器本地路径而不是挂载点，默认 `/tmp/work`；k8s 后端按同一个值在沙箱里挂 `emptyDir`，因此两处不同值时沙箱内没有这个目录，每次命令都会因为工作目录进不去而失败）、`caseReadOnly` 与 `usersReadOnly`（`/case` 案件工作目录与 `/global` 用户跨案件工作目录是否对沙箱只读，都默认只读：这两棵树由业务侧通过管理接口写入，沙箱只是读取方，可写就意味着一个用户的沙箱能改到同案件其他用户的输入）、`systemRoot`（全局技能树）、`pythonRoot`（沙箱内 Python 运行时）、`toolsRoot`（三级工具清单，租户记录自带时以记录为准）、`idleTimeoutMs`（空闲预算：provider 把它注入沙箱，由沙箱自己判定空闲并退出）、`sandboxCacheTtlMs`（句柄缓存）、`startTimeoutMs`（冷启动上限）、`toolTimeoutMs`（单次命令上限，k8s 侧对应传输期限）、`maxOutputBytes`（沙箱内每条输出流的上界，须留在宿主结果上界与 `run_code` 载荷上界之上）、`memoryLimit` 与 `cpuLimit`（沙箱容器自己的内存与 CPU 上界，两个后端同义，只是内存值的写法各按各家语法：docker 写 `2g`，k8s 写 quantity 如 `6Gi`；k8s 侧在加载期校验 quantity，写错立即报错；不配则沙箱没有内存上界，Pod 落在 BestEffort，可以一路吃到节点内存耗尽，生产必须配 `memoryLimit`）、`cliTimeoutMs`（单次容器 CLI 调用）、`readyTimeoutMs` 与 `readyPollMs`（冷启动后等待 tool-exec 答话的上限与轮询间隔）。
 
 差异只在启动方式与各自的部署事实：docker 侧是 `runtime`/`network`/`image`/`publishHost`/`connectHost`，k8s 侧是 `namespace`/`image`/`workspaceClaim`/`claimRoot`/`pythonEnv`（沙箱内 Python 的 `binDir`/`virtualEnv`/`sitePackages`，节点目录宿主读不到）/`kubectlBinary`/`imagePullPolicy`/`toolExecPort`/`statusPollMs`/`command`（沙箱里启动的容器命令）/`env`（沙箱容器的显式环境变量，身份变量与 Python 三件套仍由 provider 在它之后写入）；k8s 的分层目录、claim 与 `pythonEnv` 是必填项，缺一项即报错。
 
 除了 `image`/`imagePath`/`toolTimeoutMs` 这几个改过名的字段，沙箱段的每一项都对应容器 provider 的同名 Config 字段：两个 provider 的可配置字段在租户配置里都能设，取值不必落在 provider 的默认值上。
+
+会话的工作目录不是 `workDir`，而是它在 `/sessions` 下的那一层：`src/spine.ts` 的 `containerSessionDir()` 把 `/sessions/{sessionId}` 作为业务面网关的默认 cwd 交给网关，由网关在建会话时填入真实 id。这是本部署对「会话的工作目录在哪」的唯一答案——会话的一次性命令跑在这里，文件工具的相对路径解析到这里，而 `sandbox:policy` 告诉模型的工作区同样取自它（那段说明由会话 cwd 生成）。三者同源，模型按说明用相对路径写出的成品，就是 `GET /files/session` 列得出来、前端点得开的那一个文件；换成容器本地的共享默认目录，成品会落在随沙箱销毁的 `emptyDir` 里。宿主不负责建这一层（网关的 `createProjectDirectory: false`）：宿主上没有这个容器路径，这一层由沙箱在会话第一条命令时建在挂载上。
 
 ## Model Experience
 

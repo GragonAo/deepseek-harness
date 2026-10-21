@@ -11,7 +11,9 @@
  * @module @deepseek-ai/dsh-tenant-app/spine
  */
 
-import { join } from 'node:path'
+import { join, posix } from 'node:path'
+import { SESSION_ID_PLACEHOLDER } from '@deepseek-ai/dsh-host-apiproxy'
+import { SANDBOX_SESSIONS_MOUNT } from '@deepseek-ai/dsh-tenant'
 import type { SpineModule } from './deps.ts'
 import type { TenantAppConfig } from './types.ts'
 
@@ -63,6 +65,23 @@ export function workDir(config: TenantAppConfig): string {
 }
 
 /**
+ * 新会话的工作目录模板：`/sessions/<会话 id>`，即 `sandboxSessionDir()` 的落点。
+ *
+ * 它是这个部署给「会话的工作目录在哪」的唯一答案：会话的命令跑在这里，文件工具的相对路径
+ * 也解析到这里，而模型被 `sandbox:policy` 告知的工作区同样取它（那份说明由会话的 cwd 生成）。
+ * 写死成容器本地的 `workDir` 会让三者互相矛盾：模型照说明把成品写进那个共享且随沙箱丢弃的
+ * 目录，而它自己的命令与文件面看到的是另一层。
+ *
+ * 会话 id 由网关在创建时填进 {@link SESSION_ID_PLACEHOLDER}，所以这里只是一条模板。
+ *
+ * @param _config - 租户面配置；两个沙箱后端都把会话目录挂在 `/sessions` 下，模板与后端无关
+ * @returns 传给 `dsh-host-apiproxy` 的 `cwd` 模板
+ */
+export function containerSessionDir(_config: TenantAppConfig): string {
+  return posix.join(SANDBOX_SESSIONS_MOUNT, SESSION_ID_PLACEHOLDER)
+}
+
+/**
  * 系统层技能目录的宿主路径：`<sandbox.systemRoot>/skills`。
  *
  * `systemRoot` 是宿主上那棵全局配置树的根，两个容器后端都把它下面这一份 `skills/` 挂成沙箱的
@@ -99,7 +118,16 @@ export const SPINE: readonly SpineRow[] = [
     module: '@deepseek-ai/dsh-host-apiproxy',
     // 提问这条缝只接受一个提供者。本栈的提供者是业务面的问答通道（下面的 tenant-questions
     // 行），所以网关不再自己注册那个走 web 客户端的提供者；两处同时注册会在启动时直接报重复注册。
-    config: config => ({ cwd: workDir(config), userQuestionsProvider: false }),
+    //
+    // cwd 用带会话 id 的模板：会话的工作目录就是它在 /sessions 下的那一层，与那条会话自己的
+    // 命令、文件读写是同一个落点（见 sandboxSessionDir）。写死成容器本地的 workDir 会让模型
+    // 被告知「你的工作区是那个共享且随手丢弃的目录」，它就会把成品写到那里去。
+    // 那一层由沙箱在会话第一条命令时建在挂载上，所以宿主不建——宿主上根本没有这个路径。
+    config: config => ({
+      cwd: containerSessionDir(config),
+      createProjectDirectory: false,
+      userQuestionsProvider: false,
+    }),
   },
   {
     id: 'session-title',

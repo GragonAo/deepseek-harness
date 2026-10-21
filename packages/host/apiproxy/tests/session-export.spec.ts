@@ -130,11 +130,13 @@ describe('session export compression config', () => {
     expect(ApiProxyService.Config({})).toEqual({
       sessionExportCompressionLevel: 6,
       coldBlankProbeMaxBytes: 1024,
+      userQuestionsProvider: true,
+      createProjectDirectory: true,
     })
     expect(ApiProxyService.Config({ sessionExportCompressionLevel: 0 }))
-      .toEqual({ sessionExportCompressionLevel: 0, coldBlankProbeMaxBytes: 1024 })
+      .toMatchObject({ sessionExportCompressionLevel: 0, coldBlankProbeMaxBytes: 1024 })
     expect(ApiProxyService.Config({ sessionExportCompressionLevel: 9 }))
-      .toEqual({ sessionExportCompressionLevel: 9, coldBlankProbeMaxBytes: 1024 })
+      .toMatchObject({ sessionExportCompressionLevel: 9, coldBlankProbeMaxBytes: 1024 })
     for (const value of [-1, 10, 1.5]) {
       expect(() => ApiProxyService.Config({ sessionExportCompressionLevel: value } as never)).toThrow()
     }
@@ -144,9 +146,9 @@ describe('session export compression config', () => {
 describe('cold blank probe config', () => {
   it('accepts a per-Session byte bound including zero and rejects invalid bounds', () => {
     expect(ApiProxyService.Config({ coldBlankProbeMaxBytes: 0 }))
-      .toEqual({ sessionExportCompressionLevel: 6, coldBlankProbeMaxBytes: 0 })
+      .toMatchObject({ sessionExportCompressionLevel: 6, coldBlankProbeMaxBytes: 0 })
     expect(ApiProxyService.Config({ coldBlankProbeMaxBytes: 2048 }))
-      .toEqual({ sessionExportCompressionLevel: 6, coldBlankProbeMaxBytes: 2048 })
+      .toMatchObject({ sessionExportCompressionLevel: 6, coldBlankProbeMaxBytes: 2048 })
     for (const value of [-1, 1.5]) {
       expect(() => ApiProxyService.Config({ coldBlankProbeMaxBytes: value })).toThrow()
     }
@@ -157,6 +159,12 @@ describe('default project cwd config', () => {
   it('stays absent when omitted (Host cwd is the fallback) and passes an explicit path through', () => {
     expect(ApiProxyService.Config({})).not.toHaveProperty('cwd')
     expect(ApiProxyService.Config({ cwd: '/workspace' })).toMatchObject({ cwd: '/workspace' })
+  })
+
+  it('accepts a {sessionId} template and an explicit choice about creating it', () => {
+    // 容器形态的载体用模板让每条会话在沙箱里各占一层，并声明那一层不由宿主创建。
+    expect(ApiProxyService.Config({ cwd: '/sessions/{sessionId}', createProjectDirectory: false }))
+      .toMatchObject({ cwd: '/sessions/{sessionId}', createProjectDirectory: false })
   })
 })
 

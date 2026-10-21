@@ -121,6 +121,14 @@ const COLD_SUMMARY_BATCH_SIZE = 16
 /** Default maximum artifact size eligible for one cold blankness read. */
 export const DEFAULT_COLD_BLANK_PROBE_MAX_BYTES = 1024
 
+/**
+ * Placeholder in the configured default project directory that stands for the
+ * created session's id. A sandboxed deployment names its per-session directory
+ * with it (`/sessions/{sessionId}`); every other deployment leaves it out and
+ * keeps one shared default.
+ */
+export const SESSION_ID_PLACEHOLDER = '{sessionId}'
+
 /** Conversation message event types (the pagination counting unit). */
 const MESSAGE_TYPES = new Set(['user/message', 'assistant/message'])
 
@@ -594,7 +602,12 @@ export interface ApiProxyDefaults {
    * and undoing it because storage failed would be the worse outcome.
    */
   saveDefaultModelSelection?: (selection: ModelSelection) => Promise<void>
-  /** Default project directory for new sessions whose create request carries no cwd. */
+  /**
+   * Default project directory for new sessions whose create request carries no
+   * cwd. `{sessionId}` in it is replaced with the created session's id, so a
+   * deployment whose sessions run inside a sandbox names the session's own
+   * directory there instead of one path they all share.
+   */
   cwd: string
   /** Native open-with-default-application; injectable for carrier tests. */
   openPath?: (path: string, signal: AbortSignal) => Promise<void>
@@ -620,6 +633,14 @@ export interface ApiProxyDefaults {
    * provider per context, so leaving both mounted fails the load.
    */
   userQuestionsProvider?: boolean
+  /**
+   * Whether a new session's project directory is created on this Host before
+   * the session starts (default: true). A deployment whose sessions run inside
+   * a sandbox sets `false`: the directory belongs to the sandbox's mounts, the
+   * sandbox creates it on the session's first command, and a path this Host
+   * cannot own must not be created here.
+   */
+  createProjectDirectory?: boolean
 }
 
 /** The tool/call payload fields the presenter path reads. */
@@ -1620,7 +1641,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         }
 
         try {
-          await mkdir(cwd, { recursive: true })
+          if (defaults.createProjectDirectory !== false) await mkdir(cwd, { recursive: true })
         } catch (error: unknown) {
           throw new Error(`failed to ensure project directory "${cwd}": ${String(error)}`, { cause: error })
         }
@@ -2106,7 +2127,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             })
           }
         }
-        const cwd = workspace?.path ?? request.payload.cwd ?? defaults.cwd
+        const cwd = workspace?.path ?? request.payload.cwd
+          ?? defaults.cwd.replaceAll(SESSION_ID_PLACEHOLDER, sessionId)
         const requestedPreset = request.payload.agentPreset
         try {
           await ensureSession(sessionId, cwd, request.payload.sessionId !== undefined, requestedPreset)

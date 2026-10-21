@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 租户服务的组合测试。
  *
  * 第一条断言配置边界：缺项、错项、拼错的字段名都必须响亮失败。
@@ -575,6 +575,18 @@ describe('租户问答通道', () => {
     const row = SPINE.find(candidate => candidate.id === 'api-gateway')
     expect(row?.config).toBeTypeOf('function')
     expect(row?.config?.(configFrom(MINIMAL))).toMatchObject({ userQuestionsProvider: false })
+  })
+
+  it('网关那一行把会话工作目录指向会话自己的目录', () => {
+    // 模型据会话 cwd 得知「工作区在哪」，也就照那份说明决定把成品写到哪里。指到容器的共享
+    // 默认目录会让成品落在随沙箱销毁的那一层：会话自己的命令与文件面看到的是另一层，
+    // 成品清单也收不到它。
+    const row = SPINE.find(candidate => candidate.id === 'api-gateway')
+    expect(row?.config?.(configFrom(MINIMAL))).toMatchObject({
+      cwd: '/sessions/{sessionId}',
+      // 那一层由沙箱在会话第一条命令时建在挂载上，宿主上根本没有这个路径。
+      createProjectDirectory: false,
+    })
   })
 }, BOOT_TIMEOUT_MS)
 

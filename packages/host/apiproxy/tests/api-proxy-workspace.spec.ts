@@ -64,6 +64,10 @@ async function harness(
   extras: {
     openPath?: (path: string, signal: AbortSignal) => Promise<void>
     canOpenPath?: () => boolean
+    /** Default project directory template; absent, the harness root. */
+    cwd?: string
+    /** Whether the Host creates that directory; absent, the gateway default. */
+    createProjectDirectory?: boolean
   } = {},
 ) {
   const ctx = new Context()
@@ -104,7 +108,10 @@ async function harness(
   ctx.provide('directoryPicker', { capability: () => picker } as never)
   const api = createApiProxy(ctx, {
     defaultModelSelection: () => ({ provider: 'test', model: 'test-model' }),
-    cwd: root,
+    cwd: extras.cwd ?? root,
+    ...extras.createProjectDirectory === undefined
+      ? {}
+      : { createProjectDirectory: extras.createProjectDirectory },
     ...extras.openPath === undefined ? {} : { openPath: extras.openPath },
     ...extras.canOpenPath === undefined ? {} : { canOpenPath: extras.canOpenPath },
   })
@@ -409,6 +416,21 @@ describe('session creation and Workspace membership', () => {
 
     expectOk(await api.sessions.create(request({ workspaceId: created.workspaceId, sessionId })))
     expect(expectOk(await api.workspace.list(request({}))).items[0]?.sessionIds).toEqual([sessionId])
+  })
+
+  it('expands a {sessionId} default directory and leaves creating it to the sandbox', async () => {
+    // 容器部署里会话目录在沙箱的挂载上，宿主上不存在：默认目录按会话 id 展开，一个会话一层；
+    // 宿主不建它——建不出来会让整次创建失败，建出来也只是宿主上的一个空目录。
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'dsh-apiproxy-sessions-')))
+    const { api, ctx } = await harness(root, undefined, {
+      cwd: join(root, 'sessions', '{sessionId}'),
+      createProjectDirectory: false,
+    })
+    const sessionId = SessionId('session-per-session-cwd')
+
+    expectOk(await api.sessions.create(request({ sessionId })))
+    expect(ctx.agents.get(sessionId)?.session.header.cwd).toBe(join(root, 'sessions', String(sessionId)))
+    expect(existsSync(join(root, 'sessions'))).toBe(false)
   })
 })
 

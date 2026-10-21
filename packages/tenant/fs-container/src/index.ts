@@ -303,7 +303,9 @@ export class ContainerFileSystem extends FileSystem {
       if (info.version !== expected.version) throw new FsError(`stale version: ${target.displayPath}`, 'FS_STALE_VERSION')
     }
     const temporary = `${targetKey}.dsh-tmp`
-    const script = `cat > ${quoteShell(temporary)} && mv ${quoteShell(temporary)} ${quoteShell(targetKey)}`
+    // The parent directory is created on demand, as `dsh-fs-local` does: a model writing its
+    // first file into a directory that does not exist yet gets the file, not ENOENT.
+    const script = `mkdir -p ${quoteShell(posix.dirname(targetKey))} && cat > ${quoteShell(temporary)} && mv ${quoteShell(temporary)} ${quoteShell(targetKey)}`
     const opts: ContainerExecOptions = { stdin: content }
     if (signal !== undefined) opts.signal = signal
     const result = await this.runtime.exec('sh', ['-c', script], opts)

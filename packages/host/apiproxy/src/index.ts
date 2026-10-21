@@ -27,7 +27,7 @@ export { RpcId } from './api/rpc.ts'
 export { toFetchHandler } from './fetch/handler.ts'
 export { AbstractApiClient, InProcessApiClient } from './fetch/client.ts'
 export type { IApiClient } from './fetch/client.ts'
-export { createApiProxy } from './api-proxy.ts'
+export { createApiProxy, SESSION_ID_PLACEHOLDER } from './api-proxy.ts'
 export type { ApiProxyDefaults } from './api-proxy.ts'
 export { generateOpenApiDocument } from './openapi.ts'
 export type { OpenApiDocument } from './openapi.ts'
@@ -45,7 +45,9 @@ export interface Config {
    * Default project directory for sessions created without a workspace or
    * `cwd`. Absent, the Host process cwd is used. A container-backed carrier
    * (e.g. multi-tenant) pins this to the container's workspace path, since
-   * the Host cwd does not exist inside the execution container.
+   * the Host cwd does not exist inside the execution container; `{sessionId}`
+   * in the value becomes the created session's id, which is how a carrier
+   * gives each session its own directory inside that container.
    */
   cwd?: string
   /**
@@ -76,6 +78,15 @@ export interface Config {
    * @default true
    */
   userQuestionsProvider?: boolean
+  /**
+   * Whether a new session's project directory is created on this Host before
+   * the session starts. A container-backed carrier sets `false`: that
+   * directory lives inside the execution container, the container's sandbox
+   * creates it on the session's first command, and the Host must not create a
+   * path it does not own.
+   * @default true
+   */
+  createProjectDirectory?: boolean
 }
 
 /**
@@ -96,6 +107,7 @@ export class ApiProxyService extends Service implements ApiProxy {
       .default(DEFAULT_SESSION_LOG_COMPRESSION_LEVEL) as z<SessionLogCompressionLevel>,
     coldBlankProbeMaxBytes: z.natural().default(DEFAULT_COLD_BLANK_PROBE_MAX_BYTES),
     userQuestionsProvider: z.boolean().default(true),
+    createProjectDirectory: z.boolean().default(true),
   })
 
   readonly sessions: ApiProxy['sessions']
@@ -119,6 +131,7 @@ export class ApiProxyService extends Service implements ApiProxy {
       saveDefaultModelSelection: selection => ctx.agentDefaultModel.saveSelection(selection),
       cwd: config.cwd ?? process.cwd(),
       userQuestionsProvider: config.userQuestionsProvider ?? true,
+      createProjectDirectory: config.createProjectDirectory ?? true,
       ...config.nativeOpen === undefined ? {} : { canOpenPath: () => config.nativeOpen as boolean },
       ...(config.sessionExportCompressionLevel === undefined
         ? {}

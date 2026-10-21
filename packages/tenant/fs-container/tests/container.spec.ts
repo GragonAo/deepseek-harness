@@ -25,34 +25,41 @@ function mount() {
     ['/workspace/sub/b.txt', { type: 'file', content: 'world' }],
   ])
   const calls: Call[] = []
+  const mkdirs: string[] = []
   const containerRuntime = {
     exec: async (_command: string, args: readonly string[], opts?: { stdin?: string }): Promise<ContainerCommandResult> => {
       const script = args.length >= 2 && args[0] === '-c' ? String(args[1]) : ''
       calls.push(opts === undefined ? { script } : { script, opts })
+      // 写入脚本是 `mkdir -p <父目录> && cat > <临时文件> && mv …`：认领那段前缀，并把父目录补进假文件系统，
+      // 这样「写进还不存在的目录」在这里与真容器里一样能成。
+      const mkdirPrefix = script.match(/^mkdir -p '([^']*)' && (.*)$/s)
+      const step = mkdirPrefix === null ? script : mkdirPrefix[2] ?? ''
+      if (mkdirPrefix !== null) mkdirs.push(mkdirPrefix[1] ?? '')
       const path = script.match(/'([^']*)'$/)?.[1] ?? ''
-      if (script.startsWith('stat ')) {
+      if (mkdirPrefix !== null && !store.has(mkdirPrefix[1] ?? '')) store.set(mkdirPrefix[1] ?? '', { type: 'directory' })
+      if (step.startsWith('stat ')) {
         const entry = store.get(path)
         if (entry === undefined) return { exitCode: 1, stdout: '', stderr: 'stat: cannot stat: No such file or directory' }
         const rawKind = entry.type === 'directory' ? 'directory' : (entry.content ?? '') === '' ? 'regular empty file' : 'regular file'
         const size = entry.type === 'file' ? Buffer.byteLength(entry.content ?? '') : 0
         return { exitCode: 0, stdout: `${rawKind}|${size}|1700000000`, stderr: '' }
       }
-      if (script.startsWith('cat > ')) {
+      if (step.startsWith('cat > ')) {
         store.set(path, { type: 'file', content: opts?.stdin ?? '' })
         return { exitCode: 0, stdout: '', stderr: '' }
       }
-      if (script.startsWith('cat ')) {
+      if (step.startsWith('cat ')) {
         const entry = store.get(path)
         if (entry === undefined) return { exitCode: 1, stdout: '', stderr: `cat: ${path}: No such file or directory` }
         if (entry.type === 'directory') return { exitCode: 1, stdout: '', stderr: `cat: ${path}: Is a directory` }
         return { exitCode: 0, stdout: entry.content ?? '', stderr: '' }
       }
-      if (script.startsWith('base64 < ')) {
+      if (step.startsWith('base64 < ')) {
         const entry = store.get(path)
         if (entry === undefined) return { exitCode: 1, stdout: '', stderr: 'No such file or directory' }
         return { exitCode: 0, stdout: Buffer.from(entry.content ?? '').toString('base64'), stderr: '' }
       }
-      if (script.startsWith('find ')) {
+      if (step.startsWith('find ')) {
         const dir = script.match(/'([^']*)'/)?.[1] ?? ''
         const lines: string[] = []
         for (const [key, entry] of store) {
@@ -70,7 +77,7 @@ function mount() {
   }
   const ctx = new Context()
   ctx.provide('containerRuntime', containerRuntime)
-  return { fs: new ContainerFileSystem(ctx, { root: '/workspace' }), calls, store, ctx }
+  return { fs: new ContainerFileSystem(ctx, { root: '/workspace' }), calls, mkdirs, store, ctx }
 }
 
 /**
@@ -101,14 +108,14 @@ describe('ContainerFileSystem', () => {
     mountSession(session, () => 'session-7')
 
     // The caller's cwd is a host-side path (the deployment's sandbox workDir); the session
-    // directory is the only one that exists in this container, so it wins — exactly as
+    // directory is the only one that exists in this container, so it wins 鈥?exactly as
     // `ContainerRuntime.exec` overrides a caller-supplied cwd for a session-bearing command.
-    const target = await session.fs.resolve('交付产物/研判报告.md', { cwd: '/tmp/work' })
-    expect(target.displayPath).toBe('/sessions/session-7/交付产物/研判报告.md')
-    expect(session.fs.processPath(target)).toBe('/sessions/session-7/交付产物/研判报告.md')
+    const target = await session.fs.resolve('浜や粯浜х墿/鐮斿垽鎶ュ憡.md', { cwd: '/tmp/work' })
+    expect(target.displayPath).toBe('/sessions/session-7/浜や粯浜х墿/鐮斿垽鎶ュ憡.md')
+    expect(session.fs.processPath(target)).toBe('/sessions/session-7/浜や粯浜х墿/鐮斿垽鎶ュ憡.md')
 
     // Absolute paths stay absolute: the model may name another mounted scope.
-    expect((await session.fs.resolve('/case/笔录.pdf')).displayPath).toBe('/case/笔录.pdf')
+    expect((await session.fs.resolve('/case/绗斿綍.pdf')).displayPath).toBe('/case/绗斿綍.pdf')
   })
 
   it('falls back to the caller cwd without an ambient session', async () => {
@@ -187,6 +194,14 @@ describe('ContainerFileSystem', () => {
     expect(updated.operation).toBe('update')
     expect(updated.before).toBe('x\n')
     await expect(fs.writeText(target, 'z\n', { kind: 'createIfAbsent' })).rejects.toMatchObject({ code: 'FS_NOT_OBSERVED' })
+  })
+
+  it('creates the parent directory a write names', async () => {
+    const { fs, mkdirs } = mount()
+    const target = await fs.resolve('交付产物/研判报告.md')
+    const created = await fs.writeText(target, '正文\n')
+    expect(created.operation).toBe('create')
+    expect(mkdirs).toContain('/workspace/交付产物')
   })
 
   it('edits literal text and reports absent/ambiguous matches', async () => {
