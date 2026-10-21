@@ -1,6 +1,6 @@
 # @deepseek-ai/dsh-container-docker
 
-[`dsh-container`](../container) 接缝的本地 Docker/Podman provider。它按 (租户, 用户) 拉起一个 *tool-exec* 服务容器，通过 HTTP 往该容器在宿主机回环上发布的端口发请求来运行命令（ip+host），并挂载三层数据：案件的共享目录挂到 `/shared`、该用户在该案件的工作目录以读写挂到 `/workspace`、该用户跨案件的全局目录挂到 `/global`（配置了 `usersRoot` 时），工具以只读挂到 `/tools`。`/shared` 与 `/global` 默认只读（`sharedReadOnly`、`usersReadOnly`）：这两棵树由业务侧写入，沙箱只是读取方，可写就意味着一个用户的沙箱能改到同案件其他用户的输入，也会让它们下面那两层只读的技能挂载失去意义。技能另外按层挂进一个聚合根：案件的、跨案件的、系统的三层各自只读挂到 `/opt/data/skills/<层>`，案件脚本遍历那个根去发现技能。容器在该用户第一次工具调用时懒式拉起——按用户的容器在启动时没有用户可供预热——名字稳定且按 (租户, 用户) 分区。不同租户、同一租户的不同用户始终落在不同容器，进程与文件系统从不共享内核上下文；容器自身文件系统在回收时丢弃——租户或用户的持久状态只有它的挂载。带会话的命令跑在 `/workspace/<会话 id>`，不在容器本地的工作目录里：provider 第一次为某个会话执行命令时建出那一层（`mkdir -p`，每个会话一次），并在命令的环境里把 `DSH_WORKDIR` 设成同一个路径。容器本地的工作目录做不到这件事：它属于容器，而一个容器在同一个人的所有会话之间共享，并且会随回收一起消失。
+[`dsh-container`](../container) 接缝的本地 Docker/Podman provider。它按 (租户, 用户) 拉起一个 *tool-exec* 服务容器，通过 HTTP 往该容器在宿主机回环上发布的端口发请求来运行命令（ip+host），并挂载这几层数据：该用户在该案件的工作目录以读写挂到 `/workspace`、该用户的会话目录以读写挂到 `/sessions`、案件的工作目录挂到 `/case`、该用户跨案件的全局工作目录挂到 `/global`（配置了 `usersRoot` 时），工具以只读挂到 `/tools`。`/case` 与 `/global` 默认只读（`caseReadOnly`、`usersReadOnly`）：这两棵树由业务侧写入，沙箱只是读取方，可写就意味着一个用户的沙箱能改到同案件其他用户的输入。技能另外按层挂进一个聚合根：案件的、跨案件的、系统的三层各自只读挂到 `/opt/data/skills/<层>`，案件脚本遍历那个根去发现技能。容器在该用户第一次工具调用时懒式拉起——按用户的容器在启动时没有用户可供预热——名字稳定且按 (租户, 用户) 分区。不同租户、同一租户的不同用户始终落在不同容器，进程与文件系统从不共享内核上下文；容器自身文件系统在回收时丢弃——租户或用户的持久状态只有它的挂载。带会话的命令跑在 `/sessions/<会话 id>`，不在容器本地的工作目录里：provider 第一次为某个会话执行命令时建出那一层（`mkdir -p`，每个会话一次），并在命令的环境里把 `DSH_WORKDIR` 设成同一个路径。容器本地的工作目录做不到这件事：它属于容器，而一个容器在同一个人的所有会话之间共享，并且会随回收一起消失。
 
 ## 配置
 
@@ -38,11 +38,12 @@ docker rm -f dsh-<tenantPartition>-<userPartition>
 docker run -d --name dsh-<tenantPartition>-<userPartition> \
   --network <network|none> -p <publishHost>::<toolExecPort> \
   [--memory <memoryLimit> --memory-swap <memoryLimit>] [--cpus <cpuLimit>] \
-  -v <workspaceRoot>/users/<sub>:/workspace \
-  -v <workspaceRoot>/shared:/shared \
-  [-v <usersRoot>/<sub>:/global] [-v <toolsRoot>:/tools:ro] \
-  -v <workspaceRoot>/shared/skills:<workspaceRoot>/shared/skills:ro \
-  -v <workspaceRoot>/shared/skills:/opt/data/skills/case:ro \
+  -v <workspaceRoot>/users/<sub>/work:/workspace \
+  -v <workspaceRoot>/users/<sub>/sessions:/sessions \
+  -v <workspaceRoot>/work:/case \
+  [-v <usersRoot>/<sub>/work:/global] [-v <toolsRoot>:/tools:ro] \
+  -v <workspaceRoot>/skills:<workspaceRoot>/skills:ro \
+  -v <workspaceRoot>/skills:/opt/data/skills/case:ro \
   [-v <usersRoot>/<sub>/skills:/opt/data/skills/user-global:ro] \
   [-v <systemRoot>/skills:/opt/data/skills/system:ro] \
   [-v <systemRoot>:<systemRoot>:ro] \
@@ -53,7 +54,7 @@ docker run -d --name dsh-<tenantPartition>-<userPartition> \
   <toolExecImage>
 ```
 
-上面每一条绑定挂载源都会在触碰容器 CLI 之前先在本宿主上校验：源不是已存在的目录就启动失败，报错里同时给出该路径、它对应的容器内挂载点，以及它属于哪个 (租户, 成员)——这正是运维定位「该建谁的目录」所需的信息。这条校验的存在理由，是 Docker 会把不存在的绑定挂载源建成空目录：没有它，启动会成功、沙箱会显示健康，而该主体拿到的是一个空的 `/workspace`。按租户划分的源由 [`dsh-tenant-admin`](../tenant-admin/README.md) 预置——建租户与加成员时创建 `<workspaceRoot>/shared/<tier>` 与 `<workspaceRoot>/users/<sub>`；`usersRoot`、`systemRoot`、`pythonRoot` 以及租户的 `toolsRoot` 则由部署自己维护。聚合根下的三层技能目录就是这些根的子目录，同样得先存在：`<workspaceRoot>/shared/skills` 由 `dsh-tenant-admin` 建，`<usersRoot>/<sub>/skills` 与 `<systemRoot>/skills` 由部署在自己的根里建出来。
+上面每一条绑定挂载源都会在触碰容器 CLI 之前先在本宿主上校验：源不是已存在的目录就启动失败，报错里同时给出该路径、它对应的容器内挂载点，以及它属于哪个 (租户, 成员)——这正是运维定位「该建谁的目录」所需的信息。这条校验的存在理由，是 Docker 会把不存在的绑定挂载源建成空目录：没有它，启动会成功、沙箱会显示健康，而该主体拿到的是一个空的 `/workspace`。按租户划分的源由 [`dsh-tenant-admin`](../tenant-admin/README.md) 预置——建租户与加成员时创建 `<workspaceRoot>/{config,skills,tools}`、`<workspaceRoot>/work` 与 `<workspaceRoot>/users/<sub>`；`usersRoot`、`systemRoot`、`pythonRoot` 以及租户的 `toolsRoot` 则由部署自己维护。聚合根下的三层技能目录就是这些根的子目录，同样得先存在：`<workspaceRoot>/skills` 由 `dsh-tenant-admin` 建，`<usersRoot>/<sub>/skills` 与 `<systemRoot>/skills` 由部署在自己的根里建出来。
 
 随后读取已发布宿主机端口（`docker port`），等待容器的 `/exec` 服务应答（设上限，从而没有 exec 会与容器内 Node 绑定端口的时序竞争），再把每次 exec POST 到 `http://<connectHost>:<port>/exec`——一次性命令从不执行 `docker exec`。同一作用域并发首次调用会并入那次进行中的启动，所以每个 (租户, 用户) 每进程最多付一次冷启动。运行镜像来自 `toolExecImage`；租户记录本身不携带镜像。设置 `idleTimeoutMs` 时，provider 把这个预算作为 `DSH_TOOL_EXEC_IDLE_MS` 注入容器，容器自己判定「没有在途请求、且距上一次请求已超过预算」后退出，下次 exec 再懒式重启。
 
@@ -94,7 +95,7 @@ skill 要通过 `PATH` 调 `python3`（或 `pip`），不要写 `/usr/bin/python
 
 `docker run -e PATH=…` 是替换镜像的值而不是追加，因此把 `<pythonRoot>/bin` 放到最前就必须重述镜像其余部分的 `PATH`：这就是 `toolExecImagePath`，默认取 Debian 基础镜像的值（`node:22-bookworm-slim`；仓库里的 `docker/Dockerfile` 自己没设 PATH）。当 `toolExecImage` 换成 PATH 不同的镜像时要一并设置，否则那个镜像追加的目录在沙箱里不再解析。
 
-每个容器还携带自己的身份：`DSH_CASE_ID` 与 `DSH_TENANT_ID` 是租户 id，`DSH_USER_ID` 是该用户，因此要定位自己所在案件的 skill 直接读它们，而不必从容器名或 `/shared` 目录名反推——Docker 把 `/etc/hostname` 设为容器 id，那种反推没有可用的输入。
+每个容器还携带自己的身份：`DSH_CASE_ID` 与 `DSH_TENANT_ID` 是租户 id，`DSH_USER_ID` 是该用户，因此要定位自己所在案件的 skill 直接读它们，而不必从容器名或 `/case` 目录名反推——Docker 把 `/etc/hostname` 设为容器 id，那种反推没有可用的输入。
 
 这条路径的每一步都有上界，因为一旦发出就无法取消：`cliTimeoutMs` 限定单次容器 CLI 调用（宿主机上还没有该镜像时，`run -d` 里包含一次拉取），`startTimeoutMs` 限定一整次冷启动，`transportTimeoutMs` 限定一次 tool-exec 往返——它要覆盖命令在容器内的执行时间，长时间的构建就花在这里。超过上界的启动会被丢弃**并清掉缓存条目**：下一次调用于是重新启动一个容器，而不是并入那次永远不结束的启动——若把该条目留在缓存里，这个 (租户, 用户) 在该宿主进程的余生里将无法执行任何工具调用。自带上界的调用方（shell 期限、工具超时策略）会把上界传进来，因此已过期或被中止的调用不必等待进行中的启动；启动本身仍会继续服务于共用同一 key 的其他调用方。超过上界的 tool-exec 往返不会被重试——上面的替换规则假定“拒绝”意味着命令从未执行，而超时给不出这个保证。启动在 `docker run -d` 之后失败时，同名容器会留到下一次启动的清除为止。
 
@@ -132,7 +133,7 @@ docker build -f packages/tenant/container-docker/docker/Dockerfile \
 - **每个 Docker 宿主每 (租户, 用户) 一个容器。** 稳定名字把每个主体钉在单个具名容器上，因此同一宿主上两个相继启动的 `dsh` 进程会互相驱逐或重建同名容器（第二个 `rm -f` 停掉第一个的，再起自己的）；容器无状态，所以这只退化为一次重新预热，但要在流量中途交接的共享宿主多副本部署应改用「收养或创建」而非「清除再启动」。
 - **`internal` 网络由部署方负责。** 租户要在无公网的情况下出网，依赖部署方创建的内网；该 provider 只是跳过 `none` 并用自己的配置名。
 - **无镜像拉取策略。** 容器启动后会等待其 `/exec` 服务就绪，但拉取本身由部署方负责；部署方应预先拉取 tool-exec 镜像，或用 `run` 时即可解析的镜像。
-- **无磁盘上限。** 只限制内存与 CPU。主体的写入落在宿主拥有的 `/workspace`、`/shared`、`/global` 绑定挂载目录里，因此存储配额需要该 provider 不施加的文件系统或卷级机制。
+- **无磁盘上限。** 只限制内存与 CPU。主体的写入落在宿主拥有的 `/workspace`、`/sessions`、`/case`、`/global` 绑定挂载目录里，因此存储配额需要该 provider 不施加的文件系统或卷级机制。
 - **输出上界管的是捕获，不是命令自己的内存。** `maxOutputBytes` 逐条流生效，因此一条同时写两条流的命令最多占住两倍的上界；而一条自己吃掉整个容器内存的命令（例如在内存里排序一个大文件）仍然能撑死沙箱——这一层只保证沙箱不会因为**捕获**而无界增长，容器内存的那个上界要用 `memoryLimit`。
 - **挂载的 Python 运行时是沙箱唯一的解释器，且只在宿主侧探测一次。** `pythonRoot` 的布局（`bin`、`pyvenv.cfg`、`lib/python3.<minor>/site-packages`）在 provider 构造时读取，因此继续往该目录里装包对下一个沙箱立刻生效，而在宿主进程启动之后才创建这些路径需要重启。镜像不带 Python，所以没挂载就启动的沙箱里没有 `python3`，需要比镜像的 Debian 12 更新的 glibc 的构建在容器里起不来。配置的 `pythonRoot` 读不到、或三个标记一个都没有时，是加载失败，而不是什么都不挂。该目录还必须能被宿主进程按同一路径读到，而不只是 Docker daemon 能解析：配置的 `pythonRoot` 不是本进程可读的目录时 provider 会拒绝加载，而宿主自身跑在容器里的部署必须把该宿主目录按同一路径挂进那个容器。
 - **从未再被使用的沙箱要等运维收尾。** 容器自己的空闲退出与启动收尸覆盖了「容器已经退出」这一类；一个仍在运行、但其 (租户, 用户) 之后再没被用到的容器会留到运维按标签删除为止——删掉运行中的容器，等于让一个副本毁掉另一个副本正在用的沙箱。

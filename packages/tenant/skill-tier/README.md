@@ -1,6 +1,6 @@
 # @deepseek-ai/dsh-skill-tier
 
-把当前 (租户, 用户) 作用域解析为多租户载体文件的 skill provider 要用的三个宿主机 skill 目录：案件层 `<tenant.workspaceRoot>/shared/skills`、用户全局层 `<usersRoot>/<sub>/skills`、系统层（默认 `$DSH_HOME/system/skills`）。本插件注册可选的 `ctx.skillTiers` 服务；[`dsh-skill-filesystem`](../../skill/skill-filesystem/README.md) 在每次发现时读取它，按 case < user-global < system 的 rank 追加这三个根，于是同名者近层胜出、异名者并集。这三个根都是租户容器外的宿主机路径，provider 将其标记为 trusted host，从而用宿主机 I/O 发现，而不是走容器作用域的文件服务。
+把当前 (租户, 用户) 作用域解析为多租户载体文件的 skill provider 要用的三个宿主机 skill 目录：案件层 `<tenant.workspaceRoot>/skills`、用户全局层 `<usersRoot>/<sub>/skills`、系统层（默认 `$DSH_HOME/system/skills`）。本插件注册可选的 `ctx.skillTiers` 服务；[`dsh-skill-filesystem`](../../skill/skill-filesystem/README.md) 在每次发现时读取它，按 case < user-global < system 的 rank 追加这三个根，于是同名者近层胜出、异名者并集。这三个根都是租户容器外的宿主机路径，provider 将其标记为 trusted host，从而用宿主机 I/O 发现，而不是走容器作用域的文件服务。
 
 ## 配置
 

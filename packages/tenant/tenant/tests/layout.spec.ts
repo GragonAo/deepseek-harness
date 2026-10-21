@@ -99,7 +99,7 @@ describe('tenant directories', () => {
   })
 
   it('carries the tier names the sandbox mounts by name', () => {
-    // 沙箱按 `<workspaceRoot>/shared/skills` 这个名字挂案件技能层：这份名单是建目录与
+    // 沙箱按 `<workspaceRoot>/skills` 这个名字挂案件技能层：这份名单是建目录与
     // 出挂载表之间的接口，改名必须两边同时改。
     expect(TENANT_TIER_DIRS).toEqual(['config', 'skills', 'tools'])
     expect([TENANT_WORK_DIR_NAME, TENANT_USERS_DIR_NAME, TENANT_SESSIONS_DIR_NAME, TENANT_SKILL_DIR_NAME])

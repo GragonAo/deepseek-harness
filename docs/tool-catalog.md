@@ -2235,7 +2235,7 @@ Publish a file you generated to object storage and get back a public URL the use
   "properties": {
     "file_path": {
       "type": "string",
-      "description": "The file to publish, as this sandbox sees it — absolute, or relative to the working directory."
+      "description": "The file to publish, as this sandbox sees it. Only the mounted paths (/workspace, /sessions, /case, /global) are readable here, so pass an absolute path such as /workspace/报告.md or a path relative to the working directory, which is this session's own directory under /sessions."
     },
     "title": {
       "type": "string",

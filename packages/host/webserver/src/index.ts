@@ -6,6 +6,10 @@
  * application's frontend plugin owns dist serving through the fallback hook.
  * Web shape only — Electron loads dist over file:// and carries fetch over an
  * IPC bridge. This package never prints: the URL line belongs to the shell.
+ *
+ * It also owns the node:http ↔ fetch adapter a route handler dispatches
+ * through: {@link bridgeFetchRequest} with {@link FetchHandler} and
+ * {@link DEFAULT_MAX_REQUEST_BODY_BYTES}.
  */
 
 import { createServer } from 'node:http'
@@ -14,6 +18,9 @@ import type { AddressInfo } from 'node:net'
 import type { Duplex } from 'node:stream'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+
+export { bridgeFetchRequest, DEFAULT_MAX_REQUEST_BODY_BYTES } from './fetch-bridge.ts'
+export type { FetchHandler } from './fetch-bridge.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {

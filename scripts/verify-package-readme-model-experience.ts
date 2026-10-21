@@ -122,6 +122,7 @@ const SENTENCE_MODEL_EXPERIENCE: Readonly<Record<string, SentenceContract>> = {
 
   'packages/tenant/agent-http': { kind: 'none', reason: 'The HTTP carrier authenticates and scopes one gateway request; hosted services own any model-facing effect.' },
   'packages/tenant/tenant-admin-http': { kind: 'none', reason: 'The management carrier answers HTTP requests over ctx.tenantAdmin; neither it nor the operations it serves reaches a model request.' },
+  'packages/tenant/fs-http': { kind: 'none', reason: 'The file surface moves bytes between an authenticated caller and the host directories a subject works in; the model reads and writes those same files through its own file tools, so this carrier registers no token, tool, or prompt content.' },
   'packages/tenant/skill-tier': { kind: 'indirect', reason: 'The tier service only extends which skill directories dsh-skill-filesystem discovers; dsh-tool-skill owns the model-visible rendering.' },
   'packages/tenant/tools-tier': { kind: 'indirect', reason: 'The tier service only supplies tool-manifest directories; the declarative tool loader and tool registry own the model-visible rendering.' },
   'packages/llm/llm': { kind: 'none', reason: 'The adapter registry forwards already-assembled requests unchanged.' },

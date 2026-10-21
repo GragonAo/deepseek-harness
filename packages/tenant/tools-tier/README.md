@@ -1,6 +1,6 @@
 # @deepseek-ai/dsh-tools-tier
 
-把当前 (租户, 用户) 作用域解析为多租户载体声明式工具加载器要用的三个宿主机工具清单目录：案件层 `<tenant.workspaceRoot>/shared/tools`、用户全局层 `<usersRoot>/<sub>/tools`、系统层（默认 `$DSH_HOME/system/tools`）。本插件注册可选的 `ctx.toolTiers` 服务；工具清单加载器读取它，按 case < user-global < system 的 rank 合并这三个根，于是同名者近层胜出、异名者并集。这三个根都是租户容器外的宿主机路径，provider 将其标记为 trusted host，从而用宿主机 I/O 读取，而不是走容器作用域的文件服务。
+把当前 (租户, 用户) 作用域解析为多租户载体声明式工具加载器要用的三个宿主机工具清单目录：案件层 `<tenant.workspaceRoot>/tools`、用户全局层 `<usersRoot>/<sub>/tools`、系统层（默认 `$DSH_HOME/system/tools`）。本插件注册可选的 `ctx.toolTiers` 服务；工具清单加载器读取它，按 case < user-global < system 的 rank 合并这三个根，于是同名者近层胜出、异名者并集。这三个根都是租户容器外的宿主机路径，provider 将其标记为 trusted host，从而用宿主机 I/O 读取，而不是走容器作用域的文件服务。
 
 ## 配置
 

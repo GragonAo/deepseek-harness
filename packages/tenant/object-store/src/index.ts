@@ -21,7 +21,7 @@ import { basename, join, posix, resolve as resolveHost, sep } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { requireTenant, requireUser } from '@deepseek-ai/dsh-tenant'
+import { requireTenant, requireUser, TENANT_SESSIONS_DIR_NAME, TENANT_USERS_DIR_NAME, TENANT_WORK_DIR_NAME } from '@deepseek-ai/dsh-tenant'
 import { S3Client } from './s3.ts'
 import type { S3Target } from './s3.ts'
 
@@ -147,10 +147,11 @@ function currentScope(policy: Policy): Scope {
   const tenant = requireTenant()
   const user = String(requireUser())
   const mounts: Mount[] = [
-    { container: '/workspace', host: resolveHost(tenant.workspaceRoot, 'users', user) },
-    { container: '/case', host: resolveHost(tenant.workspaceRoot, 'work') },
+    { container: '/workspace', host: resolveHost(tenant.workspaceRoot, TENANT_USERS_DIR_NAME, user, TENANT_WORK_DIR_NAME) },
+    { container: '/sessions', host: resolveHost(tenant.workspaceRoot, TENANT_USERS_DIR_NAME, user, TENANT_SESSIONS_DIR_NAME) },
+    { container: '/case', host: resolveHost(tenant.workspaceRoot, TENANT_WORK_DIR_NAME) },
   ]
-  if (policy.usersRoot !== undefined) mounts.push({ container: '/global', host: resolveHost(policy.usersRoot, user) })
+  if (policy.usersRoot !== undefined) mounts.push({ container: '/global', host: resolveHost(policy.usersRoot, user, TENANT_WORK_DIR_NAME) })
   return { caseId: segment(tenant.id), userId: segment(user), mounts }
 }
 
@@ -160,7 +161,7 @@ function currentScope(policy: Policy): Scope {
  * @returns 只含字母、数字、`.`、`_`、`-` 且非空的片段。
  */
 function segment(value: string): string {
-  const kept = [...value].filter(character => /[\p{L}\p{N}._-]/u.test(character)).join('')
+  const kept = Array.from(value).filter(character => /[\p{L}\p{N}._-]/u.test(character)).join('')
   const trimmed = kept.replace(/^[._-]+|[._-]+$/g, '').slice(0, 80)
   return trimmed === '' ? 'item' : trimmed
 }
@@ -271,7 +272,7 @@ export function apply(ctx: Context, config: Config): void {
       file_path: {
         type: 'string',
         required: true,
-        description: 'The file to publish, as this sandbox sees it. Only the mounted paths (/workspace, /case, /global) are readable here, so pass an absolute path such as /workspace/报告.md; a file that exists only in the working directory must be written into a mounted path first.',
+        description: 'The file to publish, as this sandbox sees it. Only the mounted paths (/workspace, /sessions, /case, /global) are readable here, so pass an absolute path such as /workspace/报告.md or a path relative to the working directory, which is this session\'s own directory under /sessions.',
       },
       title: {
         type: 'string',
@@ -295,7 +296,7 @@ export function apply(ctx: Context, config: Config): void {
         },
       },
       render: (_args, value) => {
-        const published = value as { key: string; url: string; bytes: number; content_type: string; source_path: string }
+        const published = value
         return [{
           type: 'text',
           text: [
@@ -307,7 +308,7 @@ export function apply(ctx: Context, config: Config): void {
       },
       // 投影进 `tool/result` 事件的 `meta`：业务前端据此渲染下载项，不必解析结果文本，更不必读模型正文。
       presentationMeta: (_args, value) => {
-        const published = value as { key: string; url: string; bytes: number; content_type: string; source_path: string }
+        const published = value
         return {
           key: published.key,
           url: published.url,

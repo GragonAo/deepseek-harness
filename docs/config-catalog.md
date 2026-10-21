@@ -616,17 +616,18 @@ export interface Config {
    */
   usersRoot?: string
   /**
-   * `/shared`（案件级共享目录）是否对沙箱只读，默认只读。
+   * `/case`（案件工作目录）是否对沙箱只读，默认只读。
    *
    * 它由一个案件下的所有用户共用，业务侧通过管理接口写入；沙箱可写就意味着任何用户的沙箱都能
-   * 改到别人的输入。`/shared/skills` 就在它下面，所以可写时那个只读的技能挂载形同虚设。
+   * 改到别人的输入。案件级的 `config`、`skills`、`tools` 三棵树与它平级、各自只读挂载，
+   * 松开它只松开工作目录本身。
    */
-  sharedReadOnly?: boolean
+  caseReadOnly?: boolean
   /**
    * `/global`（该 subject 的跨案件目录）是否对沙箱只读，默认只读。
    *
-   * 它盛放用户全局提交上来的文件与用户全局技能，由业务侧写入；`/global/skills` 同样在它下面，
-   * 可写时 `user-global` 那一层只读挂载也形同虚设。
+   * 它盛放用户全局提交上来的文件，由业务侧写入；用户全局技能树是它的同级目录、单独只读
+   * 挂载，松开它只松开工作目录本身。
    */
   usersReadOnly?: boolean
   /**
@@ -739,7 +740,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/tenant/container-docker/src/index.ts:95`](../packages/tenant/container-docker/src/index.ts)
+Source: [`packages/tenant/container-docker/src/index.ts:96`](../packages/tenant/container-docker/src/index.ts)
 
 <a id="deepseek-aidsh-container-k8s"></a>
 
@@ -775,17 +776,18 @@ export interface Config {
    */
   workDir?: string
   /**
-   * `/shared`（案件级共享目录）是否对沙箱只读，默认只读。
+   * `/case`（案件工作目录）是否对沙箱只读，默认只读。
    *
    * 它由一个案件下的所有用户共用，业务侧通过管理接口写入；沙箱可写就意味着任何用户的沙箱都能
-   * 改到别人的输入。`/shared/skills` 就在它下面，所以可写时那个只读的技能挂载形同虚设。
+   * 改到别人的输入。案件级的 `config`、`skills`、`tools` 三棵树与它平级、各自只读挂载，
+   * 松开它只松开工作目录本身。
    */
-  sharedReadOnly?: boolean
+  caseReadOnly?: boolean
   /**
    * `/global`（该 subject 的跨案件目录）是否对沙箱只读，默认只读。
    *
-   * 它盛放用户全局提交上来的文件与用户全局技能，由业务侧写入；`/global/skills` 同样在它下面，
-   * 可写时 `user-global` 那一层只读挂载也形同虚设。
+   * 它盛放用户全局提交上来的文件，由业务侧写入；用户全局技能树是它的同级目录、单独只读
+   * 挂载，松开它只松开工作目录本身。
    */
   usersReadOnly?: boolean
   /**
@@ -906,6 +908,20 @@ export interface Config {
    * 与 `container-docker` 的同名字段逐字同义。默认 67108864。
    */
   maxOutputBytes?: number
+  /**
+   * 沙箱容器的内存上限，按 Kubernetes quantity 写法（如 `8Gi`）；省略则不限。
+   *
+   * 它管的是**命令自身**的内存，而不是被捕获的输出：`maxOutputBytes` 只约束 provider 留存的字节，
+   * 一条在内存里排序大文件的命令照样能把容器撑到节点内存耗尽。不给上限的沙箱 Pod 落在 BestEffort，
+   * 内核在内存耗尽时按 `oom_score_adj` 挑受害者，被挑中的可能是节点上任何与它无关的进程——
+   * 沙箱里跑的是模型拼出来的命令，所以这里应当有界。
+   */
+  memoryLimit?: string
+  /**
+   * 沙箱容器的核数上限（整核数）；省略则不限。与 `container-docker` 的同名字段同义，
+   * 只是写法换成 quantity：`2` 表示两核。
+   */
+  cpuLimit?: number
 }
 
 /** 沙箱内 Python 三件套的显式取值；每项各自独立，与 `container-docker` 按标记逐个设置的规则一致。 */
@@ -919,7 +935,7 @@ export interface PythonSandboxEnv {
 }
 ```
 
-Source: [`packages/tenant/container-k8s/src/index.ts:113`](../packages/tenant/container-k8s/src/index.ts)
+Source: [`packages/tenant/container-k8s/src/index.ts:130`](../packages/tenant/container-k8s/src/index.ts)
 
 <a id="deepseek-aidsh-cordis-host-runner"></a>
 
@@ -1113,6 +1129,34 @@ export interface Config {
 
 Source: [`packages/goal/goal/src/index.ts:116`](../packages/goal/goal/src/index.ts)
 
+<a id="deepseek-aidsh-goal-round-driver"></a>
+
+## `@deepseek-ai/dsh-goal-round-driver`
+
+Requires: `agents` · `goals` · `sessions`
+
+```ts config-catalog
+/**
+ * Deployment policy for a goal round that failed. A failure releases automatic
+ * continuation first — no other trigger may restart a round before the retry
+ * fires — and the bounded retry re-arms the goal after
+ * {@link RETRY_DEFAULTS.errorRetryDelayMs}. The bound, not the delay, is what
+ * stops a goal that keeps failing from spending its round budget: every retry
+ * is one admitted goal round.
+ */
+export interface Config {
+  /**
+   * Consecutive failure-driven releases retried before continuation stays
+   * released for a human resume (default 3). `0` disables automatic retry.
+   */
+  maxErrorRetries?: number
+  /** Delay before the first automatic re-arm in milliseconds; each consecutive attempt doubles it (default 5000). */
+  errorRetryDelayMs?: number
+}
+```
+
+Source: [`packages/goal/goal-round-driver/src/index.ts:40`](../packages/goal/goal-round-driver/src/index.ts)
+
 <a id="deepseek-aidsh-headless"></a>
 
 ## `@deepseek-ai/dsh-headless`
@@ -1287,7 +1331,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/host/webserver/src/index.ts:45`](../packages/host/webserver/src/index.ts)
+Source: [`packages/host/webserver/src/index.ts:52`](../packages/host/webserver/src/index.ts)
 
 <a id="deepseek-aidsh-invariants"></a>
 
@@ -2628,7 +2672,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/skill/skill-install/src/index.ts:58`](../packages/skill/skill-install/src/index.ts)
+Source: [`packages/skill/skill-install/src/index.ts:57`](../packages/skill/skill-install/src/index.ts)
 
 <a id="deepseek-aidsh-skill-tier"></a>
 
@@ -3071,7 +3115,7 @@ export interface TenantInput {
 }
 ```
 
-Source: [`packages/tenant/tenant/src/index.ts:181`](../packages/tenant/tenant/src/index.ts)
+Source: [`packages/tenant/tenant/src/index.ts:341`](../packages/tenant/tenant/src/index.ts)
 
 <a id="deepseek-aidsh-tenant-admin"></a>
 
@@ -3088,6 +3132,10 @@ export interface Config {
   usersRoot?: string
   /** Purge archives dataRoot/workspaceRoot under this root instead of deleting them. */
   archiveRoot?: string
+  /** Deployment-wide root holding the sandbox's shared system skill tree; mounted read-only. */
+  systemRoot?: string
+  /** Deployment-wide root of the Python environment the sandbox runs; mounted read-only. */
+  pythonRoot?: string
 }
 ```
 
@@ -3156,6 +3204,28 @@ export interface Config {
 ```
 
 Source: [`packages/tenant/tenant-auth-jwt/src/index.ts:23`](../packages/tenant/tenant-auth-jwt/src/index.ts)
+
+<a id="deepseek-aidsh-tenant-fs-http"></a>
+
+## `@deepseek-ai/dsh-tenant-fs-http`
+
+Requires: `tenantAuth` · `tenants`
+
+```ts config-catalog
+/** Surface configuration. */
+export interface Config {
+  /** Prefix the surface answers on. */
+  path?: string
+  /** Deployment root of the cross-case work directories; without it the `global` scope is unavailable. */
+  usersRoot?: string
+  /** Deployment root of the system tree; without it the `system` scope is unavailable. */
+  systemRoot?: string
+  /** Largest accepted `PUT` body in bytes. */
+  maxBytes?: number
+}
+```
+
+Source: [`packages/tenant/fs-http/src/index.ts:86`](../packages/tenant/fs-http/src/index.ts)
 
 <a id="deepseek-aidsh-tenant-questions"></a>
 
@@ -4202,7 +4272,6 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 - `@deepseek-ai/dsh-credentials-postgres` — requires `storage` · `storageBackendServiceKey('postgres')` ([`packages/credentials/credentials-postgres/src/index.ts`](../packages/credentials/credentials-postgres/src/index.ts))
 - `@deepseek-ai/dsh-fs-e2b` — requires `e2b` ([`packages/e2b/fs-e2b/src/index.ts`](../packages/e2b/fs-e2b/src/index.ts))
 - `@deepseek-ai/dsh-fs-observation-policy` ([`packages/fs/fs-observation-policy/src/index.ts`](../packages/fs/fs-observation-policy/src/index.ts))
-- `@deepseek-ai/dsh-goal-round-driver` — requires `agents` · `goals` · `sessions` ([`packages/goal/goal-round-driver/src/index.ts`](../packages/goal/goal-round-driver/src/index.ts))
 - `@deepseek-ai/dsh-host-directory-picker-auto` — requires `webServer` · `loader` ([`packages/host/directory-picker-auto/src/index.ts`](../packages/host/directory-picker-auto/src/index.ts))
 - `@deepseek-ai/dsh-host-directory-picker-native` ([`packages/host/directory-picker-native/src/index.ts`](../packages/host/directory-picker-native/src/index.ts))
 - `@deepseek-ai/dsh-host-plugin-inventory` — requires `loader` ([`packages/host/plugin-inventory/src/index.ts`](../packages/host/plugin-inventory/src/index.ts))

@@ -17,6 +17,7 @@ import type { Config as JwtTenantAuthConfig } from '@deepseek-ai/dsh-tenant-auth
 import { TenantAdmin } from '@deepseek-ai/dsh-tenant-admin'
 import { TenantAdminHttp } from '@deepseek-ai/dsh-tenant-admin-http'
 import { AgentHttp } from '@deepseek-ai/dsh-agent-http'
+import { TenantFsHttp } from '@deepseek-ai/dsh-tenant-fs-http'
 import { DockerContainerRuntime } from '@deepseek-ai/dsh-container-docker'
 import { K8sContainerRuntime } from '@deepseek-ai/dsh-container-k8s'
 import { ContainerSubprocessRuntime } from '@deepseek-ai/dsh-subprocess-container'
@@ -55,7 +56,9 @@ export async function createTenantApp(config: TenantAppConfig): Promise<TenantAp
   } catch (error) {
     // 启动失败：把已经挂上的块收回去，不给调用方留一个开着监听端口、连着数据库的半成品。
     // 释放自己出错只记日志，不替换掉「哪一块启动失败」——那是调用方唯一能拿去修的信息。
-    await ctx.fiber.dispose().catch((reason: unknown) => ctx.logger.error(reason))
+    await ctx.fiber.dispose().catch((reason: unknown) => {
+      ctx.logger.error(reason)
+    })
     throw error
   }
 
@@ -154,6 +157,7 @@ const REQUIRED_SERVICES: readonly {
   { probe: ctx => ctx.get('skillInstall'), what: '技能包安装', row: 'skill-install' },
   { probe: ctx => ctx.get('apiProxy'), what: '业务面的 RPC 网关', row: 'api-gateway' },
   { probe: ctx => ctx.get('agentHttp'), what: '业务面 /api', row: 'api-gateway' },
+  { probe: ctx => ctx.get('tenantFsHttp'), what: '业务面 /files', row: null },
   { probe: ctx => ctx.get('userQuestions'), what: '提问通道的能力缝', row: 'user-questions' },
   { probe: ctx => ctx.get('tenantQuestions'), what: '租户提问通道', row: 'tenant-questions' },
   { probe: ctx => ctx.get('directoryPicker'), what: '工作目录选择', row: 'directory-picker-browse' },
@@ -213,6 +217,13 @@ function staticMounts(config: TenantAppConfig): readonly StaticMount[] {
       mount: async ctx => ctx.plugin(AgentHttp, {
         ...(config.surfaces?.openapi !== undefined ? { openapi: config.surfaces.openapi } : {}),
         ...(config.surfaces?.console !== undefined ? { console: config.surfaces.console } : {}),
+      }),
+    },
+    {
+      id: 'tenant-fs-http',
+      mount: async ctx => ctx.plugin(TenantFsHttp, {
+        usersRoot: config.tenants.usersRoot,
+        ...(sandbox.systemRoot !== undefined ? { systemRoot: sandbox.systemRoot } : {}),
       }),
     },
     {

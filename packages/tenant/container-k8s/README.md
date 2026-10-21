@@ -23,7 +23,7 @@ Kubernetes 租户容器运行时：每个 (租户, 用户) 一个裸沙箱 Pod�
 
 一个复用沙箱镜像的 init 容器随后从内部校验每个挂载，它挂载同样的卷位置并检查挂载路径而非宿主源：当两者不同时，宿主路径在沙箱文件系统里本就不存在。这是唯一能区分「挂载正常」与「容器运行时因源缺失而建了目录」的检查。
 
-**技能层级以一个根目录下的挂载进入沙箱，绝不用符号链接。** 案件脚本通过枚举 `/opt/data/skills` 发现技能，而每个层级挂载在 `/opt/data/skills/<kind>`：`case` 来自 `<workspaceRoot>/shared/skills`，`user-global` 来自 `<usersRoot>/<subject>/skills`，`system` 来自 `<systemRoot>/skills`，全部只读，名称与 `skill-tier` 注册的种类一致。一个挂载只把一个源带到一个路径，因此不用链接就无法把各层级合并进一个目录，而同一个技能名可能存在于多个层级。镜像因此只创建该目录并持有一个解释器包装脚本；镜像里没有任何东西指名某个挂载路径，所以不存在会陈旧或悬空的容器内路径。
+**技能层级以一个根目录下的挂载进入沙箱，绝不用符号链接。** 案件脚本通过枚举 `/opt/data/skills` 发现技能，而每个层级挂载在 `/opt/data/skills/<kind>`：`case` 来自 `<workspaceRoot>/skills`，`user-global` 来自 `<usersRoot>/<subject>/skills`，`system` 来自 `<systemRoot>/skills`，全部只读，名称与 `skill-tier` 注册的种类一致。一个挂载只把一个源带到一个路径，因此不用链接就无法把各层级合并进一个目录，而同一个技能名可能存在于多个层级。镜像因此只创建该目录并持有一个解释器包装脚本；镜像里没有任何东西指名某个挂载路径，所以不存在会陈旧或悬空的容器内路径。
 
 ## 规格指纹
 
@@ -31,11 +31,11 @@ Kubernetes 租户容器运行时：每个 (租户, 用户) 一个裸沙箱 Pod�
 
 ## 配置
 
-`namespace` 与 `image` 必填，且在加载时校验。每次 `kubectl` 调用都限定到 `namespace`，provider 不在别处创建、读取或删除沙箱 Pod，因此一个 provider 实例在其整个存活期内只在一个 namespace 中工作。每个集群都拥有的四个 namespace（`default`、`kube-system`、`kube-public`、`kube-node-lease`）在加载时被拒绝：它们在任何集群上都是错的，且仅凭配置即可判定。属于某个集群的名字——业务 namespace、某存储组件的 namespace——被有意排除在外，因为本包无法知道它们；在这些名字上让错误取值无害的是集群：它为宿主 ServiceAccount 准备的 Role 只够到一个 namespace。其余全部可选并带 schema 默认值：`kubectlBinary`、`imagePullPolicy`、`toolExecPort`、`workDir`、`sharedReadOnly`、`usersReadOnly`、`usersRoot`、`systemRoot`、`toolsRoot`、`pythonRoot`、`command`、`env`、`idleTimeoutMs`、`maxOutputBytes`、`sandboxCacheTtlMs`、`memoryLimit`、`cpuLimit`，以及 `cliTimeoutMs` / `startTimeoutMs` / `readyPollMs` 三个上限。
+`namespace` 与 `image` 必填，且在加载时校验。每次 `kubectl` 调用都限定到 `namespace`，provider 不在别处创建、读取或删除沙箱 Pod，因此一个 provider 实例在其整个存活期内只在一个 namespace 中工作。每个集群都拥有的四个 namespace（`default`、`kube-system`、`kube-public`、`kube-node-lease`）在加载时被拒绝：它们在任何集群上都是错的，且仅凭配置即可判定。属于某个集群的名字——业务 namespace、某存储组件的 namespace——被有意排除在外，因为本包无法知道它们；在这些名字上让错误取值无害的是集群：它为宿主 ServiceAccount 准备的 Role 只够到一个 namespace。其余全部可选并带 schema 默认值：`kubectlBinary`、`imagePullPolicy`、`toolExecPort`、`workDir`、`caseReadOnly`、`usersReadOnly`、`usersRoot`、`systemRoot`、`toolsRoot`、`pythonRoot`、`command`、`env`、`idleTimeoutMs`、`maxOutputBytes`、`sandboxCacheTtlMs`、`memoryLimit`、`cpuLimit`，以及 `cliTimeoutMs` / `startTimeoutMs` / `readyPollMs` 三个上限。
 
-`sharedReadOnly` 与 `usersReadOnly` 默认都为真：`/shared` 是一个案件下所有用户共用的目录，`/global` 是该 subject 的跨案件目录，两者都由业务侧写入，沙箱只是读取方。让它们可写意味着一个用户的沙箱能改到同案件其他用户的输入，而且 `/shared/skills`、`/global/skills` 就在它们下面——可写时那两层只读的技能挂载形同虚设。默认只读时，想改这两棵树的沙箱侧写入会以权限错误失败，这是有意的：产物与技能应当走业务侧的管理接口或工具。`<workspaceRoot>/users/<subject>`（`/workspace`）与容器本地的工作目录仍然可写。
+`caseReadOnly` 与 `usersReadOnly` 默认都为真：`/case` 是一个案件下所有用户共用的工作目录，`/global` 是该 subject 的跨案件工作目录，两者都由业务侧写入，沙箱只是读取方。让它们可写意味着一个用户的沙箱能改到同案件其他用户的输入。默认只读时，想改这两棵树的沙箱侧写入会以权限错误失败，这是有意的：产物与技能应当走业务侧的管理接口或工具。`<workspaceRoot>/users/<subject>/work`（`/workspace`）、`<workspaceRoot>/users/<subject>/sessions`（`/sessions`）与容器本地的工作目录仍然可写。
 
-`workDir` 是执行容器的默认工作目录（默认 `/tmp/work`）：provider 在沙箱里把它挂成一个 `emptyDir` 卷。容器根文件系统只读，不是挂载点就不存在。它服务的是不带会话的调用——provider 自己的探针、宿主的工具调用——因为带会话的命令不落在这里：provider 把工作目录钉在 `/workspace/<会话 id>`，并在命令环境里给出同一个值的 `DSH_WORKDIR`。那一层在挂载进来的成员工作区上，所以同一个人的会话之间不抢同一层，容器销毁后它仍然在、会话里可以继续用。宿主的 `sandbox.workDir` 仍要与这里的取值一致：不带会话的 exec 用的就是它。按默认位置写缓存的库在沙箱里拿不到可写目录——根文件系统只读，`HOME` 是 `/root`——所以 provider 默认把 `MPLCONFIGDIR` 指向 `/tmp/matplotlib`，与 `/tmp` 那一个 `emptyDir` 同一个位置；`env` 里给出同名项时以部署的取值为准。
+`workDir` 是执行容器的默认工作目录（默认 `/tmp/work`）：provider 在沙箱里把它挂成一个 `emptyDir` 卷。容器根文件系统只读，不是挂载点就不存在。它服务的是不带会话的调用——provider 自己的探针、宿主的工具调用——因为带会话的命令不落在这里：provider 把工作目录钉在 `/sessions/<会话 id>`，并在命令环境里给出同一个值的 `DSH_WORKDIR`。那一层在挂载进来的用户会话根上，所以同一个人的会话之间不抢同一层，容器销毁后它仍然在、会话里可以继续用。宿主的 `sandbox.workDir` 仍要与这里的取值一致：不带会话的 exec 用的就是它。按默认位置写缓存的库在沙箱里拿不到可写目录——根文件系统只读，`HOME` 是 `/root`——所以 provider 默认把 `MPLCONFIGDIR` 指向 `/tmp/matplotlib`，与 `/tmp` 那一个 `emptyDir` 同一个位置；`env` 里给出同名项时以部署的取值为准。
 
 `workspaceRoot` 不是配置。一个 provider 实例服务所有租户，而每个租户拥有各自的工作区目录树，因此根目录从租户记录读取并传给 `sandboxMounts`；一个 provider 级取值最多只对一个租户是对的。
 

@@ -327,6 +327,9 @@
       "path": "../fs-container/tsconfig.json"
     },
     {
+      "path": "../fs-http/tsconfig.json"
+    },
+    {
       "path": "../object-store/tsconfig.json"
     },
     {

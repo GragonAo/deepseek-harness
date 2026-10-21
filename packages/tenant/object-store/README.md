@@ -63,11 +63,12 @@ plugins:
 
 | 模型写入 | 本插件读取的宿主路径 | 对象键 |
 |---|---|---|
-| `/workspace/<rel>` | `<tenant.workspaceRoot>/users/<subject>/<rel>` | `<case>/<subject>/…` |
-| `/shared/<rel>` | `<tenant.workspaceRoot>/shared/<rel>` | `<case>/<subject>/…` |
-| `/global/<rel>` | `<usersRoot>/<subject>/<rel>` | `<case>/<subject>/…` |
+| `/workspace/<rel>` | `<tenant.workspaceRoot>/users/<subject>/work/<rel>` | `<case>/<subject>/…` |
+| `/sessions/<sessionId>/<rel>` | `<tenant.workspaceRoot>/users/<subject>/sessions/<sessionId>/<rel>` | `<case>/<subject>/…` |
+| `/case/<rel>` | `<tenant.workspaceRoot>/work/<rel>` | `<case>/<subject>/…` |
+| `/global/<rel>` | `<usersRoot>/<subject>/work/<rel>` | `<case>/<subject>/…` |
 
-这些挂载之外的路径会被拒绝；解析出的文件在跟随符号链接之后还会被复查，因此挂载点内植入的链接读不到挂载之外。不存在的路径按不存在报告；宿主解析不了它时——权限被拒、符号链接成环、名字过长——报告的是那个失败。
+相对路径按会话工作目录解析——它就在 `/sessions/<会话 id>`，所以模型在会话目录里产出的文件不必先搬到挂载路径下。这些挂载之外的路径会被拒绝；解析出的文件在跟随符号链接之后还会被复查，因此挂载点内植入的链接读不到挂载之外。不存在的路径按不存在报告；宿主解析不了它时——权限被拒、符号链接成环、名字过长——报告的是那个失败。
 
 ## 隔离
 
@@ -95,6 +96,6 @@ plugins:
 - **没有列举与删除工具。** 模型只能发布；对象键由返回值与桶里的键前缀决定，清理靠存储侧的生命周期规则。
 - **公开性只在发布时校验一次。** 桶策略后来被改窄，已经发出去的地址会失效，本服务不追踪也不重试。
 - **桶与桶策略不由本服务创建。** 建桶、开匿名只读、配生命周期都是部署步骤（见上面的策略片段）；服务只写对象。
-- **宿主必须与沙箱看到同一份存储。** 本插件按宿主路径读取文件，因此部署要把沙箱工作区所在的那份存储（PVC 或目录）挂到配置里的 `workspaceRoot` / `usersRoot` 上。挂的是另一棵树时表现为「文件在沙箱里确实存在，工具却报不存在」——沙箱内的 `/workspace`、`/shared`、`/global` 来自 PVC 的 `tenants/<案件>/workspace/{users/<主体>,shared}`，而宿主侧同样路径指向文件系统另一处。
+- **宿主必须与沙箱看到同一份存储。** 本插件按宿主路径读取文件，因此部署要把沙箱工作区所在的那份存储（PVC 或目录）挂到配置里的 `workspaceRoot` / `usersRoot` 上。挂的是另一棵树时表现为「文件在沙箱里确实存在，工具却报不存在」——沙箱内的 `/workspace`、`/sessions`、`/case`、`/global` 来自 PVC 的 `tenants/<案件>/workspace/{work,users/<主体>/{work,sessions}}`，而宿主侧同样路径指向文件系统另一处。
 - **权威地址在工具结果里，不在模型回复里。** 结果已经把地址写成可直接点的 markdown 链接并要求原样照抄，但模型仍可能改写它（实测出现过自己编一个更好看的域名）。业务前端渲染下载项时应以工具结果里的 `url` 字段为准，不要把回复正文里的地址当作唯一来源。
 - **秘密地址不等于授权。** 任何知道键的人都能下载；需要按用户鉴权的下载要在存储侧签名或由业务前端代理。

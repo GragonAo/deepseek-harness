@@ -43,11 +43,10 @@
  * @module @deepseek-ai/dsh-agent-http
  */
 
-import { Buffer } from 'node:buffer'
-import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { RpcId, toFetchHandler } from '@deepseek-ai/dsh-host-apiproxy'
 import { clientRequestSchema } from '@deepseek-ai/dsh-host-apiproxy/api/rpc.schema'
+import { bridgeFetchRequest } from '@deepseek-ai/dsh-host-webserver'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import z from '@deepseek-ai/schemastery'
 import { ZodError } from 'zod'
@@ -141,8 +140,8 @@ export class AgentHttp extends Service {
       const route: WebRoute = {
         kind: 'prefix',
         path: API_PATH,
-        handler: (req, res) => serveRequest(
-          req, res, request => this.fetch(request),
+        handler: (req, res) => bridgeFetchRequest(
+          req, res, { fetch: request => this.fetch(request) },
           this.config.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES,
         ),
       }
@@ -390,74 +389,6 @@ function sessionNotFound(rpcId: string, sessionId: string): Response {
       },
     },
   })
-}
-
-/**
- * Bridge one node:http request to the carrier's fetch handler. The request
- * body is buffered (bounded by `maxRequestBodyBytes`); the response — including
- * SSE bodies — streams back with backpressure, and a client disconnect aborts
- * the handler's signal.
- * @param req - incoming node:http request (fully read before dispatch).
- * @param res - response the bridge writes and owns to completion.
- * @param handler - fetch-shaped carrier the request is dispatched to.
- * @param maxRequestBodyBytes - maximum bytes buffered before a 413.
- */
-async function serveRequest(
-  req: IncomingMessage,
-  res: ServerResponse,
-  handler: (request: Request) => Promise<Response>,
-  maxRequestBodyBytes: number,
-): Promise<void> {
-  const abort = new AbortController()
-  res.on('close', () => {
-    if (!res.writableEnded) abort.abort()
-  })
-  const declaredLength = req.headers['content-length']
-  if (declaredLength !== undefined && Number(declaredLength) > maxRequestBodyBytes) {
-    res.writeHead(413, { connection: 'close' })
-    res.end()
-    req.destroy()
-    return
-  }
-  const chunks: Buffer[] = []
-  let received = 0
-  for await (const chunk of req) {
-    const buffer = chunk as Buffer
-    received += buffer.byteLength
-    if (received > maxRequestBodyBytes) {
-      res.writeHead(413, { connection: 'close' })
-      res.end()
-      req.destroy()
-      return
-    }
-    chunks.push(buffer)
-  }
-  const request = new Request(new URL(req.url ?? '/', 'http://dsh.internal'), {
-    method: req.method ?? 'GET',
-    headers: Object.fromEntries(Object.entries(req.headers).filter(([, value]) => typeof value === 'string') as [string, string][]),
-    ...chunks.length > 0 ? { body: Buffer.concat(chunks) } : {},
-    signal: abort.signal,
-  })
-  const response = await handler(request)
-  res.writeHead(response.status, Object.fromEntries(response.headers.entries()))
-  if (response.body === null) {
-    res.end()
-    return
-  }
-  for await (const chunk of response.body) {
-    if (!res.write(chunk)) {
-      await new Promise<void>((resolve) => {
-        const done = (): void => {
-          res.off('drain', done)
-          res.off('close', done)
-          resolve()
-        }
-        res.once('drain', done)
-        res.once('close', done)
-      })
-    }
-  }
-  res.end()
 }
 
 /**

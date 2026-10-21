@@ -335,6 +335,7 @@
     { "path": "./packages/tenant/fs-container" },
     { "path": "./packages/tenant/terminal-container" },
     { "path": "./packages/tenant/agent-http" },
+    { "path": "./packages/tenant/fs-http" },
     { "path": "./packages/tenant/tenant-questions" },
     { "path": "./packages/tenant/tenant-app" },
     { "path": "./apps/cli" }

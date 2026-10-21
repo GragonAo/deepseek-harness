@@ -32,7 +32,7 @@ Default roots are resolved in this provider's rank order:
 
 | Rank | Source | Path |
 |---|---|---|
-| 30 | `case` | `<tenant.workspaceRoot>/shared/skills` |
+| 30 | `case` | `<tenant.workspaceRoot>/skills` |
 | 40 | `user-global` | `<usersRoot>/<sub>/skills` |
 | 50 | `system` | `<systemSkillsDir>` or `$DSH_HOME/system/skills` |
 | 100 | `project-dsh` | `<projectRoot>/.dsh/skills` |

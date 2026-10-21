@@ -345,11 +345,11 @@ describe('observed pod state', () => {
 
   it('explains an init container that refused a mount instead of reporting a bare phase', () => {
     const status = parsePodStatus(JSON.stringify({
-      metadata: {}, status: { phase: 'Pending', conditions: [{ type: 'Ready', status: 'False' }], initContainerStatuses: [{ state: { terminated: { reason: 'Error', message: 'MISSING /ws/shared' } } }] },
+      metadata: {}, status: { phase: 'Pending', conditions: [{ type: 'Ready', status: 'False' }], initContainerStatuses: [{ state: { terminated: { reason: 'Error', message: 'MISSING /ws/case' } } }] },
     }))
     expect(status.phase).toBe('Pending')
     expect(status.ready).toBe(false)
-    expect(status.detail).toContain('MISSING /ws/shared')
+    expect(status.detail).toContain('MISSING /ws/case')
   })
 })
 

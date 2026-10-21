@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Ambient multi-tenant configuration tier roots and per-namespace merge.
  *
  * The multi-tenant carrier derives four config directories from the current
@@ -10,9 +10,9 @@
  * `$DSH_HOME/system/config`). `merged(ns)` reads the per-namespace file
  * (`<ns>.yaml`/`<ns>.yml`/`<ns>.json`) from each tier deepest-first and
  * deep-merges them, so a value in a nearer tier overwrites a same-named value
- * in a farther tier while distinct keys union. The session tier resolves from
- * the initiating agent's `session.header.cwd` when one is ambient and falls
- * back to the tenant workspace root otherwise. Every tier root is a host path
+ * in a farther tier while distinct keys union. The session tier exists only while
+ * an agent is ambient and reads that agent's `session.header.cwd`, the session's
+ * own directory under `/sessions`. Every tier root is a host path
  * outside the tenant container, so it is flagged trusted host for host I/O.
  *
  * @module @deepseek-ai/dsh-settings-tier
@@ -152,7 +152,7 @@ function readConfigSection(dir: string, ns: SettingsNamespace): Record<string, u
  * already a tier of its own, so falling back to it would make two tiers read one directory.
  */
 function ambientSessionCwd(ctx: Context): string | undefined {
-  const agents = ctx.get('agents') as AgentRegistry | undefined
+  const agents: AgentRegistry | undefined = ctx.get('agents')
   if (agents === undefined) return undefined
   try {
     return agents.currentInitiator()?.session.header.cwd

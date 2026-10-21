@@ -37,6 +37,7 @@ interface Harness {
   readonly ctx: Context
   readonly tenant: Tenant
   readonly workspace: string
+  readonly sessions: string
   readonly global: string
   readonly s3: FakeS3
 }
@@ -54,9 +55,11 @@ async function boot(options: {
   const root = await mkdtemp(join(tmpdir(), 'dsh-object-store-'))
   roots.push(root)
   const workspaceRoot = join(root, 'cases', 'acme', 'workspace')
-  const workspace = join(workspaceRoot, 'users', 'user-1')
-  const global = join(root, 'users', 'user-1')
+  const workspace = join(workspaceRoot, 'users', 'user-1', 'work')
+  const sessions = join(workspaceRoot, 'users', 'user-1', 'sessions')
+  const global = join(root, 'users', 'user-1', 'work')
   await mkdir(workspace, { recursive: true })
+  await mkdir(sessions, { recursive: true })
   await mkdir(global, { recursive: true })
   const s3 = await startFakeS3({ publicRead: options.publicRead ?? true })
   servers.push(s3)
@@ -72,7 +75,7 @@ async function boot(options: {
     maxBytes: options.maxBytes ?? 1024 * 1024,
     verifyPublic: options.verifyPublic ?? true,
   })
-  return { ctx, tenant: { id: TenantId('acme'), name: 'acme', dataRoot: join(root, 'data'), workspaceRoot }, workspace, global, s3 }
+  return { ctx, tenant: { id: TenantId('acme'), name: 'acme', dataRoot: join(root, 'data'), workspaceRoot }, workspace, sessions, global, s3 }
 }
 
 /**
@@ -143,6 +146,18 @@ describe('object_publish', () => {
     expect(value.key).toMatch(/^acme\/user-1\/\d{8}_\d{6}_导出\.csv$/)
     expect(value.source_path).toBe('/global/导出.csv')
     expect(text(await call(harness, { file_path: '/etc/passwd' }))).toContain('is not inside the paths this subject can publish from')
+  })
+
+  it('publishes a file the model left in its own session directory', async () => {
+    const harness = await boot()
+    const sessionDir = join(harness.sessions, 'session-1')
+    await mkdir(sessionDir, { recursive: true })
+    await writeFile(join(sessionDir, 'draft.md'), '# draft')
+    const result = await call(harness, { file_path: '/sessions/session-1/draft.md' })
+    expect(result.isError).toBe(false)
+    const value = result.value as { key: string; source_path: string }
+    expect(value.key).toMatch(/^acme\/user-1\/\d{8}_\d{6}_draft\.md$/)
+    expect(value.source_path).toBe('/sessions/session-1/draft.md')
   })
 
   it('reports a missing file as missing and a directory as not a regular file', async () => {

@@ -125,6 +125,7 @@
     "@deepseek-ai/dsh-tenant-admin-postgres": "workspace:^",
     "@deepseek-ai/dsh-tenant-auth": "workspace:^",
     "@deepseek-ai/dsh-tenant-auth-jwt": "workspace:^",
+    "@deepseek-ai/dsh-tenant-fs-http": "workspace:^",
     "@deepseek-ai/dsh-object-store": "workspace:^",
     "@deepseek-ai/dsh-tenant-questions": "workspace:^",
     "@deepseek-ai/dsh-token-meter": "workspace:^",
