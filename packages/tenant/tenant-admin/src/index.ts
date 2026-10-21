@@ -22,7 +22,7 @@ import {
   TenantId,
   requireScope,
 } from '@deepseek-ai/dsh-tenant'
-import type { Tenant } from '@deepseek-ai/dsh-tenant'
+import { tenantDirectories, type Tenant } from '@deepseek-ai/dsh-tenant'
 import type { TenantRecordStore } from './store.ts'
 import type { TenantSchemaLifecycle } from './schema.ts'
 
@@ -79,6 +79,10 @@ export interface Config {
   usersRoot?: string
   /** Purge archives dataRoot/workspaceRoot under this root instead of deleting them. */
   archiveRoot?: string
+  /** Deployment-wide root holding the sandbox's shared system skill tree; mounted read-only. */
+  systemRoot?: string
+  /** Deployment-wide root of the Python environment the sandbox runs; mounted read-only. */
+  pythonRoot?: string
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -99,12 +103,6 @@ function assertSafeSegment(value: string, what: string): void {
 }
 
 /**
- * Top-level directory names one ambient tier carries: the case-shared tree under
- * `<workspaceRoot>/shared` and a member's `/global` tree under `usersRoot`.
- */
-const TIER_DIRS = ['config', 'skills', 'tools'] as const
-
-/**
  * Tenant administration service. Load with a tenant registry always present;
  * persistence and partition lifecycle are optional providers read by key so a
  * test assembly can run the surface ephemeral.
@@ -115,18 +113,24 @@ export class TenantAdmin extends Service {
     adminScope: z.string().default(DEFAULT_TENANT_ADMIN_SCOPE),
     usersRoot: z.string(),
     archiveRoot: z.string(),
+    systemRoot: z.string(),
+    pythonRoot: z.string(),
   })
 
   private readonly registry = this.ctx.tenants
   private readonly adminScope: string
   private readonly usersRoot: string | undefined
   private readonly archiveRoot: string | undefined
+  private readonly systemRoot: string | undefined
+  private readonly pythonRoot: string | undefined
 
   constructor(ctx: Context, readonly config: Config) {
     super(ctx, 'tenantAdmin')
     this.adminScope = config.adminScope ?? DEFAULT_TENANT_ADMIN_SCOPE
     this.usersRoot = config.usersRoot
     this.archiveRoot = config.archiveRoot
+    this.systemRoot = config.systemRoot
+    this.pythonRoot = config.pythonRoot
     // A durable store is authoritative over the config seed: persisted records
     // overwrite same-id seeds, and records absent from config are re-added.
     // The store is an optional provider, and composition does not order rows, so
@@ -142,13 +146,20 @@ export class TenantAdmin extends Service {
     })
   }
 
-  /** Load persisted records into the live registry (store wins over config seeds). */
+  /**
+   * Load persisted records into the live registry (store wins over config seeds), then
+   * create the directories the sandbox mounts: the deployment-wide roots and every
+   * registered tenant's tree. Runs again when a late provider replaces the store, so
+   * directory creation is idempotent and the deployment needs no pre-created subdirectory.
+   */
   private async hydrate(): Promise<void> {
     const records = await this.store?.load()
     for (const record of records ?? []) {
       if (this.registry.get(record.id) === undefined) this.registry.register(record)
       else this.registry.update(record)
     }
+    await this.mkdirAll(tenantDirectories({ systemRoot: this.systemRoot, pythonRoot: this.pythonRoot }))
+    for (const record of this.registry.list()) await this.bootstrapTenantDirs(record)
   }
 
   /** Fail closed unless the ambient token carries the administrative scope. */
@@ -399,11 +410,25 @@ export class TenantAdmin extends Service {
 
   /** Create a tenant's host directories plus every member's host directories. */
   private async bootstrapTenantDirs(record: Tenant): Promise<void> {
-    await fs.mkdir(record.dataRoot, { recursive: true })
-    await Promise.all(TIER_DIRS.map(dir => fs.mkdir(join(record.workspaceRoot, 'shared', dir), { recursive: true })))
-    for (const subject of record.members ?? []) {
-      await this.bootstrapUserDirs(subject, record.workspaceRoot)
-    }
+    await this.mkdirAll(tenantDirectories({
+      dataRoot: record.dataRoot,
+      workspaceRoot: record.workspaceRoot,
+      toolsRoot: record.toolsRoot,
+      usersRoot: this.usersRoot,
+      archiveRoot: this.archiveRoot,
+      systemRoot: this.systemRoot,
+      pythonRoot: this.pythonRoot,
+      members: record.members,
+    }))
+  }
+
+  /**
+   * Create every directory a layout list names, each with its parents.
+   *
+   * @param dirs - the directories to create.
+   */
+  private async mkdirAll(dirs: readonly string[]): Promise<void> {
+    await Promise.all(dirs.map(dir => fs.mkdir(dir, { recursive: true })))
   }
 
   /**
@@ -419,12 +444,7 @@ export class TenantAdmin extends Service {
    *   so has no per-tenant directory to name.
    */
   private async bootstrapUserDirs(subject: string, workspaceRoot?: string): Promise<void> {
-    if (workspaceRoot !== undefined) {
-      await fs.mkdir(join(workspaceRoot, 'users', subject), { recursive: true })
-    }
-    if (this.usersRoot === undefined) return
-    const root = join(this.usersRoot, subject)
-    await Promise.all(TIER_DIRS.map(dir => fs.mkdir(join(root, dir), { recursive: true })))
+    await this.mkdirAll(tenantDirectories({ workspaceRoot, usersRoot: this.usersRoot, members: [subject] }))
   }
 
   /**

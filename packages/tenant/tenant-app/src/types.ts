@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 租户服务的启动配置类型。
  *
  * 这里只放类型：全部字段在 {@link loadTenantAppConfig} 里解析并校验。配置的归属很明确——
@@ -92,12 +92,12 @@ export interface SandboxLayersConfig {
    */
   readonly workDir?: string
   /**
-   * `/shared`（案件级共享目录）是否对沙箱只读，省略即只读。
+   * `/case`（案件工作目录）是否对沙箱只读，省略即只读。
    *
    * 它由一个案件下的所有用户共用，业务侧通过管理接口写入；沙箱可写就意味着任何用户的沙箱都能
-   * 改到别人的输入，而且 `/shared/skills` 就在它下面，那一层只读的技能挂载会失去意义。
+   * 改到别人的输入，而且 `/skills` 就在它下面，那一层只读的技能挂载会失去意义。
    */
-  readonly sharedReadOnly?: boolean
+  readonly caseReadOnly?: boolean
   /**
    * `/global`（该 subject 的跨案件目录）是否对沙箱只读，省略即只读。
    *
@@ -186,6 +186,10 @@ export interface K8sSandboxConfig extends SandboxLayersConfig {
   readonly env?: Readonly<Record<string, string>>
   /** tool-exec 镜像给命令的 `PATH`；须与镜像一致。 */
   readonly imagePath?: string
+  /** 内存上限（Kubernetes quantity 写法，如 `8Gi`）；不配则不限，此时沙箱 Pod 落在 BestEffort。 */
+  readonly memoryLimit?: string
+  /** CPU 上限（整核数）；不配则不限。 */
+  readonly cpuLimit?: number
   /** `kubectl` 单次调用的上限，单位毫秒。 */
   readonly cliTimeoutMs?: number
   /** 轮询 Pod 阶段的间隔，单位毫秒。 */

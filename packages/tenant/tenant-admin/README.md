@@ -19,7 +19,7 @@
 ## 隔离与生命周期
 
 - **创建时建分区。** schema 生命周期接缝会创建租户分区（Postgres 下为 `tenantPartitionName(id)`），使新租户的提供方不与其它租户共享存储。
-- **创建时建目录。** `bootstrapTenantDirs` 创建 `dataRoot`、案件共享层 `workspaceRoot/shared/{config,skills,tools}`，以及每个已准入成员的 `workspaceRoot/users/<sub>` 与 `usersRoot/<sub>/{config,skills,tools}`。这些路径都是该主体沙箱的绑定挂载源，因此由预置流程创建，而不是留给容器运行时在挂载点建一个空目录。
+- **创建时建目录。** `bootstrapTenantDirs` 照着 `@deepseek-ai/dsh-tenant` 的 `tenantDirectories` 建树：`dataRoot`、归档根、`toolsRoot`、案件共享层 `workspaceRoot/shared/{config,skills,tools}`、每个已准入成员的 `workspaceRoot/users/<sub>` 与 `usersRoot/<sub>/{config,skills,tools}`，以及部署级的 `systemRoot/skills` 与 `pythonRoot`。这些路径都是沙箱的绑定挂载源，因此由预置流程创建，而不是留给容器运行时在挂载点建一个空目录。清单与执行层的挂载源同源，所以两边不会各记一份；某个根缺席表示该部署没有配置它。
 - **归档而绝不删除。** `remove(id, purge: true)` 先删除分区，再把 `dataRoot` 与 `workspaceRoot` 移入 `archiveRoot/<id>-<timestamp>/`。purge 是归档而非删除宿主机数据。
 - **跨文件系统归档靠复制。** 容器化部署里归档根与租户的各个根是两个独立的绑定挂载源，因此 `rename` 会报 `EXDEV`，移动退化为递归复制再删除源目录。文件权限与时间戳得以保留，符号链接按原样复制，因此目录树内的相对链接在归档位置仍然可解析。只有「目录本就不存在」会被跳过：其余任何归档失败都会让 `remove` 调用失败，而不是返回 `{ removed: true }`。
 - **用户即 JWT 主体。** 没有用户表：准入是每个租户的 `members` 列表，主体是任何 token `sub` 能解析出来的人。`usersEnsure` 在首次使用前物化用户层目录。
@@ -39,6 +39,8 @@
     adminScope: dsh:tenant-admin
     usersRoot: /opt/dsh/users
     archiveRoot: /opt/dsh/archive
+    systemRoot: /opt/dsh/system
+    pythonRoot: /opt/dsh/pyenv
 ```
 
 ## Model Experience

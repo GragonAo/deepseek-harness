@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 对象存储后端与 `object_publish` 工具。
  *
  * 模型在沙箱里交付不了任何东西：沙箱是容器，用户只通过业务前端访问该部署。本插件把模型生成的
@@ -148,7 +148,7 @@ function currentScope(policy: Policy): Scope {
   const user = String(requireUser())
   const mounts: Mount[] = [
     { container: '/workspace', host: resolveHost(tenant.workspaceRoot, 'users', user) },
-    { container: '/shared', host: resolveHost(tenant.workspaceRoot, 'shared') },
+    { container: '/case', host: resolveHost(tenant.workspaceRoot, 'work') },
   ]
   if (policy.usersRoot !== undefined) mounts.push({ container: '/global', host: resolveHost(policy.usersRoot, user) })
   return { caseId: segment(tenant.id), userId: segment(user), mounts }
@@ -271,7 +271,7 @@ export function apply(ctx: Context, config: Config): void {
       file_path: {
         type: 'string',
         required: true,
-        description: 'The file to publish, as this sandbox sees it. Only the mounted paths (/workspace, /shared, /global) are readable here, so pass an absolute path such as /workspace/报告.md; a file that exists only in the working directory must be written into a mounted path first.',
+        description: 'The file to publish, as this sandbox sees it. Only the mounted paths (/workspace, /case, /global) are readable here, so pass an absolute path such as /workspace/报告.md; a file that exists only in the working directory must be written into a mounted path first.',
       },
       title: {
         type: 'string',

@@ -1,4 +1,4 @@
-# 生产形态：租户服务宿主在 k8s 里的 Secret + Deployment + Service。
+﻿# 生产形态：租户服务宿主在 k8s 里的 Secret + Deployment + Service。
 #
 # 用法（在部署机上）：
 #
@@ -64,8 +64,8 @@ stringData:
       archiveRoot: /opt/dsh/.dsh/archive
       defaults:
         dataRoot: /opt/dsh/.dsh/tenants
-        workspaceRoot: /opt/dsh/tenants
-        toolsRoot: /opt/dsh/tools
+        workspaceRoot: /opt/dsh/.dsh/tenants
+        toolsRoot: /opt/dsh/.dsh/tools
         network: none
 
     permissions:
@@ -95,17 +95,17 @@ stringData:
       # 执行容器的工作目录：/tmp 是沙箱自己的 emptyDir，不是挂载点。模型按相对路径写出的中间产物
       # 随沙箱销毁而消失，不会落进用户案件的工作目录；交付物由模型显式写到挂载的 /workspace。
       workDir: /tmp/work
-    # 案件共享目录与用户跨案件目录对沙箱只读：它们由业务侧写入，沙箱只是读取方。
-    # 可写就意味着一个用户的沙箱能改到同案件其他用户的输入。
-    sharedReadOnly: true
-    usersReadOnly: true
+    # 案件工作目录与用户跨案件工作目录对沙箱只读：它们由业务侧写入，沙箱只是读取方。
+      # 可写就意味着一个用户的沙箱能改到同案件其他用户的输入。
+      caseReadOnly: true
+      usersReadOnly: true
       # 沙箱工作区是 RWX PVC：同一租户的多个沙箱 Pod 共用一棵工作区树。
       workspaceClaim: dsh-workspace
       claimRoot: /opt/dsh
       systemRoot: /opt/dsh/.dsh/system
       # 沙箱镜像里没有 Python：解释器与全部依赖来自宿主这个目录。节点上读不到时加载直接失败。
       pythonRoot: /opt/dsh/.dsh/pyenv
-      toolsRoot: /opt/dsh/tools
+      toolsRoot: /opt/dsh/.dsh/tools
       # 沙箱内 Python 的三条路径：节点目录宿主读不到，所以逐项给出。
       pythonEnv:
         binDir: /opt/dsh/.dsh/pyenv/bin
@@ -114,6 +114,11 @@ stringData:
       # 空闲预算：注入沙箱的 DSH_TOOL_EXEC_IDLE_MS，沙箱自己判定空闲后退出，退出后 Pod 停在
       # Succeeded，由宿主下一次启动时的收尸清掉。宿主不自己计时：多副本下它会删掉别人在用的沙箱。
       idleTimeoutMs: 900000
+      # 沙箱容器的内存上界：落成 Pod 容器的 limits。越界时内核杀的是这个沙箱自己的 cgroup，
+      # 而不是节点上别的负载。不配就没有内存上界（Pod 落在 BestEffort），生产必须配。
+      # 有的集群会把 limits 回填成 requests，于是它同时是预留量、并参与能否调度的判断：
+      # 本部署的节点 allocatable 只有 4 核，所以只锁内存、不配 cpuLimit。
+      memoryLimit: 6Gi
       startTimeoutMs: 180000
       toolTimeoutMs: 600000
 
@@ -121,7 +126,7 @@ stringData:
       # 呈现方式：both 两种形态同时给——每个工具的原生 schema，加上 run_code 与一份生成的 SDK
       # 类型声明，模型按当下这件事挑一种；code 只留 run_code 通道；native 只给原生 schema。
       # 租户栈的默认值是 both，读一个文件、问一句这类会话不必写程序。上百个 MCP 工具的原生 schema
-      # 靠案件级可见工具清单压住：`<tenant.workspaceRoot>/shared/tools/restriction.yaml`
+      # 靠案件级可见工具清单压住：`<tenant.workspaceRoot>/tools/restriction.yaml`
       # （allow/deny 两份全局工具名列表，见 @deepseek-ai/dsh-tools-restriction 的 README），
       # 它同时缩小原生 schema 段与 SDK 段。
       mode: both
@@ -256,8 +261,8 @@ spec:
               subPath: tenant.config.yaml
               readOnly: true
       volumes:
-        # 与沙箱挂同一份 PVC：沙箱的 /workspace、/shared、/global、/tools、.dsh/system 与 .dsh/pyenv
-        # 都取自它，而它的根布局 tenants/<案件>/workspace/{users/<主体>,shared} + .dsh/{users,system,pyenv}
+        # 与沙箱挂同一份 PVC：沙箱的 /workspace、/case、/sessions、/global、/tools、.dsh/system 与 .dsh/pyenv
+        # 都取自它，而它的根布局 tenants/<案件>/workspace/{work,users/<主体>/{work,sessions}} + .dsh/{users,system,pyenv}
         # + tools 与配置里的 workspaceRoot/usersRoot/systemRoot/pythonRoot/toolsRoot 逐项对应。
         # 宿主改挂 hostPath 时只看得见另一棵树：沙箱产出的文件在宿主侧一律不存在，发布工具会如实报
         # 不存在，因此「宿主要读沙箱文件」这条链路依赖这里必须是同一份存储。

@@ -1,4 +1,4 @@
-import { join, resolve } from 'node:path'
+﻿import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { apply as applyToolTier } from '@deepseek-ai/dsh-tools-tier'
@@ -35,7 +35,7 @@ describe('tool-tier ambient tier resolution', () => {
     const ctx = boot('/users', '/sys/tools')
     try {
       expect(roots(ctx, 'acme', 'user-1')).toEqual([
-        { kind: 'case', path: join('/workspace/acme', 'shared', 'tools'), rank: CASE_TOOL_RANK, trustedHost: true },
+        { kind: 'case', path: join('/workspace/acme', 'tools'), rank: CASE_TOOL_RANK, trustedHost: true },
         { kind: 'user-global', path: join('/users', 'user-1', 'tools'), rank: USER_GLOBAL_TOOL_RANK, trustedHost: true },
         { kind: 'system', path: resolve('/sys/tools'), rank: SYSTEM_TOOL_RANK, trustedHost: true },
       ])

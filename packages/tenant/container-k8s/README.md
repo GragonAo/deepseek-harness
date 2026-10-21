@@ -31,11 +31,11 @@ Kubernetes 租户容器运行时：每个 (租户, 用户) 一个裸沙箱 Pod�
 
 ## 配置
 
-`namespace` 与 `image` 必填，且在加载时校验。每次 `kubectl` 调用都限定到 `namespace`，provider 不在别处创建、读取或删除沙箱 Pod，因此一个 provider 实例在其整个存活期内只在一个 namespace 中工作。每个集群都拥有的四个 namespace（`default`、`kube-system`、`kube-public`、`kube-node-lease`）在加载时被拒绝：它们在任何集群上都是错的，且仅凭配置即可判定。属于某个集群的名字——业务 namespace、某存储组件的 namespace——被有意排除在外，因为本包无法知道它们；在这些名字上让错误取值无害的是集群：它为宿主 ServiceAccount 准备的 Role 只够到一个 namespace。其余全部可选并带 schema 默认值：`kubectlBinary`、`imagePullPolicy`、`toolExecPort`、`workDir`、`sharedReadOnly`、`usersReadOnly`、`usersRoot`、`systemRoot`、`toolsRoot`、`pythonRoot`、`command`、`env`、`idleTimeoutMs`、`maxOutputBytes`、`sandboxCacheTtlMs`，以及 `cliTimeoutMs` / `startTimeoutMs` / `readyPollMs` 三个上限。
+`namespace` 与 `image` 必填，且在加载时校验。每次 `kubectl` 调用都限定到 `namespace`，provider 不在别处创建、读取或删除沙箱 Pod，因此一个 provider 实例在其整个存活期内只在一个 namespace 中工作。每个集群都拥有的四个 namespace（`default`、`kube-system`、`kube-public`、`kube-node-lease`）在加载时被拒绝：它们在任何集群上都是错的，且仅凭配置即可判定。属于某个集群的名字——业务 namespace、某存储组件的 namespace——被有意排除在外，因为本包无法知道它们；在这些名字上让错误取值无害的是集群：它为宿主 ServiceAccount 准备的 Role 只够到一个 namespace。其余全部可选并带 schema 默认值：`kubectlBinary`、`imagePullPolicy`、`toolExecPort`、`workDir`、`sharedReadOnly`、`usersReadOnly`、`usersRoot`、`systemRoot`、`toolsRoot`、`pythonRoot`、`command`、`env`、`idleTimeoutMs`、`maxOutputBytes`、`sandboxCacheTtlMs`、`memoryLimit`、`cpuLimit`，以及 `cliTimeoutMs` / `startTimeoutMs` / `readyPollMs` 三个上限。
 
 `sharedReadOnly` 与 `usersReadOnly` 默认都为真：`/shared` 是一个案件下所有用户共用的目录，`/global` 是该 subject 的跨案件目录，两者都由业务侧写入，沙箱只是读取方。让它们可写意味着一个用户的沙箱能改到同案件其他用户的输入，而且 `/shared/skills`、`/global/skills` 就在它们下面——可写时那两层只读的技能挂载形同虚设。默认只读时，想改这两棵树的沙箱侧写入会以权限错误失败，这是有意的：产物与技能应当走业务侧的管理接口或工具。`<workspaceRoot>/users/<subject>`（`/workspace`）与容器本地的工作目录仍然可写。
 
-`workDir` 是执行容器的工作目录（默认 `/tmp/work`）：provider 在沙箱里把它挂成一个 `emptyDir` 卷。容器根文件系统只读，不是挂载点就不存在，而会话按相对路径解析出的位置必须存在。它不能落在任何 claim 上——模型按相对路径写出的中间产物应当随沙箱销毁而消失，不落进用户案件的工作目录。宿主的 `sandbox.workDir` 必须是同一个值：取值不一致时沙箱里没有这个目录，每次命令都会因为工作目录进不去而失败。
+`workDir` 是执行容器的默认工作目录（默认 `/tmp/work`）：provider 在沙箱里把它挂成一个 `emptyDir` 卷。容器根文件系统只读，不是挂载点就不存在。它服务的是不带会话的调用——provider 自己的探针、宿主的工具调用——因为带会话的命令不落在这里：provider 把工作目录钉在 `/workspace/<会话 id>`，并在命令环境里给出同一个值的 `DSH_WORKDIR`。那一层在挂载进来的成员工作区上，所以同一个人的会话之间不抢同一层，容器销毁后它仍然在、会话里可以继续用。宿主的 `sandbox.workDir` 仍要与这里的取值一致：不带会话的 exec 用的就是它。按默认位置写缓存的库在沙箱里拿不到可写目录——根文件系统只读，`HOME` 是 `/root`——所以 provider 默认把 `MPLCONFIGDIR` 指向 `/tmp/matplotlib`，与 `/tmp` 那一个 `emptyDir` 同一个位置；`env` 里给出同名项时以部署的取值为准。
 
 `workspaceRoot` 不是配置。一个 provider 实例服务所有租户，而每个租户拥有各自的工作区目录树，因此根目录从租户记录读取并传给 `sandboxMounts`；一个 provider 级取值最多只对一个租户是对的。
 
@@ -77,8 +77,8 @@ None, as the provider moves commands into a Pod and returns their stdout, stderr
 - **claim 不给出源缺失信号。** Kubernetes 会把缺失的 `subPath` 建为空目录，因此 claim 模式的启动会对着一个从未开通的租户目录树成功。本 provider 没有与 `container-docker` 的 `requireMountSources` 等价的宿主侧预检。
 - **沙箱启动不做池化。** 冷 Pod 要花几秒，而 docker 容器只要几毫秒；自行因空闲退出的沙箱意味着繁忙租户在下一轮次再次支付该代价。预热 Ready 池需要一个在会话之间持有这些 Pod 的归属者。
 - **未被复用的沙箱只在终态时被回收。** 启动清扫删除本 provider 的 `Succeeded` 与 `Failed` Pod，而 `Running` 的 Pod 会在其 (租户, 用户) 下次被使用时再次被收养——若它无法服务也会在那时被删除。一个 (租户, 用户) 永不再用的运行中 Pod 会一直留着，直到运维按标签删除它，因为删除存活 Pod 会让一个副本毁掉另一个副本的沙箱。
-- **没有资源请求。** 未设置 `requests` 与 `limits`，因此调度器无法为沙箱预留，kubelet 也无法强制内存上限。docker provider 用 `memoryLimit` / `cpuLimit` 约束沙箱；这里尚无对应物。
-- **输出上限覆盖的是捕获，不是命令自身的内存。** `maxOutputBytes` 按流生效，因此同时写两条流的命令可以留存该值的两倍，而一个自身就吃掉容器全部内存的命令（比如在内存里排序大文件）仍能拖垮沙箱：该上限只是通过**捕获**阻止沙箱无限增长，容器内存上限在这里需要 `resources.limits`。
+- **只设 limits，不设 requests；limits 会不会变成预留量由集群决定。** `memoryLimit` 与 `cpuLimit` 落成沙箱容器上的 `limits`，这里有意不声明 `requests`：多个 (租户, 用户) 的沙箱是逐个突发起来的，声明等额 requests 会把内存从节点上永久预留出去。但**集群可以把 limits 回填成 requests**，验收集群（k8s v1.28.15）就是这样——用一个只写 `limits.memory=1Gi` 的合成 Pod 实测，落库后 `requests.memory` 被填成同值（该命名空间没有 LimitRange，也没有变更型 webhook，`managedFields` 为空）。预留量决定能否调度：该节点 allocatable 只有 4 核（已请求 1150m），所以 `cpuLimit: 4` 会让沙箱 Pod 永远因 `Insufficient cpu` 停在 Pending，验收部署只配 `memoryLimit`。调这两个值之前先确认节点给得起它们换来的预留量。
+- **输出上限覆盖的是捕获，不是命令自身的内存。** `maxOutputBytes` 按流生效，因此同时写两条流的命令可以留存该值的两倍，而一个自身就吃掉容器全部内存的命令（比如在内存里排序大文件）仍能拖垮沙箱：该上限只是通过**捕获**阻止沙箱无限增长。命令自身的内存由 `memoryLimit` 上界（CPU 由 `cpuLimit`），越界时被 OOM killer 杀掉的是这个沙箱自己的 cgroup，而不是节点上别的负载——验收集群上实测容器内 `/sys/fs/cgroup/memory.max` 等于配置值（配 `6Gi` 时读回 `6442450944`），即这个界限落在内核上而不只是 API 对象上。**不配 `memoryLimit` 的部署里沙箱没有内存上界**：Pod 落在 BestEffort，可以一路吃到节点内存耗尽，而内核在那一刻按 `oom_score_adj` 挑受害者——被挑中的可能是节点上任何与它无关的进程。生产部署必须配它。
 - **事件只在启动超时时读取。** 启动后失败的沙箱，其容器状态出现在失败消息里，但解释它的事件不在其中。
 - **网络是集群的。** docker provider 的 `tenant.network: none` 没有对应物：未安装 NetworkPolicy 控制器，因此沙箱能到达集群能到达的一切。
 - **交互式会话随其沙箱一起消亡。** 因新规格指纹被替换、被驱逐或因空闲而退出的 Pod 会带走其中每个终端会话；该 (租户, 用户) 的会话必须重新打开。无法让会话跨越 Pod 替换存活，因为终端住在当时附着到旧 Pod 的那个 CLI 进程里。

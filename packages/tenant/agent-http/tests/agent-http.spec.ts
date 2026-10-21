@@ -50,6 +50,8 @@ class FakeGateway extends Service {
   listItems: Array<{ sessionId: string }> = []
   muxPayloads: Array<{ type: string; sessionId?: string }> = []
   hostPayloads: Array<Record<string, unknown>> = []
+  /** Ids a `session.delete` reached this gateway with, in order. */
+  readonly deleteSeen: string[] = []
 
   constructor(ctx: Context) {
     super(ctx, 'apiProxy')
@@ -71,6 +73,10 @@ class FakeGateway extends Service {
         rpcId: r.rpcId,
         result: { ok: true, value: { items: this.listItems.map(i => ({ sessionId: i.sessionId, snippet: 's' })), hasMore: false } },
       }
+    },
+    delete: async (r: { rpcId: unknown; payload: { sessionId: string } }) => {
+      this.deleteSeen.push(r.payload.sessionId)
+      return { rpcId: r.rpcId, result: { ok: true, value: { deleted: true as const } } }
     },
   }
 
@@ -113,6 +119,27 @@ function sessionListRequest(token?: string): Request {
     method: 'POST',
     headers,
     body: JSON.stringify({ type: 'client-request', rpcId: 'r1', method: 'session.list', payload: {} }),
+  })
+}
+
+function sessionSearchRequest(token: string, query: string): Request {
+  return new Request('http://localhost/api/session.search', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+    body: JSON.stringify({ type: 'client-request', rpcId: 'r-search', method: 'session.search', payload: { query } }),
+  })
+}
+
+function sessionDeleteRequest(token: string, sessionId: string): Request {
+  return new Request('http://localhost/api/session.delete', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      type: 'client-request',
+      rpcId: 'r-delete',
+      method: 'session.delete',
+      payload: { sessionId },
+    }),
   })
 }
 
@@ -298,6 +325,68 @@ describe('AgentHttp', () => {
       const globexUser1 = await ctx.agentHttp.fetch(sessionListRequest(await issueToken('globex', 'user-1')))
       const globexUser1Body = await globexUser1.json() as { result?: { value?: { items?: Array<{ sessionId: string }> } } }
       expect(globexUser1Body.result?.value?.items?.map(i => i.sessionId)).toEqual([globexU1, 'cold-1'])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('refuses to delete a session another (tenant, user) owns without reaching the gateway', async () => {
+    const { ctx, gateway } = await boot()
+    try {
+      const acmeOwn = createScopedSession(ctx, 'acme', 'user-1')
+      const acmeOtherUser = createScopedSession(ctx, 'acme', 'user-2')
+      const globexOwn = createScopedSession(ctx, 'globex', 'user-1')
+
+      const foreign = await ctx.agentHttp.fetch(sessionDeleteRequest(await issueToken('globex'), acmeOwn))
+      const foreignBody = await foreign.json() as { result: { ok: boolean; error?: { code: string; details: { sessionId: string } } } }
+      expect(foreignBody.result.ok).toBe(false)
+      expect(foreignBody.result.error?.code).toBe('session-not-found')
+      expect(foreignBody.result.error?.details.sessionId).toBe(acmeOwn)
+      // Same tenant, other subject: the id is not this caller's either.
+      const sameTenant = await ctx.agentHttp.fetch(sessionDeleteRequest(await issueToken('acme', 'user-2'), acmeOwn))
+      expect((await sameTenant.json() as { result: { error?: { code: string } } }).result.error?.code)
+        .toBe('session-not-found')
+      expect(gateway.deleteSeen).toEqual([])
+
+      // The owner's own delete does reach the gateway, so the refusals above are
+      // the ownership fence and not this route failing closed for everyone.
+      const own = await ctx.agentHttp.fetch(sessionDeleteRequest(await issueToken('acme'), acmeOwn))
+      expect(await own.json()).toMatchObject({ result: { ok: true, value: { deleted: true } } })
+      const globexSelf = await ctx.agentHttp.fetch(sessionDeleteRequest(await issueToken('globex'), globexOwn))
+      expect(await globexSelf.json()).toMatchObject({ result: { ok: true, value: { deleted: true } } })
+      expect(gateway.deleteSeen).toEqual([acmeOwn, globexOwn])
+      expect(acmeOtherUser).not.toBe(acmeOwn)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('hides this tenant’s archived sessions from list/search without masking the tenant scope', async () => {
+    const { ctx, gateway } = await boot()
+    try {
+      const archived = createScopedSession(ctx, 'acme', 'user-1')
+      const live = createScopedSession(ctx, 'acme', 'user-1')
+      const otherUser = createScopedSession(ctx, 'acme', 'user-2')
+      const globex = createScopedSession(ctx, 'globex', 'user-1')
+      gateway.listItems = [
+        { sessionId: archived }, { sessionId: live }, { sessionId: otherUser }, { sessionId: globex },
+      ]
+      // The archive set the ambient tenant's workspace registry reports.
+      ctx.provide('workspaceRegistry', { archivedSessionIds: [archived] } as never)
+
+      const listed = await ctx.agentHttp.fetch(sessionListRequest(await issueToken('acme', 'user-1')))
+      const listedBody = await listed.json() as { result?: { value?: { items?: Array<{ sessionId: string }> } } }
+      expect(listedBody.result?.value?.items?.map(i => i.sessionId)).toEqual([live])
+
+      const searched = await ctx.agentHttp.fetch(sessionSearchRequest(await issueToken('acme', 'user-1'), 's'))
+      const searchedBody = await searched.json() as { result?: { value?: { items?: Array<{ sessionId: string }> } } }
+      expect(searchedBody.result?.value?.items?.map(i => i.sessionId)).toEqual([live])
+
+      // Another tenant's own view is filtered by ownership, not by acme's archive
+      // set: its session survives, and acme's archived id is not its business.
+      const globexListed = await ctx.agentHttp.fetch(sessionListRequest(await issueToken('globex', 'user-1')))
+      const globexBody = await globexListed.json() as { result?: { value?: { items?: Array<{ sessionId: string }> } } }
+      expect(globexBody.result?.value?.items?.map(i => i.sessionId)).toEqual([globex])
     } finally {
       await ctx.fiber.dispose()
     }

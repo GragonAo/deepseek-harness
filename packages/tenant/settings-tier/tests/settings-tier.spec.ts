@@ -29,6 +29,16 @@ function boot(usersRoot?: string, systemConfigDir?: string): Context {
   return ctx
 }
 
+/**
+ * Make an agent session ambient so the session tier resolves, the way a running session does.
+ * @param ctx - the context to install it on.
+ * @param cwd - the session directory the tier reads its `config` from.
+ */
+function installSession(ctx: Context, cwd: string): void {
+  ctx.provide('agents')
+  ctx.set('agents', { currentInitiator: () => ({ session: { header: { cwd } } }) })
+}
+
 function roots(ctx: Context, tenantId?: string, user?: string): readonly SettingsTierRoot[] {
   const read = (): readonly SettingsTierRoot[] => ctx.get('settingsTiers')!.roots()
   if (tenantId === undefined) {
@@ -42,10 +52,11 @@ function roots(ctx: Context, tenantId?: string, user?: string): readonly Setting
 describe('settings-tier ambient tier resolution', () => {
   it('resolves session, case, user-global, and system tiers ranked session > case > user-global > system', async () => {
     const ctx = boot('/users', '/sys/config')
+    installSession(ctx, '/sessions/s1')
     try {
       expect(roots(ctx, 'acme', 'user-1')).toEqual([
-        { kind: 'session', path: join('/workspace/acme', 'config'), rank: SESSION_CONFIG_RANK, trustedHost: true },
-        { kind: 'case', path: join('/workspace/acme', 'shared', 'config'), rank: CASE_CONFIG_RANK, trustedHost: true },
+        { kind: 'session', path: join('/sessions/s1', 'config'), rank: SESSION_CONFIG_RANK, trustedHost: true },
+        { kind: 'case', path: join('/workspace/acme', 'config'), rank: CASE_CONFIG_RANK, trustedHost: true },
         { kind: 'user-global', path: join('/users', 'user-1', 'config'), rank: USER_GLOBAL_CONFIG_RANK, trustedHost: true },
         { kind: 'system', path: resolve('/sys/config'), rank: SYSTEM_CONFIG_RANK, trustedHost: true },
       ])
@@ -69,6 +80,7 @@ describe('settings-tier ambient tier resolution', () => {
 
   it('omits the user-global tier without a user or a usersRoot', async () => {
     const ctx = boot(undefined, '/sys/config')
+    installSession(ctx, '/sessions/s1')
     try {
       expect(roots(ctx, 'acme', 'user-1').map(r => r.kind)).toEqual(['session', 'case', 'system'])
     } finally {
@@ -97,14 +109,18 @@ describe('settings-tier per-namespace merge', () => {
     const workspaceRoot = join(base, 'ws')
     mkdirSync(join(sysDir), { recursive: true })
     mkdirSync(join(usersRoot, 'user-1', 'config'), { recursive: true })
-    mkdirSync(join(workspaceRoot, 'shared', 'config'), { recursive: true })
     mkdirSync(join(workspaceRoot, 'config'), { recursive: true })
+    // 会话层读会话自己那一层目录：它没有"退化成案件根"的替身，否则两个层读同一个目录。
+    const sessionDir = join(workspaceRoot, 'users', 'user-1', 'sessions', 's1')
+    mkdirSync(join(sessionDir, 'config'), { recursive: true })
     writeFileSync(join(sysDir, `${ns}.yaml`), 'a: 1\nb: 2\nnested:\n  x: sys\n  y: sys\n')
     writeFileSync(join(usersRoot, 'user-1', 'config', `${ns}.yaml`), 'b: 20\nc: 30\n')
-    writeFileSync(join(workspaceRoot, 'shared', 'config', `${ns}.yaml`), 'd: 40\nnested:\n  y: case\n')
-    writeFileSync(join(workspaceRoot, 'config', `${ns}.yaml`), 'e: 50\n')
+    writeFileSync(join(workspaceRoot, 'config', `${ns}.yaml`), 'd: 40\nnested:\n  y: case\n')
+    writeFileSync(join(sessionDir, 'config', `${ns}.yaml`), 'e: 50\n')
 
     const ctx = boot(usersRoot, sysDir)
+    ctx.provide('agents')
+    ctx.set('agents', { currentInitiator: () => ({ session: { header: { cwd: sessionDir } } }) })
     try {
       const merged = runWithTenant(tenant('acme', workspaceRoot), () =>
         runWithUser(UserId('user-1'), () => ctx.get('settingsTiers')!.merged(ns)))

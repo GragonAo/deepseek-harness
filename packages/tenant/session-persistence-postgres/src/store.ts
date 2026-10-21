@@ -236,6 +236,28 @@ export class PostgresSessionStore implements PersistenceBackend<never> {
     await this.executor.close()
   }
 
+  /**
+   * Delete one session's durable footprint: its `session_event` rows and its
+   * `session_meta` row, in one transaction, then the captured binding. Both
+   * deletes are scoped to the owning (tenant, user) like every other write, so
+   * the captured binding is used when a load materialized the session earlier
+   * in this process and the ambient scope otherwise. Deleting an absent session
+   * is a no-op.
+   * @param id - the persisted session to remove.
+   * @param signal - aborts before the transaction runs.
+   */
+  async remove(id: SessionId, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted()
+    const { tenant, user } = this.owningScope(id, true)
+    const schema = tenantPartitionName(tenant)
+    await this.ensureSchema(schema)
+    await this.executor.transaction(async (tx) => {
+      await tx.query(`DELETE FROM ${schema}.session_event WHERE id = $1 AND user_id = $2`, [id, user])
+      await tx.query(`DELETE FROM ${schema}.session_meta WHERE id = $1 AND user_id = $2`, [id, user])
+    })
+    this.bindings.delete(id)
+  }
+
   // --- Internal ---
 
   /**

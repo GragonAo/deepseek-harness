@@ -12,6 +12,10 @@
 - `TenantRegistry`（`ctx.tenants`）—— 部署的租户记录：`register(tenant)` 返回精确 disposer、`get`、`resolve`（失败关闭地拒绝 `TENANT_UNKNOWN` / `TENANT_DISABLED`）、`resolveMember(id, subject)`（当租户列出的成员不包含该主体时追加 `NOT_A_MEMBER`）、`list`。租户也可经 cordis.yml 的 `Config.tenants` 声明（`{ id, name, dataRoot, workspaceRoot, toolsRoot?, enabled?, network?, members? }` 线上形态，其 `id` 在注册时被品牌铸造为 `TenantId`）；每条记录以 effect 挂载。
 - `ctx.partitionScope`（`TenantPartitionScope`）—— 本挂载为 harness 的分区中立消费者（`settings`、`settings-file`、`credentials-local`、`storage-domain`、`workspace`）安装的请求分区。`current()` 从环境权威解析出 `{ tenant, tenantName, user?, userName?, dataRoot }` —— 名字来自 `tenantPartitionName`/`userPartitionName`，`dataRoot` 给出每租户根目录 —— 无租户时返回 `undefined`，使这些消费者留在单分区路径上。它们经 `@deepseek-ai/dsh-partition-scope` 读取，因此本包是它们唯一的 provider，删除本包不会让它们加载失败。
 
+- `tenantDirectories(input)` —— 租户及其成员在宿主磁盘上需要存在的每一个目录：`dataRoot`、可选归档根、可选 `toolsRoot`、`<workspaceRoot>/shared/<tier>`，以及每个成员的 `<workspaceRoot>/users/<subject>` 与 `<usersRoot>/<subject>/<tier>`；父目录先于子目录，重复项只出现一次。沙箱的挂载源正是这批路径，所以 `tenant-admin` 照着这一份清单幂等建树：建目录与出挂载表之间没有第二份清单。某个根缺失表示该部署没有配置它，而不是它下面的目录不用建。
+- `TENANT_TIER_DIRS`（`config`/`skills`/`tools`）、`TENANT_SHARED_DIR_NAME`、`TENANT_USERS_DIR_NAME`、`TENANT_SKILL_DIR_NAME` —— 目录名常量。两个 container provider 按这些名字拼出挂载源，各写一份字面量会在一方改名后仍挂旧路径，而容器运行时会把缺失的绑定源静默建成空目录，故障因此出现在下游。
+- `SANDBOX_WORKSPACE_MOUNT`、`SANDBOX_WORKDIR_ENV`、`sandboxSessionDir()` —— 沙箱侧的工作目录约定。挂载点只有一个名字（`/workspace`），会话工作目录是它下面以会话 id 命名的一层，`DSH_WORKDIR` 载着同一个路径给技能与模型。两个 provider 都用这一个函数解析它：会话 id 直接成为路径分量，所以不是普通目录名的值一律不被接受，命令退回调用方给的工作目录。
+
 隔离叠在此处而非 core：多租户 provider 对每个打开类操作调用 `requireTenant()`，并强制执行它们自持的持久 `tenant_id`/schema 绑定，因此一个请求只能寻址其认证所铸出的那个租户。
 
 ## Model Experience
@@ -34,3 +38,4 @@
 
 - **租户记录在内存中** —— 开通即「装配中的注册」，不是持久存储；持久租户开通/注销（连同 schema 生命周期）延后到 Postgres provider 及其运维契约。
 - **权威是进程本地的** —— `AsyncLocalStorage` 在单个 Node.js 进程内传播；跨副本转发在线上携带租户 id，并在接收侧用 `runWithTenant` 重新进入。
+- **沙箱层根尚未由租户面持有** —— `tenantDirectories` 已接受 `systemRoot` 与 `pythonRoot`，但租户面的配置里还没有这两个键，所以这两个根及其下的技能层仍须由部署方保证存在。租户面接上这两个键之后，它们才并入同一次自动建树。

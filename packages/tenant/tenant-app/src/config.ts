@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 租户服务配置的读取与校验。
  *
  * 配置只有一个来源：一个 YAML/JSON 文件（`--config` 或 `DSH_TENANT_CONFIG`），加上一组
@@ -358,7 +358,7 @@ function readTenants(reader: Reader): TenantAppConfig['tenants'] {
 
 function readSandbox(reader: Reader): TenantAppConfig['sandbox'] {
   const backend = reader.oneOf('backend', ['docker', 'k8s'] as const)
-  const shared = ['workDir', 'sharedReadOnly', 'usersReadOnly', 'systemRoot', 'pythonRoot', 'toolsRoot', 'idleTimeoutMs', 'sandboxCacheTtlMs', 'startTimeoutMs', 'toolTimeoutMs', 'maxOutputBytes']
+  const shared = ['workDir', 'caseReadOnly', 'usersReadOnly', 'systemRoot', 'pythonRoot', 'toolsRoot', 'idleTimeoutMs', 'sandboxCacheTtlMs', 'startTimeoutMs', 'toolTimeoutMs', 'maxOutputBytes']
   if (backend === 'docker') {
     reader.rejectUnknown([
       'backend', ...shared,
@@ -386,6 +386,7 @@ function readSandbox(reader: Reader): TenantAppConfig['sandbox'] {
     'backend', ...shared,
     'namespace', 'image', 'kubectlBinary', 'imagePullPolicy', 'toolExecPort', 'imagePath',
     'workspaceClaim', 'claimRoot', 'systemRoot', 'pythonRoot', 'toolsRoot', 'pythonEnv',
+    'memoryLimit', 'cpuLimit',
     'cliTimeoutMs', 'statusPollMs', 'readyTimeoutMs', 'readyPollMs', 'command', 'env',
   ])
   return {
@@ -405,6 +406,8 @@ function readSandbox(reader: Reader): TenantAppConfig['sandbox'] {
     ...present('command', reader.optionalStringArray('command')),
     ...present('env', reader.optionalStringMap('env')),
     ...present('imagePath', reader.optionalString('imagePath')),
+    ...present('memoryLimit', reader.optionalString('memoryLimit')),
+    ...present('cpuLimit', reader.optionalNumber('cpuLimit')),
     ...present('cliTimeoutMs', reader.optionalNumber('cliTimeoutMs')),
     ...present('statusPollMs', reader.optionalNumber('statusPollMs')),
     ...present('readyTimeoutMs', reader.optionalNumber('readyTimeoutMs')),
@@ -426,7 +429,7 @@ function readPythonEnv(reader: Reader): { binDir: string; virtualEnv: string; si
 function commonSandbox(reader: Reader): Record<string, unknown> {
   return {
     ...present('workDir', reader.optionalString('workDir')),
-    ...present('sharedReadOnly', reader.optionalBoolean('sharedReadOnly')),
+    ...present('caseReadOnly', reader.optionalBoolean('caseReadOnly')),
     ...present('usersReadOnly', reader.optionalBoolean('usersReadOnly')),
     ...present('systemRoot', reader.optionalString('systemRoot')),
     ...present('pythonRoot', reader.optionalString('pythonRoot')),

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 组合清单：租户服务挂载哪些插件、以什么默认配置挂载。
  *
  * 这份清单是租户栈自己的事实，不再从 dsh 的 bundle 补丁读取——bundle 属于 dsh 的分发形态，
@@ -40,14 +40,21 @@ const DEFAULT_MAX_PARALLEL_SUB_CALLS = 32
 /**
  * 执行容器里的默认工作目录：`/tmp/work`。
  *
- * 它必须是容器本地的路径：`/tmp` 是每个沙箱自己的 `emptyDir`，不是挂载点，所以模型按相对路径
- * 写出的中间产物随沙箱销毁而消失，不会落进用户案件的工作目录。分层挂载（`/workspace`、`/shared`、
- * `/global`）仍然是模型显式写绝对路径时的落点，也是发布工具唯一读得到的地方。部署按
+ * 它只对不带会话的 exec 生效：带会话的命令都跑在该会话自己的目录里（`/workspace/<会话 id>`，
+ * 即挂载进来的用户案件工作目录，落在持久卷上）。这个默认值是容器本地的路径：`/tmp` 是每个沙箱
+ * 自己的 `emptyDir`，不是挂载点，所以它的内容随沙箱销毁而消失。分层挂载（`/workspace`、
+ * `/case`、`/global`）是模型显式写绝对路径时的落点，也是发布工具唯一读得到的地方。部署按
  * `sandbox.workDir` 覆盖。
  */
 const DEFAULT_WORK_DIR = '/tmp/work'
 
-/** 会话与常驻终端共用的工作目录：两处必须一致，否则同一个会话里相对路径会落在两个地方。 */
+/**
+ * 常驻终端的工作目录，也是不带会话的 exec 的默认目录：终端落在这里，而带会话的一次性命令跑在
+ * 该会话自己的目录里，所以同一个会话的终端与命令的相对路径落点并不相同。
+ *
+ * @param config - 租户面配置，读它的 `sandbox.workDir` 与 `sandbox.backend`
+ * @returns 执行容器里的默认工作目录：配置值优先，否则按后端取 `/tmp` 或 `/tmp/work`
+ */
 export function workDir(config: TenantAppConfig): string {
   if (config.sandbox.workDir !== undefined) return config.sandbox.workDir
   // docker 后端没有只读根，容器里的 /tmp 一定存在；k8s 后端由 provider 把 DEFAULT_WORK_DIR
@@ -253,7 +260,7 @@ export const SPINE: readonly SpineRow[] = [
   { id: 'tool-web', module: '@deepseek-ai/dsh-tool-web', config: () => ({ fetch: false, searchTimeoutMs: 60000 }) },
   // 呈现方式默认 both：原生 schema 与 run_code 的 SDK 声明同时下发，读一个文件、问一句这类
   // 会话不必写程序，而工具数以百计时的提示词成本由案件级可见工具清单压住——那份清单同时缩小
-  // 原生 schema 段与 SDK 段（`<workspaceRoot>/shared/tools/restriction.yaml`，见
+  // 原生 schema 段与 SDK 段（`<workspaceRoot>/tools/restriction.yaml`，见
   // tools-restriction README）。要让整个部署只走 run_code 通道，就把这个值改成 code；部署可配。
   {
     id: 'tools',

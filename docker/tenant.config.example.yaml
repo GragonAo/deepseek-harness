@@ -1,4 +1,4 @@
-# 租户服务（packages/tenant/tenant-app）的本地开发配置示例。
+﻿# 租户服务（packages/tenant/tenant-app）的本地开发配置示例。
 #
 # docker/docker-compose.tenant.yml 把它挂到镜像里固定的 /etc/dsh/tenant.config.yaml，
 # 也就是镜像 CMD 的默认路径。配置里的字符串值可以被同名环境变量覆盖
@@ -81,7 +81,7 @@ tools:
 
 # 每个 MCP 服务器挂成一个 mcp-client 实例，它的工具以 mcp__<serverName>__<原工具名> 注册。
 # 一个案件能看到哪些工具由案件自己的 restriction.yaml 决定：文件落在案件目录的
-# `<tenant.workspaceRoot>/shared/tools/restriction.yaml`，内容是 allow/deny 两份全局工具名列表，
+# `<tenant.workspaceRoot>/tools/restriction.yaml`，内容是 allow/deny 两份全局工具名列表，
 # 案件层只能收紧、不能放宽系统层已经挡掉的；上百个工具的原生 schema 与 SDK 声明都由它收窄，
 # 详见 @deepseek-ai/dsh-tools-restriction 的 README。
 #

@@ -30,6 +30,7 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash } from 'node:crypto'
+import { join, posix } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Branded } from '@deepseek-ai/dsh-brand'
@@ -175,6 +176,165 @@ export interface TenantInput {
   network?: 'none' | 'internal'
   /** Authenticated subjects admitted to this tenant; absent or empty means open to any subject. */
   members?: string[]
+}
+
+/**
+ * 每个 owner 层（案件、用户×案件、全局用户）里"工作目录"这一层的目录名。
+ *
+ * 工作目录永远是叶子，与同级的层目录（`config`/`skills`/`tools`）平级：挂载工作目录因此不会
+ * 顺带交出技能与配置树。沙箱把案件那一份挂到 `/case`、用户案件那一份挂到 `/workspace`、
+ * 全局用户那一份挂到 `/global`。
+ */
+export const TENANT_WORK_DIR_NAME = 'work'
+
+/** 成员工作区在 `workspaceRoot` 下的目录名；沙箱把其中一个成员的那份（其下的工作目录）挂到 `/workspace`。 */
+export const TENANT_USERS_DIR_NAME = 'users'
+
+/**
+ * 会话工作目录在 `workspaceRoot` 下的目录名；沙箱把其中一个成员的
+ * `<workspaceRoot>/<TENANT_USERS_DIR_NAME>/<subject>/<TENANT_SESSIONS_DIR_NAME>` 挂到 `/sessions`，
+ * 一次 exec 的 cwd 是它下面的一个会话目录。
+ *
+ * 与用户案件工作目录平级而不是同层：会话目录是正在被编辑的工作副本，同层时挂载 `/workspace`
+ * 就等于顺带交出这个人所有会话的目录树。
+ */
+export const TENANT_SESSIONS_DIR_NAME = 'sessions'
+
+/** 技能层在每个 owner 根下的目录名；沙箱把 `<workspaceRoot>/skills` 挂成案件技能层。 */
+export const TENANT_SKILL_DIR_NAME = 'skills'
+
+/**
+ * 租户面在每个 owner 根下维护的三层目录。
+ *
+ * 建目录与挂载表必须认同一份名字：沙箱把 `<workspaceRoot>/skills` 挂成技能层，
+ * 而那一层正是这里建出来的，两边各写一份就会有一边悄悄漏掉。
+ */
+export const TENANT_TIER_DIRS = ['config', TENANT_SKILL_DIR_NAME, 'tools'] as const
+
+/**
+ * 案件工作目录在沙箱内的挂载点：两个容器 provider 都把
+ * `<workspaceRoot>/<TENANT_WORK_DIR_NAME>` 挂在这里，只读。
+ */
+export const SANDBOX_CASE_MOUNT = '/case'
+
+/**
+ * 用户案件工作区在沙箱内的挂载点：两个容器 provider 都把
+ * `<workspaceRoot>/<TENANT_USERS_DIR_NAME>/<subject>/<TENANT_WORK_DIR_NAME>` 挂在这里。
+ */
+export const SANDBOX_WORKSPACE_MOUNT = '/workspace'
+
+/**
+ * 会话工作目录在沙箱内的挂载点：`<workspaceRoot>/<TENANT_USERS_DIR_NAME>/<subject>/<TENANT_SESSIONS_DIR_NAME>`
+ * 挂在这里，一次 exec 的 cwd 是 `<SANDBOX_SESSIONS_MOUNT>/<会话 id>`。
+ *
+ * 它不能落在 {@link SANDBOX_WORKSPACE_MOUNT} 里面：那样用户案件工作区的挂载就把这个人所有
+ * 会话的目录一起交了出去。
+ */
+export const SANDBOX_SESSIONS_MOUNT = '/sessions'
+
+/**
+ * 会话工作目录在沙箱内那次 exec 的环境变量：值是那个目录在沙箱内的绝对路径。
+ *
+ * 技能与模型按它认领自己该往哪写，因此两个 provider 必须给出同一个名字与同一个值。
+ */
+export const SANDBOX_WORKDIR_ENV = 'DSH_WORKDIR'
+
+/** 受管 `DSH_*` 组里的会话 id；这个键的所有者是 `@deepseek-ai/dsh-shell-env`。 */
+const DSH_SESSION_ID_ENV = 'DSH_SESSION_ID'
+
+/**
+ * 会话 id 可以作为目录名的形状。
+ *
+ * 会话 id 直接成为路径分量，所以这里只接受一轮保守的字符：它必须是一个普通目录名，
+ * 而不是能跳出工作目录的相对路径。
+ */
+const SESSION_DIR_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+/**
+ * 一次沙箱命令的会话工作目录：`<SANDBOX_SESSIONS_MOUNT>/<会话 id>`。
+ *
+ * 每个会话因此各有一层自己的目录，不与同一个人的其他会话抢同一层，也不混进他的案件工作区；
+ * 它落在挂载进来的会话根上，容器销毁后仍然在，会话里可以继续用它。容器本地的 `workDir` 两者
+ * 都做不到：那一层属于沙箱，而沙箱在同一个人的所有会话之间共享，并且会随容器一起消失。
+ * @param env - 这次 exec 的环境变量；受管 `DSH_*` 组由 `dsh-shell-env` 写入。
+ * @returns 沙箱内的绝对路径；这次 exec 不带会话、或会话 id 不能当目录名时为 `undefined`。
+ */
+export function sandboxSessionDir(env: Readonly<Record<string, string>> | undefined): string | undefined {
+  const session = env?.[DSH_SESSION_ID_ENV]
+  if (session === undefined || !SESSION_DIR_NAME.test(session)) return undefined
+  return posix.join(SANDBOX_SESSIONS_MOUNT, session)
+}
+
+/**
+ * 一个租户（及其成员）在宿主磁盘上会占用到的各个根。
+ *
+ * 每一项都对应执行层的一个挂载源，所以这里给出的根就是沙箱要求存在的那些路径。
+ * 根缺失意味着这个部署没有配置它，而不是它的目录不用建。每个字段都接受显式的
+ * `undefined`：调用方手里的正是一个可能缺席的配置值，直接传进来比在调用点写条件展开更难漏。
+ */
+export interface TenantLayoutInput {
+  /** 租户私有根：设置、凭据与技能。 */
+  readonly dataRoot?: string | undefined
+  /** 沙箱挂到 `/workspace` 的那个成员工作区的上级：租户共享区与成员工作区都在它下面。 */
+  readonly workspaceRoot?: string | undefined
+  /** 可选：租户自己的工具根，只读挂到 `/tools`。 */
+  readonly toolsRoot?: string | undefined
+  /** 配置里的跨租户用户根：每个成员在它下面各有一份三层目录。 */
+  readonly usersRoot?: string | undefined
+  /** 可选：租户被移除时目录搬进去的归档根。 */
+  readonly archiveRoot?: string | undefined
+  /** 可选：部署共享的 system 技能层根；沙箱只读挂载它并派生 `/opt/data/skills/system`。 */
+  readonly systemRoot?: string | undefined
+  /** 可选：部署的 Python 环境根；沙箱只读挂载它本身。 */
+  readonly pythonRoot?: string | undefined
+  /** 要在 `workspaceRoot` 与 `usersRoot` 下各备一份目录的成员。 */
+  readonly members?: readonly string[] | undefined
+}
+
+/**
+ * 一个租户及其成员在宿主磁盘上需要存在的每一个目录。
+ *
+ * 这是建目录与出挂载表共用的唯一清单：沙箱的挂载源正是这批路径，漏掉一层就会让挂载落在
+ * 一个不存在的路径上，而容器运行时会把缺失的绑定源静默建成空目录——故障因此出现在下游。
+ * 父目录先于子目录，重复项只出现一次。
+ * @param input - 租户记录、成员与配置里那些根。
+ * @returns 需要存在的宿主目录，顺序稳定。
+ */
+export function tenantDirectories(input: TenantLayoutInput): string[] {
+  const dirs: string[] = []
+  const add = (dir: string | undefined): void => {
+    if (dir !== undefined && !dirs.includes(dir)) dirs.push(dir)
+  }
+
+  add(input.dataRoot)
+  add(input.archiveRoot)
+  add(input.toolsRoot)
+  // 部署级的两个根不属于任何租户，但沙箱从它们挂载，所以也要存在。它们各自只出沙箱
+  // 实际挂载的那个路径：system 根下是技能层，Python 环境根就是挂载点本身。
+  if (input.systemRoot !== undefined) {
+    add(input.systemRoot)
+    add(join(input.systemRoot, TENANT_SKILL_DIR_NAME))
+  }
+  add(input.pythonRoot)
+  if (input.workspaceRoot !== undefined) {
+    add(input.workspaceRoot)
+    add(join(input.workspaceRoot, TENANT_WORK_DIR_NAME))
+    for (const tier of TENANT_TIER_DIRS) add(join(input.workspaceRoot, tier))
+  }
+  for (const subject of input.members ?? []) {
+    if (input.workspaceRoot !== undefined) {
+      // 用户案件目录下三样东西各占一层：工作目录（可写的工作副本）、会话目录（每个会话一层），
+      // 两者平级，所以挂载工作目录看不见会话目录树。
+      add(join(input.workspaceRoot, TENANT_USERS_DIR_NAME, subject))
+      add(join(input.workspaceRoot, TENANT_USERS_DIR_NAME, subject, TENANT_WORK_DIR_NAME))
+      add(join(input.workspaceRoot, TENANT_USERS_DIR_NAME, subject, TENANT_SESSIONS_DIR_NAME))
+    }
+    if (input.usersRoot === undefined) continue
+    add(join(input.usersRoot, subject))
+    add(join(input.usersRoot, subject, TENANT_WORK_DIR_NAME))
+    for (const tier of TENANT_TIER_DIRS) add(join(input.usersRoot, subject, tier))
+  }
+  return dirs
 }
 
 /** Plugin configuration. */

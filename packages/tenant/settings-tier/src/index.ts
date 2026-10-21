@@ -5,7 +5,7 @@
  * (tenant, user, session) scope and exposes them through the optional
  * `ctx.settingsTiers` service the settings Service Definition reads: the
  * session directory `<sessionCwd>/config`, the case-shared directory
- * `<tenant.workspaceRoot>/shared/config`, the user-global directory
+ * `<tenant.workspaceRoot>/config`, the user-global directory
  * `<usersRoot>/<sub>/config`, and the system directory (default
  * `$DSH_HOME/system/config`). `merged(ns)` reads the per-namespace file
  * (`<ns>.yaml`/`<ns>.yml`/`<ns>.json`) from each tier deepest-first and
@@ -75,14 +75,14 @@ class SettingsTierService extends Service implements SettingsTierProvider {
     const roots: SettingsTierRoot[] = []
     const tenant = currentTenant()
     const user = currentUser()
-    const session = ambientSessionCwd(this.ctx, tenant?.workspaceRoot)
+    const session = ambientSessionCwd(this.ctx)
     if (tenant !== undefined && session !== undefined) {
       roots.push({ kind: 'session', path: join(session, 'config'), rank: SESSION_CONFIG_RANK, trustedHost: true })
     }
     if (tenant !== undefined) {
       roots.push({
         kind: 'case',
-        path: join(tenant.workspaceRoot, 'shared', 'config'),
+        path: join(tenant.workspaceRoot, 'config'),
         rank: CASE_CONFIG_RANK,
         trustedHost: true,
       })
@@ -144,14 +144,20 @@ function readConfigSection(dir: string, ns: SettingsNamespace): Record<string, u
   return undefined
 }
 
-/** Resolve the initiating agent's session cwd, falling back when none is ambient. */
-function ambientSessionCwd(ctx: Context, fallback: string | undefined): string | undefined {
+/**
+ * Resolve the initiating agent's session directory, or `undefined` when no agent session is
+ * ambient.
+ *
+ * The session tier is that session's own directory, and it has no stand-in: the case root is
+ * already a tier of its own, so falling back to it would make two tiers read one directory.
+ */
+function ambientSessionCwd(ctx: Context): string | undefined {
   const agents = ctx.get('agents') as AgentRegistry | undefined
-  if (agents === undefined) return fallback
+  if (agents === undefined) return undefined
   try {
-    return agents.currentInitiator()?.session.header.cwd ?? fallback
+    return agents.currentInitiator()?.session.header.cwd
   } catch {
-    return fallback
+    return undefined
   }
 }
 

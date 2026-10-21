@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+﻿import { afterEach, describe, expect, it } from 'vitest'
 import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -167,7 +167,7 @@ describe('TenantAdminHttp', () => {
     }
     await call(stack, 'tenants.create', payload, token)
     await expect(stat(join(root, 'data'))).resolves.toBeDefined()
-    await expect(stat(join(root, 'workspace', 'shared', 'skills'))).resolves.toBeDefined()
+    await expect(stat(join(root, 'workspace', 'skills'))).resolves.toBeDefined()
   })
 
   it('updates metadata, flips enablement, and reads a record back', async () => {

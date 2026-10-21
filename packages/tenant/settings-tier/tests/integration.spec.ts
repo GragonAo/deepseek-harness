@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Real-composition integration: a per-(tenant,user) in-memory settings
  * provider plus the ambient `settings-tier` carrier and real tier directories
  * proves the full resolution chain — schema defaults, then the composition
@@ -79,14 +79,18 @@ describe('settings-tier real composition', () => {
     const workspaceRoot = join(root, 'ws')
     mkdirSync(sysDir, { recursive: true })
     mkdirSync(join(usersRoot, 'user-1', 'config'), { recursive: true })
-    mkdirSync(join(workspaceRoot, 'shared', 'config'), { recursive: true })
     mkdirSync(join(workspaceRoot, 'config'), { recursive: true })
+    // 会话层读会话自己那一层目录，与案件工作目录不是同一处。
+    const sessionDir = join(workspaceRoot, 'users', 'user-1', 'sessions', 's1')
+    mkdirSync(join(sessionDir, 'config'), { recursive: true })
     writeFileSync(join(sysDir, 'demo.yaml'), 'v: system-v\nw: system-w\n')
     writeFileSync(join(usersRoot, 'user-1', 'config', 'demo.yaml'), 'v: user-v\n')
-    writeFileSync(join(workspaceRoot, 'shared', 'config', 'demo.yaml'), 'w: case-w\n')
-    writeFileSync(join(workspaceRoot, 'config', 'demo.yaml'), 'v: session-v\n')
+    writeFileSync(join(workspaceRoot, 'config', 'demo.yaml'), 'w: case-w\n')
+    writeFileSync(join(sessionDir, 'config', 'demo.yaml'), 'v: session-v\n')
 
     const ctx = new Context()
+    ctx.provide('agents')
+    ctx.set('agents', { currentInitiator: () => ({ session: { header: { cwd: sessionDir } } }) })
     // The tenant plugin mounts the ambient partition the settings base keys its
     // snapshot by; without it the partition-keyed seam resolves partitionless.
     const tenantFiber = await ctx.plugin(TenantRegistry)

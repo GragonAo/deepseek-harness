@@ -1,8 +1,9 @@
-/**
+﻿/**
  * Local Docker/Podman provider for the container-runtime capability seam
  * (`ctx.containerRuntime`). Starts one small tool-exec server container per
  * (tenant, user) — the case workspace bind-mounted at `/workspace`, the
- * case-shared directory at `/shared`, the subject's cross-case global directory
+ * case work directory at `/case`, the subject's per-session work directories
+ * at `/sessions`, the subject's cross-case global directory
  * at `/global`, and tooling at `/tools` (read-only) — publishes its HTTP port
  * on a configurable host address, and runs commands by POSTing to that server (ip+host).
  * The container is started lazily on the subject's first tool call and never
@@ -27,7 +28,7 @@
  * host process restarts.
  *
  * 本包与 `container-k8s` 是 `ctx.containerRuntime` 上的两个实现，因此沙箱内的事实逐条对齐：
- * 同一张挂载表（`/workspace`、`/shared`、`<workspaceRoot>/shared/skills`、`/global`、
+ * 同一张挂载表（`/workspace`、`/case`、`<workspaceRoot>/skills`、`/sessions`、`/global`、
  * `systemRoot` 同路径、`/tools`、`pythonRoot` 同路径）、同一套 Python 三件套
  * （`PATH` 前置、`VIRTUAL_ENV`、`PYTHONPATH`）、同一组身份变量
  * （`DSH_CASE_ID`/`DSH_TENANT_ID`/`DSH_USER_ID`）、同一条 `/tools` 来源规则
@@ -48,7 +49,7 @@ import type {
   ContainerPtyOptions,
   ContainerPtySession,
 } from '@deepseek-ai/dsh-container'
-import { requireTenant, requireUser, tenantPartitionName, userPartitionName } from '@deepseek-ai/dsh-tenant'
+import { SANDBOX_CASE_MOUNT, SANDBOX_SESSIONS_MOUNT, SANDBOX_WORKDIR_ENV, SANDBOX_WORKSPACE_MOUNT, TENANT_SESSIONS_DIR_NAME, TENANT_SKILL_DIR_NAME, TENANT_USERS_DIR_NAME, TENANT_WORK_DIR_NAME, requireTenant, requireUser, sandboxSessionDir, tenantPartitionName, userPartitionName } from '@deepseek-ai/dsh-tenant'
 import type { Tenant, UserId } from '@deepseek-ai/dsh-tenant'
 import { openContainerPty, ptyRunner } from '@deepseek-ai/dsh-container-transport'
 import type { ContainerPtyRunner, ContainerSessionExec } from '@deepseek-ai/dsh-container-transport'
@@ -129,12 +130,12 @@ export interface Config {
    */
   usersRoot?: string
   /**
-   * `/shared`（案件级共享目录）是否对沙箱只读，默认只读。
+   * `/case`（案件工作目录）是否对沙箱只读，默认只读。
    *
    * 它由一个案件下的所有用户共用，业务侧通过管理接口写入；沙箱可写就意味着任何用户的沙箱都能
-   * 改到别人的输入。`/shared/skills` 就在它下面，所以可写时那个只读的技能挂载形同虚设。
+   * 改到别人的输入。`/skills` 就在它下面，所以可写时那个只读的技能挂载形同虚设。
    */
-  sharedReadOnly?: boolean
+  caseReadOnly?: boolean
   /**
    * `/global`（该 subject 的跨案件目录）是否对沙箱只读，默认只读。
    *
@@ -285,7 +286,7 @@ function missingMountMessage(missing: readonly MountSource[], tenant: Tenant, us
   const verb = missing.length === 1 ? 'is' : 'are'
   return `container-docker: refusing to start the sandbox of tenant '${String(tenant.id)}' member '${user}': ${noun} ${listed} ${verb} missing on this host. `
     + 'Docker creates a missing bind-mount source as an empty directory, so the start would report success and hand that subject an empty mount. '
-    + "Create each path on the host, or drop the configuration that names it: tenant-admin creates '<workspaceRoot>/shared/<tier>' and '<workspaceRoot>/users/<subject>' on tenant create and member add, "
+    + "Create each path on the host, or drop the configuration that names it: tenant-admin creates '<workspaceRoot>/<tier>' and '<workspaceRoot>/users/<subject>' on tenant create and member add, "
     + "and the deployment owns 'usersRoot', 'systemRoot', 'pythonRoot', and the '/tools' root — a tenant's own 'toolsRoot', or the provider-wide fallback of the same name."
 }
 
@@ -314,7 +315,7 @@ const DEFAULT_TOOL_EXEC_IMAGE_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/
 /** Default for {@link Config.sandboxCacheTtlMs}. */
 const DEFAULT_SANDBOX_CACHE_TTL_MS = 5_000
 /**
- * {@link Config.sharedReadOnly} 与 {@link Config.usersReadOnly} 的默认值：都只读。
+ * {@link Config.caseReadOnly} 与 {@link Config.usersReadOnly} 的默认值：都只读。
  *
  * 这两棵目录树由业务侧写入，沙箱只是读取方；可写就会让一个用户的沙箱改到同案件其他用户的输入，
  * 也会让它们下面那两层只读的技能挂载失去意义。
@@ -390,7 +391,7 @@ export class DockerContainerRuntime extends ContainerRuntime {
     publishHost: z.string().default('127.0.0.1'),
     connectHost: z.string().default('127.0.0.1'),
     usersRoot: z.string(),
-    sharedReadOnly: z.boolean().default(DEFAULT_DATA_READ_ONLY),
+    caseReadOnly: z.boolean().default(DEFAULT_DATA_READ_ONLY),
     usersReadOnly: z.boolean().default(DEFAULT_DATA_READ_ONLY),
     systemRoot: z.string(),
     pythonRoot: z.string(),
@@ -419,7 +420,7 @@ export class DockerContainerRuntime extends ContainerRuntime {
   private readonly publishHost: string
   private readonly connectHost: string
   private readonly usersRoot: string | undefined
-  private readonly sharedReadOnly: boolean
+  private readonly caseReadOnly: boolean
   private readonly usersReadOnly: boolean
   private readonly systemRoot: string | undefined
   private readonly toolsRoot: string | undefined
@@ -437,6 +438,8 @@ export class DockerContainerRuntime extends ContainerRuntime {
   private readonly cpuLimit: number | undefined
   private readonly tenants = new Map<string, TenantRuntime>()
   private readonly starting = new Map<string, Promise<TenantRuntime>>()
+  /** Session work directories already created, by (tenant, subject, session): the directory lives on the mount, not in the container. */
+  private readonly sessionDirs = new Set<string>()
 
   /**
    * @param ctx - the Cordis context this provider registers its effects on.
@@ -468,7 +471,7 @@ export class DockerContainerRuntime extends ContainerRuntime {
     this.publishHost = config.publishHost ?? '127.0.0.1'
     this.connectHost = config.connectHost ?? '127.0.0.1'
     this.usersRoot = config.usersRoot
-    this.sharedReadOnly = config.sharedReadOnly ?? DEFAULT_DATA_READ_ONLY
+    this.caseReadOnly = config.caseReadOnly ?? DEFAULT_DATA_READ_ONLY
     this.usersReadOnly = config.usersReadOnly ?? DEFAULT_DATA_READ_ONLY
     this.systemRoot = config.systemRoot
     this.toolsRoot = config.toolsRoot
@@ -528,12 +531,25 @@ export class DockerContainerRuntime extends ContainerRuntime {
     if (opts?.cwd !== undefined) req.cwd = opts.cwd
     if (opts?.env !== undefined) req.env = { ...opts.env }
     if (opts?.stdin !== undefined) req.stdin = opts.stdin
+    // The session work directory overrides the caller's own working directory: the
+    // caller holds a path on its own machine, while the path inside the sandbox is
+    // decided by the mount table. An exec with no session (a probe, a host tool call)
+    // keeps whatever the caller asked for.
+    const sessionDir = sandboxSessionDir(opts?.env)
+    if (sessionDir !== undefined) {
+      req.cwd = sessionDir
+      req.env = { ...(req.env ?? {}), [SANDBOX_WORKDIR_ENV]: sessionDir }
+    }
     // Caller cancellation and this round trip's own deadline are fused: the
     // tool-exec server can stop answering, and a request with no deadline never
     // settles.
     using transport = deadline(opts?.signal, this.transportTimeoutMs, TRANSPORT_TIMEOUT)
     /* jscpd:ignore-end */
     try {
+      // The session directory lives on the mounted session root, so it may already
+      // exist (another sandbox of the same subject, or a previous start) or not exist
+      // yet: `mkdir -p` is right either way, and each session runs it once.
+      if (sessionDir !== undefined) await this.ensureSessionDir(runtime.port, key, sessionDir, transport.signal)
       return await this.client.exec(this.toolExecBaseUrl(runtime.port), req, transport.signal)
     } catch (error: unknown) {
       // A sandbox has no guaranteed lifetime: the host may restart, an operator may
@@ -630,6 +646,24 @@ export class DockerContainerRuntime extends ContainerRuntime {
   }
 
   /** The tool-exec server's address as the harness reaches it. */
+  /**
+   * Create one session's work directory, once per (tenant, subject, session).
+   *
+   * The directory lives on the mounted case workspace, so it may already exist: sandboxes
+   * are replaced, directories are not. `mkdir -p` covers both cases, which is why this
+   * never looks first.
+   * @param port - The tool-exec port of the sandbox to create the directory in.
+   * @param key - The (tenant, subject) scope key.
+   * @param sessionDir - Absolute path of the session work directory inside the sandbox.
+   * @param signal - This round trip's deadline.
+   */
+  private async ensureSessionDir(port: number, key: string, sessionDir: string, signal: AbortSignal): Promise<void> {
+    const seen = `${key} ${sessionDir}`
+    if (this.sessionDirs.has(seen)) return
+    await this.client.exec(this.toolExecBaseUrl(port), { argv: ['mkdir', '-p', sessionDir] }, signal)
+    this.sessionDirs.add(seen)
+  }
+
   private toolExecBaseUrl(port: number): string {
     return `http://${this.connectHost}:${String(port)}`
   }
@@ -794,7 +828,7 @@ export class DockerContainerRuntime extends ContainerRuntime {
     args.push(...this.pythonEnvironmentArgs())
     // The platform knows which case and subject a sandbox belongs to, so it
     // states it: a skill that must locate its own case otherwise infers identity
-    // from the container name or the `/shared` directory name, and Docker sets
+    // from the container name or the `/case` directory name, and Docker sets
     // `/etc/hostname` to the container id, so that inference lands nowhere.
     // 这三个变量是沙箱内命令的公共事实，`container-k8s` 给每个 Pod 设的是同一组同名变量；
     // 都由平台给出，因此它们排在配置的环境变量之后，配置改不了身份。
@@ -849,32 +883,40 @@ export class DockerContainerRuntime extends ContainerRuntime {
    *
    * 三层技能在两端也都各多挂一份到聚合根 `/opt/data/skills/<kind>`：案件脚本遍历那个根去发现
    * 技能，而一次挂载只能把一个来源放到一个位置，所以层与层之间只能靠子目录分开。
+   *
+   * 唯一一条 k8s 独有的挂载是聚合根本身：那里的挂载点是 Pod 卷，目标落在只读的 `/case`、
+   * `/global` 里面就建不出来，所以那个后端另外挂一个容器本地可写目录当父目录。`docker -v`
+   * 自己会造出缺失的目标目录，这里因此没有对应的一条。
    */
   private mounts(tenant: Tenant, user: UserId): MountSource[] {
     const SKILLS_ROOT = '/opt/data/skills'
-    const sharedReadOnly = this.sharedReadOnly
+    const caseReadOnly = this.caseReadOnly
     const usersReadOnly = this.usersReadOnly
+    const userCase = `${tenant.workspaceRoot}/${TENANT_USERS_DIR_NAME}/${user}`
     const mounts: MountSource[] = [
-      { source: `${tenant.workspaceRoot}/users/${user}`, target: '/workspace', readOnly: false },
-      { source: `${tenant.workspaceRoot}/shared`, target: '/shared', readOnly: sharedReadOnly },
-      // 案件共享技能层报告的技能基目录是它自己的宿主目录，而技能正文让模型按该目录解析相对路径，
+      { source: `${userCase}/${TENANT_WORK_DIR_NAME}`, target: SANDBOX_WORKSPACE_MOUNT, readOnly: false },
+      // 会话工作目录与用户案件工作目录平级：同层的话，挂载 `/workspace` 就等于顺带交出这个人
+      // 所有会话的目录树。来源按人切，所以一个沙箱也看不到别人的会话。
+      { source: `${userCase}/${TENANT_SESSIONS_DIR_NAME}`, target: SANDBOX_SESSIONS_MOUNT, readOnly: false },
+      { source: `${tenant.workspaceRoot}/${TENANT_WORK_DIR_NAME}`, target: SANDBOX_CASE_MOUNT, readOnly: caseReadOnly },
+      // 案件技能层报告的技能基目录是它自己的宿主目录，而技能正文让模型按该目录解析相对路径，
       // 所以那个路径在沙箱里也必须能解析到。同一个来源按两个路径挂是必要的，不是冗余。
-      { source: `${tenant.workspaceRoot}/shared/skills`, target: `${tenant.workspaceRoot}/shared/skills`, readOnly: true },
+      { source: `${tenant.workspaceRoot}/${TENANT_SKILL_DIR_NAME}`, target: `${tenant.workspaceRoot}/${TENANT_SKILL_DIR_NAME}`, readOnly: true },
     ]
     // Skills reach the sandbox as mounted tiers under one root the case scripts enumerate.
     // A mount carries one source to one path, so each tier keeps its own subdirectory and
     // the same skill name may appear in more than one. Names match `skill-tier`'s kinds.
-    mounts.push({ source: `${tenant.workspaceRoot}/shared/skills`, target: `${SKILLS_ROOT}/case`, readOnly: true })
+    mounts.push({ source: `${tenant.workspaceRoot}/${TENANT_SKILL_DIR_NAME}`, target: `${SKILLS_ROOT}/case`, readOnly: true })
     if (this.usersRoot !== undefined) {
-      mounts.push({ source: `${this.usersRoot}/${user}`, target: '/global', readOnly: usersReadOnly })
-      mounts.push({ source: `${this.usersRoot}/${user}/skills`, target: `${SKILLS_ROOT}/user-global`, readOnly: true })
+      mounts.push({ source: `${this.usersRoot}/${user}/${TENANT_WORK_DIR_NAME}`, target: '/global', readOnly: usersReadOnly })
+      mounts.push({ source: `${this.usersRoot}/${user}/${TENANT_SKILL_DIR_NAME}`, target: `${SKILLS_ROOT}/user-global`, readOnly: true })
     }
     if (this.systemRoot !== undefined) {
       // Read-only at its own absolute path: skill bodies reach the model through the
       // host-side skill provider, but the companion files they cite are readable only
       // through the sandbox.
       mounts.push({ source: this.systemRoot, target: this.systemRoot, readOnly: true })
-      mounts.push({ source: `${this.systemRoot}/skills`, target: `${SKILLS_ROOT}/system`, readOnly: true })
+      mounts.push({ source: `${this.systemRoot}/${TENANT_SKILL_DIR_NAME}`, target: `${SKILLS_ROOT}/system`, readOnly: true })
     }
     // /tools 的来源规则：租户记录优先，缺省回落配置。一个 provider 实例服务所有租户，
     // 所以租户记录里写明的工具图谱就是那个租户自己的；配置里的那份供没写明的租户使用。

@@ -1,10 +1,10 @@
-/**
+﻿/**
  * Kubernetes 容器运行时 provider：每个 (租户, 用户) 一个裸沙箱 Pod，通过 Pod 自己的 IP
  * 用 HTTP 访问。命令不走 `kubectl exec`；Pod 里跑的是与 Docker provider 相同的
  * tool-exec 服务，因此沙箱镜像与线上协议始终是同一份约定。
  *
  * 本 provider 与 `container-docker` 是 `ctx.containerRuntime` 上的两个实现，沙箱内的事实逐条对齐：
- * 同一张挂载表（`/workspace`、`/shared`、`<workspaceRoot>/shared/skills`、`/global`、
+ * 同一张挂载表（`/workspace`、`/case`、`<workspaceRoot>/skills`、`/global`、
  * `systemRoot` 同路径、`/tools`、`pythonRoot` 同路径）、同一套 Python 三件套
  * （`PATH` 前置、`VIRTUAL_ENV`、`PYTHONPATH`）、同一组身份变量
  * （`DSH_CASE_ID`/`DSH_TENANT_ID`/`DSH_USER_ID`/`DSH_TOOL_EXEC_IDLE_MS`/`DSH_TOOL_EXEC_MAX_OUTPUT_BYTES`）、
@@ -27,7 +27,7 @@ import type {
   ContainerPtyOptions,
   ContainerPtySession,
 } from '@deepseek-ai/dsh-container'
-import { requireTenant, requireUser } from '@deepseek-ai/dsh-tenant'
+import { SANDBOX_CASE_MOUNT, SANDBOX_SESSIONS_MOUNT, SANDBOX_WORKDIR_ENV, SANDBOX_WORKSPACE_MOUNT, TENANT_SESSIONS_DIR_NAME, TENANT_SKILL_DIR_NAME, TENANT_USERS_DIR_NAME, TENANT_WORK_DIR_NAME, requireTenant, requireUser, sandboxSessionDir } from '@deepseek-ai/dsh-tenant'
 import type { Tenant } from '@deepseek-ai/dsh-tenant'
 import { cliRunner, execToolCommand, openContainerPty, ptyRunner } from '@deepseek-ai/dsh-container-transport'
 import type {
@@ -37,7 +37,15 @@ import type {
   ToolExecClient,
   ToolExecRequest,
 } from '@deepseek-ai/dsh-container-transport'
-import { buildSandboxPod, sandboxPodName, MANAGED_LABEL, TOOL_EXEC_IDLE_ENV, TOOL_EXEC_MAX_OUTPUT_ENV } from './pod-spec.ts'
+import {
+  assertQuantity,
+  buildSandboxPod,
+  MANAGED_LABEL,
+  sandboxPodName,
+  sandboxResources,
+  TOOL_EXEC_IDLE_ENV,
+  TOOL_EXEC_MAX_OUTPUT_ENV,
+} from './pod-spec.ts'
 import type { SandboxMount } from './pod-spec.ts'
 
 /**
@@ -70,12 +78,21 @@ const DEFAULT_CLI_TIMEOUT_MS = 60_000
  */
 const DEFAULT_WORK_DIR = '/tmp/work'
 /**
- * {@link Config.sharedReadOnly} 与 {@link Config.usersReadOnly} 的默认值：都只读。
+ * {@link Config.caseReadOnly} 与 {@link Config.usersReadOnly} 的默认值：都只读。
  *
  * 这两棵目录树由业务侧写入，沙箱只是读取方；可写就会让一个用户的沙箱改到同案件其他用户的输入，
  * 也会让它们下面那两层只读的技能挂载失去意义。
  */
 const DEFAULT_DATA_READ_ONLY = true
+/**
+ * 沙箱内 matplotlib 的缓存目录：`/tmp` 是 Pod 自己挂的 emptyDir，也是根只读之后容器里唯一
+ * 保证可写的位置。
+ *
+ * `HOME` 是 `/root`，而根文件系统只读（见 `pod-spec.ts` 的 `readOnlyRootFilesystem`），
+ * 所以按默认位置写缓存的库每次都拿到 EROFS：matplotlib 会打印一段警告再退回一个临时目录，
+ * 并把这段话掺进每一条用到它的命令输出。缓存是可重建的东西，跟着沙箱一起消失正合适。
+ */
+const SANDBOX_MPLCONFIG_DIR = '/tmp/matplotlib'
 /** {@link Config.startTimeoutMs} 的默认值：与 `container-docker` 的同名字段同值。 */
 const DEFAULT_START_TIMEOUT_MS = 180_000
 /** {@link Config.statusPollMs} 的默认值。 */
@@ -138,12 +155,12 @@ export interface Config {
    */
   workDir?: string
   /**
-   * `/shared`（案件级共享目录）是否对沙箱只读，默认只读。
+   * `/case`（案件工作目录）是否对沙箱只读，默认只读。
    *
    * 它由一个案件下的所有用户共用，业务侧通过管理接口写入；沙箱可写就意味着任何用户的沙箱都能
-   * 改到别人的输入。`/shared/skills` 就在它下面，所以可写时那个只读的技能挂载形同虚设。
+   * 改到别人的输入。`/skills` 就在它下面，所以可写时那个只读的技能挂载形同虚设。
    */
-  sharedReadOnly?: boolean
+  caseReadOnly?: boolean
   /**
    * `/global`（该 subject 的跨案件目录）是否对沙箱只读，默认只读。
    *
@@ -269,6 +286,20 @@ export interface Config {
    * 与 `container-docker` 的同名字段逐字同义。默认 67108864。
    */
   maxOutputBytes?: number
+  /**
+   * 沙箱容器的内存上限，按 Kubernetes quantity 写法（如 `8Gi`）；省略则不限。
+   *
+   * 它管的是**命令自身**的内存，而不是被捕获的输出：`maxOutputBytes` 只约束 provider 留存的字节，
+   * 一条在内存里排序大文件的命令照样能把容器撑到节点内存耗尽。不给上限的沙箱 Pod 落在 BestEffort，
+   * 内核在内存耗尽时按 `oom_score_adj` 挑受害者，被挑中的可能是节点上任何与它无关的进程——
+   * 沙箱里跑的是模型拼出来的命令，所以这里应当有界。
+   */
+  memoryLimit?: string
+  /**
+   * 沙箱容器的核数上限（整核数）；省略则不限。与 `container-docker` 的同名字段同义，
+   * 只是写法换成 quantity：`2` 表示两核。
+   */
+  cpuLimit?: number
 }
 
 /** 运行中的沙箱 Pod 暴露给 host 的事实。 */
@@ -318,7 +349,7 @@ function isWithin(root: string, candidate: string): boolean {
  * 租户与用户的切分由 claim 内的子路径承担，原本由宿主目录结构承担。
  *
  * 变的只是来源：两种模式下每个 mountPath 都一样，因此沙箱及其读取方解析出的各层地址
- * ——包括位于 `<workspaceRoot>/shared/skills` 的 skill 层——都保持不变。
+ * ——包括位于 `<workspaceRoot>/skills` 的 skill 层——都保持不变。
  *
  * 三层技能另外各挂一份到聚合根 `/opt/data/skills` 下的 `<kind>` 子目录：案件脚本遍历那个根
  * 去发现技能，而一次挂载只能把一个来源放到一个位置，所以层与层之间只能靠子目录分开。
@@ -340,27 +371,30 @@ function isWithin(root: string, candidate: string): boolean {
  */
 export function sandboxMounts(config: Config, tenant: Pick<Tenant, 'workspaceRoot' | 'toolsRoot'>, subject: string): SandboxMount[] {
   const workspaceRoot = tenant.workspaceRoot
-  const skillsPath = `${workspaceRoot}/shared/skills`
+  const skillsPath = `${workspaceRoot}/${TENANT_SKILL_DIR_NAME}`
+  const userCase = `${workspaceRoot}/${TENANT_USERS_DIR_NAME}/${subject}`
   const SKILLS_ROOT = '/opt/data/skills'
   // 技能层同时挂进一个聚合根，案件脚本遍历它来发现技能。一次挂载只能把一个来源放到一个位置，
   // 所以层与层之间用子目录分开——同名技能可能同时存在于多层。层名与 `skill-tier` 注册的 kind 相同。
   const tier = (source: string, kind: string): { source: string; mountPath: string; readOnly: boolean } =>
     ({ source, mountPath: `${SKILLS_ROOT}/${kind}`, readOnly: true })
-  const sharedReadOnly = config.sharedReadOnly ?? DEFAULT_DATA_READ_ONLY
+  const caseReadOnly = config.caseReadOnly ?? DEFAULT_DATA_READ_ONLY
   const usersReadOnly = config.usersReadOnly ?? DEFAULT_DATA_READ_ONLY
   const sources: Array<{ source: string; mountPath: string; readOnly: boolean }> = [
-    { source: `${workspaceRoot}/users/${subject}`, mountPath: '/workspace', readOnly: false },
-    { source: `${workspaceRoot}/shared`, mountPath: '/shared', readOnly: sharedReadOnly },
+    { source: `${userCase}/${TENANT_WORK_DIR_NAME}`, mountPath: SANDBOX_WORKSPACE_MOUNT, readOnly: false },
+    // 会话工作目录与用户案件工作目录平级：同层就会让挂载 `/workspace` 顺带交出这个人所有会话的目录树。
+    { source: `${userCase}/${TENANT_SESSIONS_DIR_NAME}`, mountPath: SANDBOX_SESSIONS_MOUNT, readOnly: false },
+    { source: `${workspaceRoot}/${TENANT_WORK_DIR_NAME}`, mountPath: SANDBOX_CASE_MOUNT, readOnly: caseReadOnly },
     { source: skillsPath, mountPath: skillsPath, readOnly: true },
     tier(skillsPath, 'case'),
   ]
   if (config.usersRoot) {
-    sources.push({ source: `${config.usersRoot}/${subject}`, mountPath: '/global', readOnly: usersReadOnly })
-    sources.push(tier(`${config.usersRoot}/${subject}/skills`, 'user-global'))
+    sources.push({ source: `${config.usersRoot}/${subject}/${TENANT_WORK_DIR_NAME}`, mountPath: '/global', readOnly: usersReadOnly })
+    sources.push(tier(`${config.usersRoot}/${subject}/${TENANT_SKILL_DIR_NAME}`, 'user-global'))
   }
   if (config.systemRoot) {
     sources.push({ source: config.systemRoot, mountPath: config.systemRoot, readOnly: true })
-    sources.push(tier(`${config.systemRoot}/skills`, 'system'))
+    sources.push(tier(`${config.systemRoot}/${TENANT_SKILL_DIR_NAME}`, 'system'))
   }
   const toolsRoot = tenant.toolsRoot ?? config.toolsRoot
   if (toolsRoot !== undefined) sources.push({ source: toolsRoot, mountPath: '/tools', readOnly: true })
@@ -368,7 +402,7 @@ export function sandboxMounts(config: Config, tenant: Pick<Tenant, 'workspaceRoo
 
   const claim = config.workspaceClaim
   const claimRoot = config.claimRoot
-  if (!claim || !claimRoot) return sources.map(m => ({ kind: 'hostPath', ...m }))
+  if (!claim || !claimRoot) return withLocalMountPoint(sources.map(m => ({ kind: 'hostPath', ...m })), SKILLS_ROOT)
   for (const m of sources) {
     if (!isWithin(claimRoot, m.source)) {
       throw new Error(
@@ -378,13 +412,34 @@ export function sandboxMounts(config: Config, tenant: Pick<Tenant, 'workspaceRoo
       )
     }
   }
-  return sources.map(m => ({
-    kind: 'claim',
-    claimName: claim,
-    subPath: posix.relative(claimRoot, m.source),
-    mountPath: m.mountPath,
-    readOnly: m.readOnly,
-  }))
+  return withLocalMountPoint(
+    sources.map(m => ({
+      kind: 'claim',
+      claimName: claim,
+      subPath: posix.relative(claimRoot, m.source),
+      mountPath: m.mountPath,
+      readOnly: m.readOnly,
+    })),
+    SKILLS_ROOT,
+  )
+}
+
+/**
+ * 在第一个嵌在 `root` 之下的挂载前面插入一个容器本地可写空目录。
+ *
+ * 容器运行时先造出挂载目标再挂载，而目标落在另一个只读挂载里面时，那一步会被那个挂载的
+ * `ro` 拒绝，Pod 因此永远进不了 `Running`。技能层的聚合根就是这种情况：它自己要挂在
+ * `/case` 或 `/global` 里面，而那两层是只读的。租户层既然决定挂什么、挂到哪里，
+ * 就要同时保证自己选的目标建得出来——把它交给镜像预先摆好同名目录，等于把这个约束
+ * 押在一次构建上。
+ * @param mounts - 已解析的挂载列表。
+ * @param root - 需要成为可写父目录的容器内路径。
+ * @returns 插入后的挂载列表；`root` 之下没有挂载时原样返回。
+ */
+export function withLocalMountPoint(mounts: SandboxMount[], root: string): SandboxMount[] {
+  const first = mounts.findIndex(m => m.mountPath.startsWith(`${root}/`))
+  if (first < 0) return mounts
+  return [...mounts.slice(0, first), { kind: 'local', mountPath: root }, ...mounts.slice(first)]
 }
 
 /** 已认证的 tool-exec HTTP 客户端接缝；生产实现就是 `container-transport` 里的那个。 */
@@ -453,7 +508,7 @@ export class K8sContainerRuntime extends ContainerRuntime {
     imagePullPolicy: z.string().default('IfNotPresent'),
     toolExecPort: z.natural().min(1).default(8642),
     workDir: z.string().default(DEFAULT_WORK_DIR),
-    sharedReadOnly: z.boolean().default(true),
+    caseReadOnly: z.boolean().default(true),
     usersReadOnly: z.boolean().default(true),
     workspaceClaim: z.string(),
     claimRoot: z.string(),
@@ -481,6 +536,8 @@ export class K8sContainerRuntime extends ContainerRuntime {
     sandboxCacheTtlMs: z.natural().min(1).default(DEFAULT_SANDBOX_CACHE_TTL_MS),
     idleTimeoutMs: z.natural().min(1),
     maxOutputBytes: z.natural().min(1).default(DEFAULT_MAX_OUTPUT_BYTES),
+    memoryLimit: z.string(),
+    cpuLimit: z.natural().min(1),
   })
 
   private readonly config: Config
@@ -503,8 +560,12 @@ export class K8sContainerRuntime extends ContainerRuntime {
   private readonly sandboxCacheTtlMs: number
   private readonly idleTimeoutMs: number | undefined
   private readonly maxOutputBytes: number
+  private readonly memoryLimit: string | undefined
+  private readonly cpuLimit: number | undefined
   /** 已解析的沙箱句柄，按 (租户, subject) 索引，在 `expiresAt` 之前有效。 */
   private readonly sandboxes = new Map<string, CachedSandbox>()
+  /** 已经建好会话工作目录的 (租户, subject, 会话)；目录在 PVC 上，建过一次就够了。 */
+  private readonly sessionDirs = new Set<string>()
   /** 正在进行的启动，让并发调用方共用一次而不是互相抢。 */
   private readonly starting = new Map<string, Promise<SandboxStatus>>()
 
@@ -538,6 +599,9 @@ export class K8sContainerRuntime extends ContainerRuntime {
     if (config.pythonEnv !== undefined && config.pythonRoot === undefined) {
       throw new Error('container-k8s: Config.pythonEnv requires Config.pythonRoot: it describes the layout of the runtime mounted there')
     }
+    // 内存上限写错时，apiserver 要到创建 Pod 才拒绝，且报错指向拼出来的 spec 而不是这一项；
+    // 这个写法只看配置就能判定。
+    if (config.memoryLimit !== undefined) assertQuantity('Config.memoryLimit', config.memoryLimit)
     this.config = config
     this.namespace = namespace
     this.image = config.image
@@ -555,6 +619,8 @@ export class K8sContainerRuntime extends ContainerRuntime {
     this.sandboxCacheTtlMs = config.sandboxCacheTtlMs ?? DEFAULT_SANDBOX_CACHE_TTL_MS
     this.idleTimeoutMs = config.idleTimeoutMs
     this.maxOutputBytes = config.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES
+    this.memoryLimit = config.memoryLimit
+    this.cpuLimit = config.cpuLimit
     this.runner = runner ?? cliRunner(config.kubectlBinary ?? 'kubectl')
     this.pty = pty ?? ptyRunner(config.kubectlBinary ?? 'kubectl')
     this.client = client ?? { exec: execToolCommand }
@@ -594,12 +660,22 @@ export class K8sContainerRuntime extends ContainerRuntime {
     if (opts?.cwd !== undefined) req.cwd = opts.cwd
     if (opts?.env !== undefined) req.env = { ...opts.env }
     if (opts?.stdin !== undefined) req.stdin = opts.stdin
+    // 会话工作目录盖过调用方给的工作目录：调用方手上的是它自己那台机器上的路径，
+    // 而沙箱里的路径由挂载表决定。不带会话的 exec（探针、宿主自己的工具调用）保持原样。
+    const sessionDir = sandboxSessionDir(opts?.env)
+    if (sessionDir !== undefined) {
+      req.cwd = sessionDir
+      req.env = { ...(req.env ?? {}), [SANDBOX_WORKDIR_ENV]: sessionDir }
+    }
     const status = await this.awaitSandbox(tenant, subject, opts?.signal)
     // 调用方的取消与这一轮自己的期限融在一起：tool-exec 服务可能不再作答，
     // 而没有期限的请求永远不会 settle。
     using transport = deadline(opts?.signal, this.transportTimeoutMs, TRANSPORT_TIMEOUT)
     /* jscpd:ignore-end */
     try {
+      // 会话目录落在挂载进来的案件成员工作区上，所以它可能已经存在（同一个人的另一个沙箱、
+      // 或上一次启动建的），也可能还没建：`mkdir -p` 对两种情况都对，而每个会话只跑一次。
+      if (sessionDir !== undefined) await this.ensureSessionDir(status, key, sessionDir, transport.signal)
       return await this.runIn(this.toolExecBaseUrl(status), req, transport.signal)
     } catch (error: unknown) {
       // 沙箱没有保证的寿命：Pod 可能被驱逐、被另一个实例的空闲回收删掉，host 可能重启。
@@ -728,6 +804,23 @@ export class K8sContainerRuntime extends ContainerRuntime {
    * @returns 该沙箱 tool-exec 服务的基地址。
    * @throws 沙箱还没有 Pod IP 时。
    */
+  /**
+   * 建出一个会话的工作目录，每个 (租户, 用户, 会话) 只建一次。
+   *
+   * 目录在挂载进来的案件成员工作区上，所以它可能已经存在：沙箱会被替换，而目录不会。
+   * `mkdir -p` 对两种情况都对，因此这里不需要先看一眼它是否存在。
+   * @param status - 要建目录的那个沙箱。
+   * @param key - (租户, subject) 作用域键。
+   * @param sessionDir - 会话工作目录在沙箱内的绝对路径。
+   * @param signal - 这一轮传输的期限。
+   */
+  private async ensureSessionDir(status: SandboxStatus, key: string, sessionDir: string, signal: AbortSignal): Promise<void> {
+    const seen = `${key} ${sessionDir}`
+    if (this.sessionDirs.has(seen)) return
+    await this.client.exec(this.toolExecBaseUrl(status), { argv: ['mkdir', '-p', sessionDir] }, signal)
+    this.sessionDirs.add(seen)
+  }
+
   private toolExecBaseUrl(status: SandboxStatus): string {
     if (!status.podIP) {
       throw new Error(`container-k8s: sandbox ${status.phase} without a Pod IP${status.detail ? `: ${status.detail}` : ''}`)
@@ -813,6 +906,7 @@ export class K8sContainerRuntime extends ContainerRuntime {
     const tenantId = String(tenant.id)
     const podName = sandboxPodName(tenantId, subject)
     const mounts = sandboxMounts(this.config, tenant, subject)
+    const resources = sandboxResources(this.memoryLimit, this.cpuLimit)
     const { spec, fingerprint } = buildSandboxPod({
       namespace: this.namespace,
       image: this.image,
@@ -826,6 +920,7 @@ export class K8sContainerRuntime extends ContainerRuntime {
       env: this.sandboxEnv(tenantId, subject),
       toolExecPort: this.toolExecPort,
       workDir: this.workDir,
+      ...(resources !== undefined ? { resources } : {}),
     })
     spec.metadata.annotations['dsh.dev/spec-fingerprint'] = fingerprint
     spec.metadata.annotations['dsh.dev/tenant'] = tenantId
@@ -848,10 +943,24 @@ export class K8sContainerRuntime extends ContainerRuntime {
       // 才不会把一个实例的工作删掉另一个实例的手上；若这个沙箱最终不可用，
       // 下面的就绪等待会大声失败。
       if (existing.phase === 'Running' || existing.phase === 'Pending') {
+        // 收养另一个实例的沙箱时日志里留一行：宿主之后执行的每一条命令都落在它上面，
+        // 而这条对应关系只存在于内存里（`sandboxes` 缓存），进程一换就查不到了。
+        this.ctx.logger.info(
+          'container-k8s: adopting sandbox %s for tenant %s subject %s (phase %s)',
+          podName, tenantId, subject, existing.phase,
+        )
         return await this.confirmOrRelease(podName, signal)
       }
       // 已经退出的沙箱不能复用；不等待直接替换，
       // 免得一个实例的启动被另一个实例的收尾拖住。
+      // 一个沙箱的死因只出现在集群事件里（OOMKilled 是最常见的一种），而替换本身不报错，
+      // 所以死因与阶段一起记下来：这是宿主日志里唯一能看出「上一个沙箱怎么没的」的地方。
+      const events = await this.readEvents(podName)
+      this.ctx.logger.warn(
+        'container-k8s: replacing sandbox %s for tenant %s subject %s: it is in phase %s%s',
+        podName, tenantId, subject, existing.phase,
+        events.length > 0 ? `; events: ${events.join(' | ')}` : '',
+      )
       await this.releasePod(podName, signal)
     }
 
@@ -860,6 +969,20 @@ export class K8sContainerRuntime extends ContainerRuntime {
     // 输的那个收养赢家创建出来的沙箱，而不是报一个调用方无能为力的失败。
     if (created.exitCode !== 0 && !/AlreadyExists/i.test(created.stderr)) {
       throw new Error(`container-k8s: could not create sandbox ${podName}: ${created.stderr.trim() || created.stdout.trim()}`)
+    }
+    // 沙箱是按需创建、又在别的组件里看不见的东西：留一行创建事实（含这一次生效的资源上界），
+    // 事后查「它为什么被 OOM 杀掉」才有起点。输掉创建竞争的那个实例不是创建者，日志里也不该这么说。
+    if (created.exitCode === 0) {
+      this.ctx.logger.info(
+        'container-k8s: created sandbox %s for tenant %s subject %s (image %s, %s)',
+        podName, tenantId, subject, this.image,
+        resources === undefined ? 'no resource limits' : `limits ${JSON.stringify(resources.limits)}`,
+      )
+    } else {
+      this.ctx.logger.info(
+        'container-k8s: lost the creation race for sandbox %s (tenant %s, subject %s); adopting the winner',
+        podName, tenantId, subject,
+      )
     }
     return await this.confirmOrRelease(podName, signal)
   }
@@ -913,8 +1036,11 @@ export class K8sContainerRuntime extends ContainerRuntime {
     if (python?.binDir !== undefined) env.PATH = `${python.binDir}:${this.toolExecImagePath}`
     if (python?.virtualEnv !== undefined) env.VIRTUAL_ENV = python.virtualEnv
     if (python?.sitePackages !== undefined) env.PYTHONPATH = python.sitePackages
+    // 默认的缓存位置在只读根上写不进去（见 SANDBOX_MPLCONFIG_DIR），这里补一个可写位置。
+    // 它排在身份变量之前：缓存位置是部署可以改的，而身份是三件平台才知道的事实。
+    if (env.MPLCONFIGDIR === undefined) env.MPLCONFIGDIR = SANDBOX_MPLCONFIG_DIR
     // 身份事实：沙箱里的命令（skill、挂载进来的工具）靠它们认领自己属于哪个案子与哪个人，
-    // 而容器名、`/shared` 目录名、Pod 名都是有损的把手，推不出这两件事。
+    // 而容器名、`/case` 目录名、Pod 名都是有损的把手，推不出这两件事。
     // 三个名字与 container-docker 注入的是同一组，两个后端给出的值也相同。
     env.DSH_CASE_ID = tenantId
     env.DSH_TENANT_ID = tenantId
@@ -1024,10 +1150,19 @@ export class K8sContainerRuntime extends ContainerRuntime {
   private async reapTerminalSandboxes(): Promise<void> {
     // 标签与字段选择器合起来才是「本 provider 管、且已经走完」；缺失的 Pod 不算失败。
     for (const phase of ['Succeeded', 'Failed']) {
-      await this.runKubectl([
+      const result = await this.runKubectl([
         'delete', 'pod', '-l', `${MANAGED_LABEL}=true`, '--field-selector', `status.phase=${phase}`,
         '--ignore-not-found', '--wait=false',
       ])
+      // 收尸发生在上一次宿主进程结束之后，没有别的记录留下：说出删掉了哪些、停在哪个阶段，
+      // 才知道一个沙箱是自己空闲退出（`Succeeded`）还是被节点杀掉（`Failed`）。
+      const reaped = result.stdout.split('\n').filter(line => line.startsWith('pod '))
+      if (reaped.length > 0) {
+        this.ctx.logger.info(
+          'container-k8s: reaped %d terminal sandbox pod(s) in phase %s: %s',
+          reaped.length, phase, reaped.join(', '),
+        )
+      }
     }
   }
 

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 组合：把租户服务要用到的插件挂到一个自建的 Cordis 上下文上。
  *
  * 这里不经过 dsh 的 Loader、bundle 与 cordis.yml：配置由 {@link loadTenantAppConfig}
@@ -197,6 +197,8 @@ function staticMounts(config: TenantAppConfig): readonly StaticMount[] {
         adminScope: config.admin.scope,
         usersRoot: config.tenants.usersRoot,
         archiveRoot: config.tenants.archiveRoot,
+        ...(sandbox.systemRoot !== undefined ? { systemRoot: sandbox.systemRoot } : {}),
+        ...(sandbox.pythonRoot !== undefined ? { pythonRoot: sandbox.pythonRoot } : {}),
       }),
     },
     {
@@ -246,7 +248,7 @@ function dockerConfig(config: TenantAppConfig): Record<string, unknown> {
   if (sandbox.backend !== 'docker') throw new Error('沙箱后端不是 docker')
   return {
     usersRoot: config.tenants.usersRoot,
-    sharedReadOnly: sandbox.sharedReadOnly ?? true,
+    caseReadOnly: sandbox.caseReadOnly ?? true,
     usersReadOnly: sandbox.usersReadOnly ?? true,
     ...(sandbox.systemRoot !== undefined ? { systemRoot: sandbox.systemRoot } : {}),
     ...(sandbox.pythonRoot !== undefined ? { pythonRoot: sandbox.pythonRoot } : {}),
@@ -281,7 +283,7 @@ function k8sConfig(config: TenantAppConfig): Record<string, unknown> {
     workspaceClaim: sandbox.workspaceClaim,
     claimRoot: sandbox.claimRoot,
     workDir: workDir(config),
-    sharedReadOnly: sandbox.sharedReadOnly ?? true,
+    caseReadOnly: sandbox.caseReadOnly ?? true,
     usersReadOnly: sandbox.usersReadOnly ?? true,
     usersRoot: config.tenants.usersRoot,
     systemRoot: sandbox.systemRoot,
@@ -294,6 +296,8 @@ function k8sConfig(config: TenantAppConfig): Record<string, unknown> {
     ...(sandbox.imagePullPolicy !== undefined ? { imagePullPolicy: sandbox.imagePullPolicy } : {}),
     ...(sandbox.toolExecPort !== undefined ? { toolExecPort: sandbox.toolExecPort } : {}),
     ...(sandbox.imagePath !== undefined ? { toolExecImagePath: sandbox.imagePath } : {}),
+    ...(sandbox.memoryLimit !== undefined ? { memoryLimit: sandbox.memoryLimit } : {}),
+    ...(sandbox.cpuLimit !== undefined ? { cpuLimit: sandbox.cpuLimit } : {}),
     ...(sandbox.cliTimeoutMs !== undefined ? { cliTimeoutMs: sandbox.cliTimeoutMs } : {}),
     ...(sandbox.statusPollMs !== undefined ? { statusPollMs: sandbox.statusPollMs } : {}),
     ...(sandbox.readyTimeoutMs !== undefined ? { readyTimeoutMs: sandbox.readyTimeoutMs } : {}),

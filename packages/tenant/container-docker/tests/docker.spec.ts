@@ -126,9 +126,11 @@ class FakeProbe implements HostPathProbe {
 
 /** The host directories one (tenant, user)'s sandbox mounts in these tests. */
 const SANDBOX_MOUNT_SOURCES = [
-  '/workspace/acme/users/user-1',
-  '/workspace/acme/shared',
-  '/workspace/acme/shared/skills',
+  '/workspace/acme/users/user-1/work',
+  '/workspace/acme/users/user-1/sessions',
+  '/workspace/acme/work',
+  '/workspace/acme/skills',
+  '/users/user-1/work',
   '/tools/acme',
 ] as const
 
@@ -229,15 +231,15 @@ describe('DockerContainerRuntime', () => {
   it('承认为可写时案件共享与用户全局目录不再只读，技能层始终只读', async () => {
     const runner = new FakeRunner()
     const runtime = mount(runner, new FakeClient(), {
-      runtime: 'docker', usersRoot: '/users', sharedReadOnly: false, usersReadOnly: false,
+      runtime: 'docker', usersRoot: '/users', caseReadOnly: false, usersReadOnly: false,
     })
     await scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi']))
     const runCall = runner.calls.find(c => c[0] === 'run')
-    expect(runCall).toContain('/workspace/acme/shared:/shared')
-    expect(runCall).not.toContain('/workspace/acme/shared:/shared:ro')
-    expect(runCall).toContain('/users/user-1:/global')
-    expect(runCall).not.toContain('/users/user-1:/global:ro')
-    expect(runCall).toContain('/workspace/acme/shared/skills:/opt/data/skills/case:ro')
+    expect(runCall).toContain('/workspace/acme/work:/case')
+    expect(runCall).not.toContain('/workspace/acme/work:/case:ro')
+    expect(runCall).toContain('/users/user-1/work:/global')
+    expect(runCall).not.toContain('/users/user-1/work:/global:ro')
+    expect(runCall).toContain('/workspace/acme/skills:/opt/data/skills/case:ro')
   })
 
   it('starts a tool-exec container with the three-layer mounts after publishing its loopback port, then POSTs /exec', async () => {
@@ -251,17 +253,17 @@ describe('DockerContainerRuntime', () => {
     expect(runCall).toContain('--add-host')
     expect(runCall).toContain('host.docker.internal:host-gateway')
     // The 3 case/user layers plus the read-only tool layer.
-    expect(runCall).toContain('/workspace/acme/users/user-1:/workspace')
-    expect(runCall).toContain('/workspace/acme/shared:/shared:ro')
-    expect(runCall).toContain('/users/user-1:/global:ro')
+    expect(runCall).toContain('/workspace/acme/users/user-1/work:/workspace')
+    expect(runCall).toContain('/workspace/acme/work:/case:ro')
+    expect(runCall).toContain('/users/user-1/work:/global:ro')
     expect(runCall).toContain('/tools/acme:/tools:ro')
     expect(runCall).toContain('/opt/.dsh/system:/opt/.dsh/system:ro')
     // The case-shared skill tier's own directory must resolve in the sandbox: a skill
     // body resolves relative paths against that base directory.
-    expect(runCall).toContain('/workspace/acme/shared/skills:/workspace/acme/shared/skills:ro')
+    expect(runCall).toContain('/workspace/acme/skills:/workspace/acme/skills:ro')
     // The same three tiers again under the root the case scripts enumerate: a mount carries
     // one source to one path, so each tier keeps its own subdirectory there.
-    expect(runCall).toContain('/workspace/acme/shared/skills:/opt/data/skills/case:ro')
+    expect(runCall).toContain('/workspace/acme/skills:/opt/data/skills/case:ro')
     expect(runCall).toContain('/users/user-1/skills:/opt/data/skills/user-global:ro')
     expect(runCall).toContain('/opt/.dsh/system/skills:/opt/data/skills/system:ro')
     expect(runCall).toContain('dsh-tool-exec:latest')
@@ -295,13 +297,13 @@ describe('DockerContainerRuntime', () => {
     // Every source is on this host except the subject's case workspace, which is
     // what a directory removed after admission looks like.
     const probe: HostPathProbe = {
-      isDirectory: path => path !== '/workspace/acme/users/user-1',
+      isDirectory: path => path !== '/workspace/acme/users/user-1/work',
       isFile: () => false,
       readdir: () => [],
     }
     const runtime = mount(runner, new FakeClient(), { runtime: 'docker', usersRoot: '/users' }, probe)
     const error = await rejection(scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi'])))
-    expect(error.message).toContain("bind-mount source '/workspace/acme/users/user-1' (for '/workspace') is missing on this host")
+    expect(error.message).toContain("bind-mount source '/workspace/acme/users/user-1/work' (for '/workspace') is missing on this host")
     // The directory to create belongs to a (tenant, member) pair, so both are named.
     expect(error.message).toContain("tenant 'acme' member 'user-1'")
     // The failure is this check, not a container CLI error: nothing ran, and no
@@ -324,10 +326,10 @@ describe('DockerContainerRuntime', () => {
     )
     const error = await rejection(scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi'])))
     for (const source of [
-      "'/workspace/acme/users/user-1' (for '/workspace')",
-      "'/workspace/acme/shared' (for '/shared')",
-      "'/workspace/acme/shared/skills' (for '/workspace/acme/shared/skills')",
-      "'/users/user-1' (for '/global')",
+      "'/workspace/acme/users/user-1/work' (for '/workspace')",
+      "'/workspace/acme/work' (for '/case')",
+      "'/workspace/acme/skills' (for '/workspace/acme/skills')",
+      "'/users/user-1/work' (for '/global')",
       "'/opt/.dsh/system' (for '/opt/.dsh/system')",
       "'/tools/acme' (for '/tools')",
     ]) {
@@ -379,8 +381,8 @@ describe('DockerContainerRuntime', () => {
     const runtime = mount(runner, new FakeClient())
     await scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi']))
     const runCall = runner.calls.find(c => c[0] === 'run')
-    expect(runCall).toContain('/workspace/acme/users/user-1:/workspace')
-    expect(runCall).toContain('/workspace/acme/shared:/shared:ro')
+    expect(runCall).toContain('/workspace/acme/users/user-1/work:/workspace')
+    expect(runCall).toContain('/workspace/acme/work:/case:ro')
     expect(runCall).not.toContain('/global')
   })
 
@@ -427,6 +429,48 @@ describe('DockerContainerRuntime', () => {
     await scoped(tenant('acme'), 'user-1', () => runtime.exec('echo', ['hi']))
     const runCall = runner.calls.find(c => c[0] === 'run')
     expect(runCall).not.toContain('/opt/.dsh/system')
+  })
+
+  it('runs each session under its own directory on the mounted case workspace', async () => {
+    const client = new FakeClient()
+    const runtime = mount(new FakeRunner(), client)
+    await scoped(tenant('acme'), 'user-1', () =>
+      runtime.exec('echo', ['hi'], { env: { DSH_SESSION_ID: 'session-7' } }))
+    // The session directory lives on the mounted case workspace: it survives the container
+    // and does not collide with another session of the same subject. The container-local
+    // work directory does neither — every session of one subject shares it.
+    const commands = client.requests.filter(request => request.req.argv[0] !== 'sh').map(request => request.req)
+    expect(commands.map(request => request.argv)).toEqual([
+      ['mkdir', '-p', '/sessions/session-7'],
+      ['echo', 'hi'],
+    ])
+    expect(commands[1]!.cwd).toBe('/sessions/session-7')
+    // Skills claim their write location from DSH_WORKDIR, so it must carry that same value.
+    expect(commands[1]!.env?.DSH_WORKDIR).toBe('/sessions/session-7')
+  })
+
+  it('creates the session directory once, and keeps the caller directory without a session', async () => {
+    const client = new FakeClient()
+    const runtime = mount(new FakeRunner(), client)
+    await scoped(tenant('acme'), 'user-1', () =>
+      runtime.exec('echo', ['hi'], { env: { DSH_SESSION_ID: 'session-7' } }))
+    await scoped(tenant('acme'), 'user-1', () =>
+      runtime.exec('echo', ['hi'], { env: { DSH_SESSION_ID: 'session-7' } }))
+    // No session — a probe or a host tool call: the caller's own directory is the only
+    // defensible one, and the request keeps exactly the environment it asked for.
+    await scoped(tenant('acme'), 'user-1', () =>
+      runtime.exec('echo', ['hi'], { cwd: '/tmp', env: { EXTRA: 'kept' } }))
+
+    const commands = client.requests.filter(request => request.req.argv[0] !== 'sh').map(request => request.req)
+    expect(commands.map(request => request.argv)).toEqual([
+      ['mkdir', '-p', '/sessions/session-7'],
+      ['echo', 'hi'],
+      ['echo', 'hi'],
+      ['echo', 'hi'],
+    ])
+    expect(commands[2]!.cwd).toBe('/sessions/session-7')
+    expect(commands[3]!.cwd).toBe('/tmp')
+    expect(commands[3]!.env).toEqual({ EXTRA: 'kept' })
   })
 
   it('mounts the configured Python environment read-only and points the sandbox at it', async () => {
@@ -582,9 +626,9 @@ describe('DockerContainerRuntime', () => {
     await scoped(tenant('acme'), 'user-2', () => runtime.exec('a', []))
     const runs = runner.calls.filter(c => c[0] === 'run')
     expect(runs).toHaveLength(3)
-    expect(runs.some(c => c.includes('/workspace/acme/users/user-1:/workspace'))).toBe(true)
-    expect(runs.some(c => c.includes('/workspace/globex/users/user-1:/workspace'))).toBe(true)
-    expect(runs.some(c => c.includes('/workspace/acme/users/user-2:/workspace'))).toBe(true)
+    expect(runs.some(c => c.includes('/workspace/acme/users/user-1/work:/workspace'))).toBe(true)
+    expect(runs.some(c => c.includes('/workspace/globex/users/user-1/work:/workspace'))).toBe(true)
+    expect(runs.some(c => c.includes('/workspace/acme/users/user-2/work:/workspace'))).toBe(true)
     // Three distinct container names.
     expect(new Set(runs.map(c => c[c.indexOf('--name') + 1])).size).toBe(3)
   })
@@ -628,11 +672,11 @@ describe('DockerContainerRuntime', () => {
 
   it('takes /tools from the configured root when the tenant record has none', async () => {
     const runner = new FakeRunner()
-    const runtime = mount(runner, new FakeClient(), { runtime: 'docker', toolsRoot: '/shared-tools' })
+    const runtime = mount(runner, new FakeClient(), { runtime: 'docker', toolsRoot: '/case-tools' })
     // The same rule as container-k8s: the tenant's own toolsRoot wins, and only a
     // tenant record without one falls back to the configured root.
     await scoped(tenantWithoutTools(), 'user-1', () => runtime.exec('a', []))
-    expect(runner.calls.find(c => c[0] === 'run')).toContain('/shared-tools:/tools:ro')
+    expect(runner.calls.find(c => c[0] === 'run')).toContain('/case-tools:/tools:ro')
   })
 
   it('mounts no /tools at all when neither the tenant record nor the configuration names a root', async () => {

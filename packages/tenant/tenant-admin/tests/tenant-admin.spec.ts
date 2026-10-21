@@ -1,4 +1,4 @@
-import { existsSync, promises as fs } from 'node:fs'
+﻿import { existsSync, promises as fs } from 'node:fs'
 import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -131,13 +131,13 @@ describe('TenantAdmin', () => {
     expect(events).toEqual(['provision:acme'])
     expect((await store.load()).map(r => String(r.id))).toEqual(['acme'])
     expect(existsSync(join(root, 'tenants', 'acme'))).toBe(true)
-    expect(existsSync(join(root, 'work', 'acme', 'workspace', 'shared'))).toBe(true)
+    expect(existsSync(join(root, 'work', 'acme', 'workspace', 'work'))).toBe(true)
     // The case-shared tier directories and the member's case workspace are bind-mount
     // sources of the subject's sandbox, so create provisions them rather than leaving
     // the container runtime to create an empty directory at the mount.
-    expect(existsSync(join(root, 'work', 'acme', 'workspace', 'shared', 'skills'))).toBe(true)
-    expect(existsSync(join(root, 'work', 'acme', 'workspace', 'shared', 'tools'))).toBe(true)
-    expect(existsSync(join(root, 'work', 'acme', 'workspace', 'shared', 'config'))).toBe(true)
+    expect(existsSync(join(root, 'work', 'acme', 'workspace', 'skills'))).toBe(true)
+    expect(existsSync(join(root, 'work', 'acme', 'workspace', 'tools'))).toBe(true)
+    expect(existsSync(join(root, 'work', 'acme', 'workspace', 'config'))).toBe(true)
     expect(existsSync(join(root, 'work', 'acme', 'workspace', 'users', 'user-1'))).toBe(true)
     expect(existsSync(join(usersRoot, 'user-1', 'tools'))).toBe(true)
     expect(existsSync(join(usersRoot, 'user-1', 'skills'))).toBe(true)

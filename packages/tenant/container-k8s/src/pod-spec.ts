@@ -35,6 +35,34 @@ export type SandboxMount =
     mountPath: string
     readOnly: boolean
   }
+  | {
+    /**
+     * 容器本地的可写空目录，随 Pod 销毁而消失。
+     *
+     * 它存在的理由是给别处的只读挂载当父目录：容器运行时先造出挂载目标再挂载，而目标落在
+     * 另一个只读挂载里面时，那一步会被那个挂载的 `ro` 拒绝，Pod 因此永远进不了 `Running`。
+     * 把它挂在这一层，嵌在它下面的目标就有了可建造的父目录，于是"挂哪些层"不再隐含
+     * "镜像里必须预先摆好同名目录"。
+     */
+    kind: 'local'
+    mountPath: string
+  }
+
+/**
+ * 沙箱容器的资源上界。
+ *
+ * 只描述硬上限，不描述 requests：给等额 requests 的 Pod 是 Guaranteed，调度器会把这份内存从节点上
+ * 永久预留出去，而多个 (租户, 用户) 的沙箱是逐个突发起来的。
+ */
+export interface SandboxResources {
+  /** 硬上限：越界的容器被自己 cgroup 的 OOM killer 杀掉，而不是把节点上的其他负载一起拖下水。 */
+  limits: {
+    /** Kubernetes quantity 语法的内存上限，例如 `8Gi`。 */
+    memory?: string
+    /** 核数上限的 quantity 写法，例如 `2`。 */
+    cpu?: string
+  }
+}
 
 /** 决定一个沙箱 Pod 完整 spec 的全部输入。 */
 export interface SandboxPodInput {
@@ -61,8 +89,14 @@ export interface SandboxPodInput {
    * 沙箱销毁而消失。它与宿主的 `sandbox.workDir` 必须是同一个值。
    */
   workDir: string
-  /** 可选的资源 requests 与 limits。 */
-  resources?: Record<string, unknown>
+  /**
+   * 沙箱容器的资源上限；省略就是不给上限。
+   *
+   * 不给上限的 Pod 落在 BestEffort：它可以一路吃到整个节点的内存，而内核在内存耗尽时按
+   * `oom_score_adj` 挑受害者，被挑中的可能是节点上任何一个可杀进程——包括与它无关的服务。
+   * 沙箱里跑的是一条模型拼出来的命令，所以这里必须有界。
+   */
+  resources?: SandboxResources
 }
 
 /** 一份 Pod spec：结构完整，但对象层面刻意放宽了类型。 */
@@ -96,6 +130,41 @@ export function sandboxPodName(tenantId: string, subject: string): string {
     value.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '')
   const head = fold(`dsh-${tenantId}-${subject}`).slice(0, 50).replace(/-+$/, '')
   return `${head || 'dsh'}-${digest}`
+}
+
+/**
+ * 一个 Kubernetes quantity：可选的二进制后缀（`Ki`…`Ei`）或十进制后缀（`k`…`E`，以及表示千分之一的
+ * `m`），不带后缀就是字节数。同一套写法同时用于内存与 CPU，所以 `2`、`500m`、`8Gi` 都合法。
+ */
+const QUANTITY = /^[0-9]+(\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E|m)?$/
+
+/**
+ * 校验一个来自配置的 quantity 写法。
+ *
+ * apiserver 也会拒绝写错的取值，但那要等到创建 Pod 时才发生，且报错指向拼出来的 spec 而不是配置项；
+ * 这个写法只看配置就能判定，所以在加载时报出来。
+ * @param field - 诊断里指认的配置字段名。
+ * @param value - 待校验的取值。
+ * @throws 取值不是合法 quantity 时。
+ */
+export function assertQuantity(field: string, value: string): void {
+  if (!QUANTITY.test(value)) {
+    throw new Error(`container-k8s: ${field} 必须是 Kubernetes quantity（如 \`8Gi\`、\`500m\`、\`2\`），得到 ${JSON.stringify(value)}`)
+  }
+}
+
+/**
+ * 把配置里的内存与 CPU 上限拼成 Pod 的 `resources`。
+ * @param memoryLimit - 内存上限的 quantity，例如 `8Gi`；省略则不限内存。
+ * @param cpuLimit - 核数上限，例如 `2`；省略则不限 CPU。
+ * @returns 声明给沙箱容器的 `resources`；两者都没配时返回 `undefined`，此时 Pod 不上界。
+ */
+export function sandboxResources(memoryLimit: string | undefined, cpuLimit: number | undefined): SandboxResources | undefined {
+  const limits = {
+    ...(memoryLimit !== undefined ? { memory: memoryLimit } : {}),
+    ...(cpuLimit !== undefined ? { cpu: String(cpuLimit) } : {}),
+  }
+  return Object.keys(limits).length > 0 ? { limits } : undefined
 }
 
 /**
@@ -164,7 +233,7 @@ export function buildSandboxPod(input: SandboxPodInput): { spec: SandboxPodSpec;
           // readOnlyRootFilesystem 让根文件系统没有任何可写之处；
           // 否则一条需要临时文件的命令会因为与它被要求做的事无关的原因失败。
           volumeMounts: [
-            ...input.mounts.map(m => mountSite(m, m.readOnly)),
+            ...input.mounts.map(m => mountSite(m, readOnlyOf(m))),
             { name: 'tmp', mountPath: '/tmp', readOnly: false },
             // 根文件系统只读，执行容器的工作目录必须是挂载点才存在。这一条给它一个容器本地的空
             // 目录：它随 Pod 销毁，模型按相对路径写出的中间产物不会落进任何 PVC。
@@ -196,7 +265,21 @@ export function buildSandboxPod(input: SandboxPodInput): { spec: SandboxPodSpec;
  * @returns 每份后端存储唯一的键。
  */
 function backingOf(mount: SandboxMount): string {
-  return mount.kind === 'claim' ? `claim:${mount.claimName}` : `path:${mount.source}`
+  if (mount.kind === 'claim') return `claim:${mount.claimName}`
+  // 本地空目录没有后端存储：每个挂载点各自一份，所以按挂载点取键。
+  if (mount.kind === 'local') return `local:${mount.mountPath}`
+  return `path:${mount.source}`
+}
+
+/**
+ * 一个挂载在容器里是否只读。
+ *
+ * 容器本地的空目录恒为可写：它存在的理由就是给别的只读挂载当父目录。
+ * @param mount - 一个已解析的挂载。
+ * @returns 该挂载在这个容器里的只读性。
+ */
+export function readOnlyOf(mount: SandboxMount): boolean {
+  return mount.kind === 'local' ? false : mount.readOnly
 }
 
 /**
@@ -205,14 +288,15 @@ function backingOf(mount: SandboxMount): string {
  * `subPath` 属于这里而不属于卷：Kubernetes 不接受卷上的 `subPath`，
  * 而同一个 claim 要在多个地址被读取时，每个地址需要的子目录都不一样。
  * @param mount - 一个已解析的挂载。
- * @param readOnly - 这个容器能否通过该挂载写入。
+ * @param readOnly - 这个容器能否通过该挂载写入；容器本地空目录恒为可写。
  * @returns 一条 `volumeMounts` 记录。
  */
 function mountSite(mount: SandboxMount, readOnly: boolean): Record<string, unknown> {
   return {
     name: volumeName(backingOf(mount)),
     mountPath: mount.mountPath,
-    readOnly,
+    // 本地空目录必须可写：嵌在它下面的挂载点要靠它才建得出来，只读等于把那个故障搬回来。
+    readOnly: mount.kind === 'local' ? false : readOnly,
     ...(mount.kind === 'claim' ? { subPath: mount.subPath } : {}),
   }
 }
@@ -231,14 +315,29 @@ function volumesFor(mounts: readonly SandboxMount[]): Record<string, unknown>[] 
   for (const mount of mounts) {
     const backing = backingOf(mount)
     if (byBacking.has(backing)) continue
-    byBacking.set(
-      backing,
-      mount.kind === 'hostPath'
-        ? { name: volumeName(backing), hostPath: { path: mount.source, type: 'Directory' } }
-        : { name: volumeName(backing), persistentVolumeClaim: { claimName: mount.claimName } },
-    )
+    byBacking.set(backing, volumeFor(mount, backing))
   }
   return [...byBacking.values()]
+}
+
+/**
+ * 一份挂载对应的 `volumes` 记录。
+ *
+ * 记录的形态由挂载后端决定：节点目录、claim 子路径，或一个容器本地的空目录。
+ * @param mount - 一个已解析的挂载。
+ * @param backing - 该挂载的后端存储身份，来自 {@link backingOf}。
+ * @returns 一条 `volumes` 记录。
+ */
+function volumeFor(mount: SandboxMount, backing: string): Record<string, unknown> {
+  const name = volumeName(backing)
+  switch (mount.kind) {
+    case 'hostPath':
+      return { name, hostPath: { path: mount.source, type: 'Directory' } }
+    case 'claim':
+      return { name, persistentVolumeClaim: { claimName: mount.claimName } }
+    case 'local':
+      return { name, emptyDir: {} }
+  }
 }
 
 /**

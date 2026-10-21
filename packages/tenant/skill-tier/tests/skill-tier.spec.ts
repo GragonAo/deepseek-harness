@@ -1,4 +1,4 @@
-import { join, resolve } from 'node:path'
+﻿import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { apply as applySkillTier } from '@deepseek-ai/dsh-skill-tier'
@@ -35,7 +35,7 @@ describe('skill-tier ambient tier resolution', () => {
     const ctx = boot('/users', '/sys/skills')
     try {
       expect(roots(ctx, 'acme', 'user-1')).toEqual([
-        { kind: 'case', path: join('/workspace/acme', 'shared', 'skills'), rank: CASE_SKILL_RANK, trustedHost: true },
+        { kind: 'case', path: join('/workspace/acme', 'skills'), rank: CASE_SKILL_RANK, trustedHost: true },
         { kind: 'user-global', path: join('/users', 'user-1', 'skills'), rank: USER_GLOBAL_SKILL_RANK, trustedHost: true },
         { kind: 'system', path: resolve('/sys/skills'), rank: SYSTEM_SKILL_RANK, trustedHost: true },
       ])

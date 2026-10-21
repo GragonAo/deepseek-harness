@@ -168,4 +168,49 @@ describe('PostgresSessionStore', () => {
     expect(executor.calls.some(c => c.text.includes(`INSERT INTO ${schema}.session_event`))).toBe(true)
     expect(executor.calls.some(c => c.text.includes(`UPDATE ${schema}.session_meta SET revision = revision + 1`))).toBe(true)
   })
+
+  it('deletes both row sets through the bound (tenant, user) and releases the binding', async () => {
+    const executor = new RecordingExecutor()
+    const store = new PostgresSessionStore(executor)
+    const schema = tenantPartitionName(TenantId('acme'))
+    await scoped(tenant('acme'), 'user-1', () => store.appendBatch(header('s1'), [ev(0)], false))
+
+    // No ambient scope: the captured binding still owns the id, so the removal
+    // targets the schema and user that materialized it — the same write-scope
+    // rule appends follow.
+    await store.remove('s1' as SessionId)
+
+    expect(executor.calls).toContainEqual({
+      text: `DELETE FROM ${schema}.session_event WHERE id = $1 AND user_id = $2`,
+      values: ['s1', 'user-1'],
+    })
+    expect(executor.calls).toContainEqual({
+      text: `DELETE FROM ${schema}.session_meta WHERE id = $1 AND user_id = $2`,
+      values: ['s1', 'user-1'],
+    })
+
+    // The binding went with the rows: without it this unbound id needs a scope.
+    await expect(store.remove('s1' as SessionId)).rejects.toMatchObject({ code: 'NO_TENANT_IN_SCOPE' })
+  })
+
+  it('deletes an unbound id in the ambient (tenant, user) scope and refuses an aborted signal', async () => {
+    const executor = new RecordingExecutor()
+    const store = new PostgresSessionStore(executor)
+    const schema = tenantPartitionName(TenantId('globex'))
+
+    await scoped(tenant('globex'), 'user-2', () => store.remove('unbound' as SessionId))
+
+    expect(executor.calls).toContainEqual({
+      text: `DELETE FROM ${schema}.session_event WHERE id = $1 AND user_id = $2`,
+      values: ['unbound', 'user-2'],
+    })
+    expect(executor.calls).toContainEqual({
+      text: `DELETE FROM ${schema}.session_meta WHERE id = $1 AND user_id = $2`,
+      values: ['unbound', 'user-2'],
+    })
+
+    const reason = new Error('removal cancelled')
+    await expect(scoped(tenant('globex'), 'user-2', () =>
+      store.remove('unbound' as SessionId, AbortSignal.abort(reason)))).rejects.toBe(reason)
+  })
 })

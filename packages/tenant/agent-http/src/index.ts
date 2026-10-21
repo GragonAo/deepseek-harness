@@ -96,6 +96,7 @@ const SESSION_ADDRESSED_METHODS: ReadonlySet<string> = new Set([
   'session.attachment',
   'session.updateQueue',
   'session.cancel',
+  'session.delete',
 ])
 
 /** Carrier configuration. */
@@ -311,8 +312,18 @@ export class AgentHttp extends Service {
     return headers.some(header => String(header.id) === sessionId)
   }
 
-  /** Drop `session.list`/`session.search` items whose live owner is another (tenant, user). */
+  /**
+   * Drop `session.list`/`session.search` items the ambient (tenant, user) does
+   * not own, and items of sessions this tenant archived: an archived session
+   * keeps its registry place for a later unarchive, but a listing that still
+   * showed it would offer a session the tenant already put away.
+   */
   private async scopeSessionChannel(response: Response, tenantId: TenantId, user: UserId): Promise<Response> {
+    // Read the archive set before consuming the body: the snapshot has to come
+    // from the ambient partition while this call still holds it.
+    const archived = new Set<string>(
+      (this.ctx.get('workspaceRegistry')?.archivedSessionIds ?? []).map(String),
+    )
     const body = await response.json() as {
       result?: { ok?: boolean; value?: { items?: Array<{ sessionId?: unknown }> } }
     }
@@ -320,7 +331,8 @@ export class AgentHttp extends Service {
     if (result?.ok !== true || result.value === undefined || result.value.items === undefined) {
       return reconstruct(response, body)
     }
-    const items = result.value.items.filter(item => this.owns(item.sessionId, tenantId, user))
+    const items = result.value.items.filter(item =>
+      this.owns(item.sessionId, tenantId, user) && !archived.has(String(item.sessionId)))
     return reconstruct(response, { ...body, result: { ...result, value: { ...result.value, items } } })
   }
 }

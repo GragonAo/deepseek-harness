@@ -1,10 +1,10 @@
-/**
+﻿/**
  * Ambient multi-tenant tool tier roots.
  *
  * The multi-tenant carrier derives three tool-manifest directories from the
  * current (tenant, user) scope and exposes them through the optional
  * `ctx.toolTiers` service the tool-manifest loader reads: the case-shared
- * directory `<tenant.workspaceRoot>/shared/tools`, the user-global directory
+ * directory `<tenant.workspaceRoot>/tools`, the user-global directory
  * `<usersRoot>/<sub>/tools`, and the system directory (default
  * `$DSH_HOME/system/tools`). Lower-rank tiers outrank higher-rank ones, so a
  * case tool overwrites a same-named user-global tool, which overwrites a
@@ -67,7 +67,7 @@ class ToolTierService extends Service implements ToolTierProvider {
     if (tenant !== undefined) {
       roots.push({
         kind: 'case',
-        path: join(tenant.workspaceRoot, 'shared', 'tools'),
+        path: join(tenant.workspaceRoot, 'tools'),
         rank: CASE_TOOL_RANK,
         trustedHost: true,
       })

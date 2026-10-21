@@ -4,7 +4,7 @@
  * The multi-tenant carrier derives three skill directories from the current
  * (tenant, user) scope and exposes them through the optional `ctx.skillTiers`
  * service the filesystem skill provider reads: the case-shared directory
- * `<tenant.workspaceRoot>/shared/skills`, the user-global directory
+ * `<tenant.workspaceRoot>/skills`, the user-global directory
  * `<usersRoot>/<sub>/skills`, and the system directory (default
  * `$DSH_HOME/system/skills`). Lower-rank tiers outrank higher-rank ones, so a
  * case skill overwrites a same-named user-global skill, which overwrites a
@@ -18,7 +18,7 @@ import { join, resolve } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type Schema from '@deepseek-ai/schemastery'
-import { currentTenant, currentUser } from '@deepseek-ai/dsh-tenant'
+import { TENANT_SKILL_DIR_NAME, currentTenant, currentUser } from '@deepseek-ai/dsh-tenant'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import {
   CASE_SKILL_RANK,
@@ -67,7 +67,7 @@ class SkillTierService extends Service implements SkillTierProvider {
     if (tenant !== undefined) {
       roots.push({
         kind: 'case',
-        path: join(tenant.workspaceRoot, 'shared', 'skills'),
+        path: join(tenant.workspaceRoot, TENANT_SKILL_DIR_NAME),
         rank: CASE_SKILL_RANK,
         trustedHost: true,
       })

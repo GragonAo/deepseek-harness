@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+﻿import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -110,7 +110,7 @@ function tiers(root: string): Tiers {
   return {
     root,
     workspace,
-    case: join(workspace, 'shared', 'tools'),
+    case: join(workspace, 'tools'),
     userGlobal: join(root, 'users', 'user-1', 'tools'),
     system: join(root, 'system', 'tools'),
   }

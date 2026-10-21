@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+﻿import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -81,8 +81,8 @@ describe('tools-manifest tier registration', () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-tools-manifest-'))
     roots.push(root)
     const workspace = join(root, 'acme-workspace')
-    await addManifest(join(workspace, 'shared', 'tools'), 'probe.yaml', echoManifest('probe', 'case'))
-    await addManifest(join(workspace, 'shared', 'tools'), 'only-case.yaml', echoManifest('only_case', 'case-union'))
+    await addManifest(join(workspace, 'tools'), 'probe.yaml', echoManifest('probe', 'case'))
+    await addManifest(join(workspace, 'tools'), 'only-case.yaml', echoManifest('only_case', 'case-union'))
     await addManifest(join(root, 'users', 'user-1', 'tools'), 'probe.yaml', echoManifest('probe', 'user'))
     await addManifest(join(root, 'users', 'user-1', 'tools'), 'only-user.yaml', echoManifest('only_user', 'user-union'))
     await addManifest(join(root, 'system', 'tools'), 'probe.yaml', echoManifest('probe', 'system'))
@@ -115,8 +115,8 @@ describe('tools-manifest tier registration', () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-tools-manifest-'))
     roots.push(root)
     const workspace = join(root, 'acme-workspace')
-    await addManifest(join(workspace, 'shared', 'tools'), 'probe.yaml', echoManifest('probe', 'case'))
-    await addManifest(join(workspace, 'shared', 'tools'), 'restriction.yaml', 'allow: [probe]\n')
+    await addManifest(join(workspace, 'tools'), 'probe.yaml', echoManifest('probe', 'case'))
+    await addManifest(join(workspace, 'tools'), 'restriction.yaml', 'allow: [probe]\n')
 
     const ctx = await harness()
     await ctx.plugin(applyToolTier, { usersRoot: join(root, 'users'), systemToolsDir: join(root, 'system', 'tools') })

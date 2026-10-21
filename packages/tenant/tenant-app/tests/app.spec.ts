@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 租户服务的组合测试。
  *
  * 第一条断言配置边界：缺项、错项、拼错的字段名都必须响亮失败。
@@ -130,8 +130,9 @@ describe('租户服务配置', () => {
     expect(() => configFrom(withoutPythonEnv)).toThrow(/配置\.sandbox\.pythonEnv/)
   })
 
-  it('k8s 后端拒绝只属于 docker 的资源上限字段', () => {
-    expect(() => configFrom(`${K8S_MINIMAL}  memoryLimit: 2Gi\n`)).toThrow(/未知字段/)
+  it('k8s 后端的资源上限与 docker 同义，只是内存按 quantity 写', () => {
+    const config = configFrom(`${K8S_MINIMAL}  memoryLimit: 8Gi\n  cpuLimit: 2\n`)
+    expect(config.sandbox).toMatchObject({ backend: 'k8s', memoryLimit: '8Gi', cpuLimit: 2 })
   })
 
   it('环境变量覆盖文件里的取值', () => {
@@ -616,7 +617,7 @@ describe('租户技能三层根', () => {
     tempDirs.push(root)
     writeSkill(join(root, 'system', 'skills'), 'system-skill')
     writeSkill(join(root, 'users', 'staff-1', 'skills'), 'user-global-skill')
-    writeSkill(join(root, 'case', 'shared', 'skills'), 'case-skill')
+    writeSkill(join(root, 'case', 'skills'), 'case-skill')
 
     // 三层根全部落在临时目录里，唯一能让它们进目录的路径是：skill-tier 发布三层根、
     // skill-filesystem 扫描它们。清单里少了读取者，或 systemSkillsDir 落到 $DSH_HOME，

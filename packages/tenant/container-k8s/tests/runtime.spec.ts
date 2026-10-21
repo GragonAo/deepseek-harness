@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Kubernetes 沙箱 provider 的运行期行为：沙箱内写进去的事实、句柄缓存与空闲回收、
  * 冷启动期限，以及「取消一次调用」与「取消一次共享启动」的区别。
  * 这些都是答错时只会悄悄出错、不会大声崩掉的决定，所以在这里钉死。
@@ -78,6 +78,8 @@ class FakeCluster implements ContainerCliRunner {
   conflictOnCreate = false
   /** `create` 造出的 Pod 的阶段：设成 Pending 就得到一个永远起不来的沙箱。 */
   createPhase = 'Running'
+  /** 集群为沙箱记下的事件：替换一个终态沙箱时，provider 会把这些话读出来当作死因。 */
+  events: { type?: string; reason?: string; message?: string }[] = []
   /** `create` 造出的 Pod 是否 Ready。 */
   createReady = true
 
@@ -107,14 +109,16 @@ class FakeCluster implements ContainerCliRunner {
       if (!this.pod) return { exitCode: 1, stdout: '', stderr: 'Error from server (NotFound): pods not found' }
       return { exitCode: 0, stdout: JSON.stringify(podDocument(this.pod)), stderr: '' }
     }
-    if (verb === 'get' && kind === 'events') return { exitCode: 0, stdout: JSON.stringify({ items: [] }), stderr: '' }
+    if (verb === 'get' && kind === 'events') return { exitCode: 0, stdout: JSON.stringify({ items: this.events }), stderr: '' }
     if (verb === 'delete') {
       // 只有字段选择器点名的阶段才真的被删掉：生产里的收尸只碰终态 Pod，假集群也要照这条走，
       // 否则「收养一个正在跑的沙箱」这类用例会被一次收尸悄悄清空。
       const selector = args.find(part => part.startsWith('status.phase='))
       const phase = selector?.slice('status.phase='.length)
-      if (phase === undefined || phase === this.pod?.phase) this.pod = null
-      return { exitCode: 0, stdout: 'deleted', stderr: '' }
+      const deleted = phase === undefined || phase === this.pod?.phase
+      if (deleted) this.pod = null
+      // kubectl 每删掉一个 Pod 打一行 `pod "<名字>" deleted`；收尸那句日志就靠它报出删了什么。
+      return { exitCode: 0, stdout: deleted ? `pod "${sandboxPodName('sunce-1028', 'investigator-1')}" deleted\n` : '', stderr: '' }
     }
     return { exitCode: 0, stdout: '', stderr: '' }
   }
@@ -203,8 +207,32 @@ class FakeClient implements ToolExecClient {
 /** 一套装好的 provider 加它的两个假接缝；传入已有的集群可以模拟服务同一主体的另一个 host 实例。 */
 function harness(overrides: Partial<Config> = {}, cluster = new FakeCluster()) {
   const client = new FakeClient()
-  const rt = new K8sContainerRuntime(new Context(), config(overrides), cluster, client)
-  return { rt, cluster, client }
+  const ctx = new Context()
+  const rt = new K8sContainerRuntime(ctx, config(overrides), cluster, client)
+  return { rt, cluster, client, logs: captureLogs(ctx) }
+}
+
+/** 一条被记下来的日志：格式串与它收到的参数分开留着，断言因此能钉住两句各自的内容。 */
+interface CapturedLog {
+  format: string
+  args: unknown[]
+}
+
+/**
+ * 记下 provider 通过 `ctx.logger` 说出来的每一句。
+ *
+ * 沙箱的生命周期（创建、收养、替换、收尸）在别的组件里都看不见：Pod 由这个 provider 按需创建，
+ * 而这些事实只存在于内存与集群里。日志是运维唯一的出口，所以它的内容值得被钉住。
+ */
+function captureLogs(ctx: Context): { infos: CapturedLog[]; warns: CapturedLog[] } {
+  const infos: CapturedLog[] = []
+  const warns: CapturedLog[] = []
+  const record = (into: CapturedLog[]) => (...args: unknown[]) => {
+    into.push({ format: String(args[0]), args: args.slice(1) })
+  }
+  ctx.logger.info = record(infos) as typeof ctx.logger.info
+  ctx.logger.warn = record(warns) as typeof ctx.logger.warn
+  return { infos, warns }
 }
 
 /** 在某个租户的 (租户, 用户) 作用域里执行一条命令。 */
@@ -216,6 +244,10 @@ function execAs(rt: K8sContainerRuntime, tenant: Tenant, argv: string[] = ['echo
 /** 在默认租户作用域里执行一条命令。 */
 const execOnce = (rt: K8sContainerRuntime, argv?: string[], signal?: AbortSignal): Promise<ContainerCommandResult> =>
   execAs(rt, TENANT, argv, signal)
+
+/** 在默认租户作用域里执行一条带执行选项的命令：会话工作目录按 `opts.env` 里的会话 id 解析。 */
+const execWith = (rt: K8sContainerRuntime, opts: ContainerExecOptions, argv: string[] = ['echo', 'hi']): Promise<ContainerCommandResult> =>
+  runWithTenant(TENANT, () => runWithUser(UserId('investigator-1'), () => rt.exec(argv[0] as string, argv.slice(1), opts)))
 
 /** 等一小段真实时间，让计时器到点。 */
 const settle = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
@@ -297,9 +329,94 @@ describe('跨 host 实例的沙箱归属', () => {
   it('adopts the winner when two instances create the same sandbox concurrently', async () => {
     const cluster = new FakeCluster()
     cluster.conflictOnCreate = true
+    const { rt, logs } = harness({}, cluster)
     // 输掉创建的那个实例收养赢家建出来的沙箱，而不是报一个调用方无能为力的失败。
-    await expect(execOnce(harness({}, cluster).rt)).resolves.toMatchObject({ exitCode: 0 })
+    await expect(execOnce(rt)).resolves.toMatchObject({ exitCode: 0 })
+    // 它没有创建任何一个沙箱，日志里也不该说它创建了。
+    expect(logs.infos).toEqual([
+      {
+        format: 'container-k8s: lost the creation race for sandbox %s (tenant %s, subject %s); adopting the winner',
+        args: [sandboxPodName('sunce-1028', 'investigator-1'), 'sunce-1028', 'investigator-1'],
+      },
+    ])
   }, 30000)
+})
+
+describe('沙箱生命周期的日志', () => {
+  it('records the sandbox it created, with the bound that applied to it', async () => {
+    const bounded = harness({ memoryLimit: '6Gi' })
+    await execOnce(bounded.rt)
+    // 沙箱按需创建、又在别的组件里看不见，所以创建事实与这一次生效的上界一起进日志：
+    // 事后查「它为什么被节点杀掉」时，这是唯一的起点。
+    expect(bounded.logs.infos).toEqual([
+      {
+        format: 'container-k8s: created sandbox %s for tenant %s subject %s (image %s, %s)',
+        args: [sandboxPodName('sunce-1028', 'investigator-1'), 'sunce-1028', 'investigator-1', 'dsh-tool-exec:latest', 'limits {"memory":"6Gi"}'],
+      },
+    ])
+
+    const unbounded = harness()
+    await execOnce(unbounded.rt)
+    expect(unbounded.logs.infos[0]?.args[4]).toBe('no resource limits')
+  })
+
+  it('records the sandbox it adopted instead of building a fresh one', async () => {
+    const first = harness()
+    await execOnce(first.rt)
+    const second = harness({}, first.cluster)
+    await execOnce(second.rt)
+    // 之后每一条命令都落在这个沙箱上，而这条对应关系只存在于内存里。
+    expect(second.logs.infos).toEqual([
+      {
+        format: 'container-k8s: adopting sandbox %s for tenant %s subject %s (phase %s)',
+        args: [sandboxPodName('sunce-1028', 'investigator-1'), 'sunce-1028', 'investigator-1', 'Running'],
+      },
+    ])
+  })
+
+  it('records the death of the sandbox it replaces, with the events behind it', async () => {
+    const first = harness()
+    await execOnce(first.rt)
+    first.cluster.pod!.phase = 'Failed'
+    first.cluster.events = [{ type: 'Warning', reason: 'OOMKilling', message: 'Memory cgroup out of memory' }]
+    const second = harness({}, first.cluster)
+    await execOnce(second.rt)
+    // 替换本身不报错，死因只出现在集群事件里：不记下来，宿主日志对一个消失的沙箱完全沉默。
+    expect(second.logs.warns).toEqual([
+      {
+        format: 'container-k8s: replacing sandbox %s for tenant %s subject %s: it is in phase %s%s',
+        args: [
+          sandboxPodName('sunce-1028', 'investigator-1'),
+          'sunce-1028',
+          'investigator-1',
+          'Failed',
+          '; events: Warning OOMKilling: Memory cgroup out of memory',
+        ],
+      },
+    ])
+
+    // 集群没有留下事件时替换照样发生，只是日志里少一句死因。
+    first.cluster.events = []
+    first.cluster.pod!.phase = 'Failed'
+    const third = harness({}, first.cluster)
+    await execOnce(third.rt)
+    expect(third.logs.warns[0]?.args[4]).toBe('')
+  })
+
+  it('reports the terminal sandboxes it reaped at startup', async () => {
+    const cluster = new FakeCluster()
+    cluster.pod = { spec: '', phase: 'Failed', ready: false }
+    const { logs } = harness({}, cluster)
+    await settle(20)
+    // 收尸发生在上一次宿主进程结束之后，没有别的记录：说出删掉了哪些、停在哪个阶段，
+    // 才知道一个沙箱是自己空闲退出还是被节点杀掉。
+    expect(logs.infos).toEqual([
+      {
+        format: 'container-k8s: reaped %d terminal sandbox pod(s) in phase %s: %s',
+        args: [1, 'Failed', `pod "${sandboxPodName('sunce-1028', 'investigator-1')}" deleted`],
+      },
+    ])
+  })
 })
 
 describe('沙箱内写进去的事实', () => {
@@ -323,7 +440,7 @@ describe('沙箱内写进去的事实', () => {
     await execOnce(rt)
     const env = envOf(cluster.specs[0]!)
 
-    // 身份事实由平台给出：Pod 名与 /shared 目录名都是推不出「哪个案子、哪个人」的把手。
+    // 身份事实由平台给出：Pod 名与 /case 目录名都是推不出「哪个案子、哪个人」的把手。
     expect(env.DSH_CASE_ID).toBe('sunce-1028')
     expect(env.DSH_TENANT_ID).toBe('sunce-1028')
     expect(env.DSH_USER_ID).toBe('investigator-1')
@@ -348,6 +465,19 @@ describe('沙箱内写进去的事实', () => {
     const env = envOf(cluster.specs[0]!)
     expect(env.DSH_USER_ID).toBe('investigator-1')
     expect(env.EXTRA).toBe('kept')
+  })
+
+  it('points library caches at the writable /tmp the Pod mounts, and lets the deployment override it', async () => {
+    const plain = harness()
+    await execOnce(plain.rt)
+    // 根文件系统只读，而 HOME 是 /root：按默认位置写缓存的库每次都拿到 EROFS，matplotlib 会因此
+    // 在每一条用到它的命令输出里插一段警告并退回临时目录。Pod 自己挂的 /tmp 是唯一保证可写的位置。
+    expect(envOf(plain.cluster.specs[0]!).MPLCONFIGDIR).toBe('/tmp/matplotlib')
+
+    const overridden = harness({ env: { MPLCONFIGDIR: '/opt/cache' } })
+    await execOnce(overridden.rt)
+    // 缓存位置是部署可以改的，所以它排在身份事实之前：给了同名项就听它的。
+    expect(envOf(overridden.cluster.specs[0]!).MPLCONFIGDIR).toBe('/opt/cache')
   })
 
   it('takes /tools from the tenant record and falls back to the configured root', async () => {
@@ -494,6 +624,57 @@ describe('沙箱生命周期', () => {
   }, 30000)
 })
 
+describe('会话工作目录', () => {
+  it('runs each session under its own directory on the mounted session root', async () => {
+    const { rt, cluster, client } = harness()
+    await execWith(rt, { env: { DSH_SESSION_ID: 'session-cdb4d064' } })
+    // 会话目录建在挂载进来的会话根上。容器本地的 workDir 两件事都做不到：
+    // 沙箱消失时它会连会话的产出一起消失，而且同一个人的所有会话共用同一层。
+    expect(client.commands().map(r => r.argv)).toEqual([
+      ['mkdir', '-p', '/sessions/session-cdb4d064'],
+      ['echo', 'hi'],
+    ])
+    const command = client.commands()[1]!
+    expect(command.cwd).toBe('/sessions/session-cdb4d064')
+    // 技能按 DSH_WORKDIR 认领自己该往哪写，所以它与真正的工作目录必须是同一个值。
+    expect(command.env?.DSH_WORKDIR).toBe('/sessions/session-cdb4d064')
+    expect(cluster.creates()).toBe(1)
+  })
+
+  it('creates the directory once per session, not once per command', async () => {
+    const { rt, client } = harness()
+    await execWith(rt, { env: { DSH_SESSION_ID: 'session-a' } })
+    await execWith(rt, { env: { DSH_SESSION_ID: 'session-a' } })
+    // 第二条命令照样落在那个目录里，但不该再跑一次 mkdir：目录已经在磁盘上了。
+    expect(client.commands().map(r => r.argv)).toEqual([
+      ['mkdir', '-p', '/sessions/session-a'],
+      ['echo', 'hi'],
+      ['echo', 'hi'],
+    ])
+
+    // 另一个会话有它自己的一层，第一次用它时照样要建。
+    await execWith(rt, { env: { DSH_SESSION_ID: 'session-b' } })
+    expect(client.commands().at(-2)!.argv).toEqual(['mkdir', '-p', '/sessions/session-b'])
+  })
+
+  it('keeps the caller working directory when the exec carries no session', async () => {
+    const { rt, client } = harness()
+    // 探针与宿主自己的工具调用没有会话：这时唯一说得通的目录就是调用方给的那个。
+    await execWith(rt, { cwd: '/tmp', env: { EXTRA: 'kept' } })
+    expect(client.commands().map(r => r.argv)).toEqual([['echo', 'hi']])
+    expect(client.commands()[0]!.cwd).toBe('/tmp')
+    expect(client.commands()[0]!.env).toEqual({ EXTRA: 'kept' })
+  })
+
+  it('refuses a session id that is not a plain directory name', async () => {
+    const { rt, client } = harness()
+    // 会话 id 直接成为路径分量：能跳出工作目录的值一律不进沙箱，命令退回调用方的工作目录。
+    await execWith(rt, { env: { DSH_SESSION_ID: '../../etc' } })
+    expect(client.commands().map(r => r.argv)).toEqual([['echo', 'hi']])
+    expect(client.commands()[0]!.cwd).toBeUndefined()
+  })
+})
+
 describe('构造即校验', () => {
   // 构造即校验：配置错必须在加载时失败，而不是等到第一次建沙箱。
   // 收尸那条 kubectl 调用是构造时唯一会跑出去的异步工作，这里也注入假 runner：不注入就等于
@@ -588,5 +769,28 @@ describe('交互式会话', () => {
     expect(client.requests.filter(request => isSignalRequest(request.req))
       .map(request => request.req.argv.slice(-2))).toEqual([['SIGTERM', '42']])
     await expect(session.done).resolves.toEqual({ exitCode: 0, signal: 'SIGTERM' })
+  })
+})
+
+describe('沙箱资源上限', () => {
+  it('把配置的内存与 CPU 上限写进沙箱容器的 limits', async () => {
+    const cluster = new FakeCluster()
+    await execOnce(harness({ memoryLimit: '8Gi', cpuLimit: 2 }, cluster).rt)
+    const containers = (JSON.parse(cluster.specs[0]!) as { spec: { containers: { resources?: unknown }[] } }).spec.containers
+    // 只声明 limits：等额的 requests 会把这份内存从节点上永久预留出去，而沙箱是逐个突发起来的。
+    expect(containers[0]!.resources).toEqual({ limits: { memory: '8Gi', cpu: '2' } })
+  }, 30000)
+
+  it('不配上限时不声明 resources，Pod 落在 BestEffort', async () => {
+    const cluster = new FakeCluster()
+    await execOnce(harness({}, cluster).rt)
+    const containers = (JSON.parse(cluster.specs[0]!) as { spec: { containers: Record<string, unknown>[] } }).spec.containers
+    expect(containers[0]!.resources).toBeUndefined()
+  }, 30000)
+
+  it('加载期就拒绝不是 quantity 的内存上限', () => {
+    // schema 只要求它是一个字符串（`z.string()`），所以这道检查在构造函数里，
+    // 否则写错的取值要等到创建 Pod 才被 apiserver 拒绝，且报错指向拼出来的 spec。
+    expect(() => harness({ memoryLimit: '2g' })).toThrow(/memoryLimit/)
   })
 })
