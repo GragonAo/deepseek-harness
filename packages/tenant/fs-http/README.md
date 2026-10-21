@@ -18,6 +18,8 @@
 
 `GET /files/<scope>?path=<dir>` 列目录，返回 `{ scope, path, writable, entries }`：每个文件条目带 `size`、`modifiedAt` 与它的 `etag`，因此前端点开一个文件就能直接读、改、带 `If-Match` 写回，不需要先发一次 `HEAD`。写入过程中的临时文件（`.<name>.dsh-tmp.<hex>`）不出现在清单里。
 
+路径段按 URL 编码送：中文与空格写成 `%XX`（`/files/user/案子报告%EF%BC%882026%EF%BC%89.docx`），服务端逐段解码后在校验段名之前不接受原始非 ASCII 字节。字面文件名不做任何改写（不转拼音、不去括号），所以宿主目录里看到的正是业务侧调用时用的那个名字。
+
 ## 方法
 
 | 方法 | 语义 | 成功应答 |
