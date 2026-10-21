@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Kubernetes 容器运行时 provider：每个 (租户, 用户) 一个裸沙箱 Pod，通过 Pod 自己的 IP
  * 用 HTTP 访问。命令不走 `kubectl exec`；Pod 里跑的是与 Docker provider 相同的
  * tool-exec 服务，因此沙箱镜像与线上协议始终是同一份约定。
@@ -674,7 +674,7 @@ export class K8sContainerRuntime extends ContainerRuntime {
     using transport = deadline(opts?.signal, this.transportTimeoutMs, TRANSPORT_TIMEOUT)
     /* jscpd:ignore-end */
     try {
-      // 会话目录落在挂载进来的案件成员工作区上，所以它可能已经存在（同一个人的另一个沙箱、
+      // 会话目录落在挂载进来的会话根上，所以它可能已经存在（同一个人的另一个沙箱、
       // 或上一次启动建的），也可能还没建：`mkdir -p` 对两种情况都对，而每个会话只跑一次。
       if (sessionDir !== undefined) await this.ensureSessionDir(status, key, sessionDir, transport.signal)
       return await this.runIn(this.toolExecBaseUrl(status), req, transport.signal)

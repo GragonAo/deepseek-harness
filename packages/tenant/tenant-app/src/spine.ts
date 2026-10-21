@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 组合清单：租户服务挂载哪些插件、以什么默认配置挂载。
  *
  * 这份清单是租户栈自己的事实，不再从 dsh 的 bundle 补丁读取——bundle 属于 dsh 的分发形态，
@@ -40,11 +40,11 @@ const DEFAULT_MAX_PARALLEL_SUB_CALLS = 32
 /**
  * 执行容器里的默认工作目录：`/tmp/work`。
  *
- * 它只对不带会话的 exec 生效：带会话的命令都跑在该会话自己的目录里（`/workspace/<会话 id>`，
- * 即挂载进来的用户案件工作目录，落在持久卷上）。这个默认值是容器本地的路径：`/tmp` 是每个沙箱
- * 自己的 `emptyDir`，不是挂载点，所以它的内容随沙箱销毁而消失。分层挂载（`/workspace`、
- * `/case`、`/global`）是模型显式写绝对路径时的落点，也是发布工具唯一读得到的地方。部署按
- * `sandbox.workDir` 覆盖。
+ * 它只对不带会话的 exec 生效：带会话的命令都跑在该会话自己的目录里（`/sessions/<会话 id>`，
+ * 即挂载进来的会话根下那一层，落在持久卷上，见 `sandboxSessionDir()`）。这个默认值是容器本地的
+ * 路径：`/tmp` 是每个沙箱自己的 `emptyDir`，不是挂载点，所以它的内容随沙箱销毁而消失。分层挂载
+ * （`/workspace`、`/case`、`/global`）是模型显式写绝对路径时的落点，也是发布工具唯一读得到的地方。
+ * 部署按 `sandbox.workDir` 覆盖。
  */
 const DEFAULT_WORK_DIR = '/tmp/work'
 
