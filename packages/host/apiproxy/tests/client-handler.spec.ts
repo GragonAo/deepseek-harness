@@ -89,7 +89,13 @@ function scriptedApi(overrides: {
       insertSessionBefore: r => ok(r, { workspace: { workspaceId: 'w1' as never, path: '/t', title: 't', sessionIds: [], createdAt: '0', updatedAt: '0' } }),
       archiveSession: r => ok(r, { archivedSessionIds: [r.payload.sessionId] }),
     },
-    skills: { list: r => ok(r, { skills: [] }), ...overrides.skills },
+    skills: {
+      list: r => ok(r, { skills: [] }),
+      install: r => ok(r, { name: 'stub', directory: '/t/skills/stub', replaced: false, files: ['SKILL.md'], visible: true }),
+      remove: r => ok(r, { name: r.payload.name, directory: '/t/skills/stub', visible: false }),
+      installed: r => ok(r, { directory: '/t/skills', entries: [] }),
+      ...overrides.skills,
+    },
     agentPresets: {
       list: r => ok(r, { presets: [], authorable: false, hasDocument: false }),
       select: r => ok(r, { agentPreset: r.payload.agentPreset }),

@@ -222,6 +222,21 @@ function fakeApi(overrides: Partial<{ muxFrames: MuxFrame[]; hostFrames: HostFra
       async list(request) {
         return { rpcId: request.rpcId, result: { ok: true, value: { skills: [{ name: 'commit-helper', description: 'Git commits', modelInvocable: true }] } } }
       },
+      async install(request) {
+        return {
+          rpcId: request.rpcId,
+          result: {
+            ok: true,
+            value: { name: 'commit-helper', directory: '/t/skills/commit-helper', replaced: false, files: ['SKILL.md'], visible: true },
+          },
+        }
+      },
+      async remove(request) {
+        return { rpcId: request.rpcId, result: { ok: true, value: { name: request.payload.name, directory: '/t/skills/commit-helper', visible: false } } }
+      },
+      async installed(request) {
+        return { rpcId: request.rpcId, result: { ok: true, value: { directory: '/t/skills', entries: [] } } }
+      },
     },
     goals: {
       async create(request) {

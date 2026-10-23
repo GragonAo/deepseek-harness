@@ -1555,6 +1555,13 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
     ['my-agent', { trust: 'user', content: "- id: tool-read\n  name: '@deepseek-ai/dsh-tool-read'\n" }],
   ])
   let fixtureDefaultPreset = 'standard'
+  /**
+   * The fixture's one writable skill tier: a management view installs, replaces,
+   * and removes here, so the journey sees the catalog it wrote. The bundle's
+   * first line stands in for the frontmatter name the real document reader
+   * extracts — the fake never unzips anything.
+   */
+  const fixtureInstalledSkills = new Map<string, string>()
   const nextTurn = new Map<SessionId, number>([[sid('fx-alpha'), 75]])
   let nextSession = 1
   let nextRpc = 1
@@ -1673,6 +1680,18 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
   }
 
   const summaryOf = (id: SessionId): SessionSummary | undefined => sessions.find(s => s.sessionId === id)
+  /** Skill name the fixture's stand-in bundle carries: the decoded archive's first line. */
+  const fixtureBundleName = (zip: string): string => atob(zip).split('\n')[0]?.trim() ?? ''
+  /** A refused skill tier mutation, shaped like the host's own refusal code. */
+  const fixtureSkillRefusal = <P>(
+    request: RpcRequest<P>,
+    reason: string,
+    message: string,
+  ): Promise<RpcResponse<never>> => err<P, never>(request, {
+    code: 'skill-rejected',
+    message,
+    details: { reason, issues: [] },
+  })
   /** Shared session guard for sessionId-addressed catalog routes: the error
    *  response when the session is unknown, undefined when it exists. */
   const requireSession = (request: RpcRequest<{ sessionId: SessionId }>): Promise<RpcResponse<never>> | undefined => {
@@ -2882,6 +2901,35 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
           ],
         })
       },
+      install: (request) => {
+        const name = fixtureBundleName(request.payload.zip)
+        if (name === '') return fixtureSkillRefusal(request, 'bundle-invalid', 'the bundle names no skill on its first line')
+        const replaced = fixtureInstalledSkills.has(name)
+        if (replaced && request.payload.replace !== true) {
+          return fixtureSkillRefusal(request, 'skill-exists', `skill "${name}" is already installed`)
+        }
+        fixtureInstalledSkills.set(name, 'fixture 自建技能')
+        return ok(request, {
+          name,
+          directory: `${FIXTURE_HOME}/skills/${name}`,
+          replaced,
+          files: ['SKILL.md'],
+          visible: true,
+        })
+      },
+      remove: (request) => {
+        const { name } = request.payload
+        if (!fixtureInstalledSkills.delete(name)) {
+          return fixtureSkillRefusal(request, 'skill-absent', `no skill "${name}" is installed`)
+        }
+        return ok(request, { name, directory: `${FIXTURE_HOME}/skills/${name}`, visible: false })
+      },
+      installed: request => ok(request, {
+        directory: `${FIXTURE_HOME}/skills`,
+        entries: [...fixtureInstalledSkills].map(([name, description]) => ({
+          entry: name, name, description, loadable: true, issues: [],
+        })),
+      }),
     },
     goals: {
       // Compatibility face only: old API Proxy payloads and acknowledgements
@@ -3204,6 +3252,9 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'workspace.insertSessionBefore': return this.api.workspace.insertSessionBefore(request)
       case 'workspace.archiveSession': return this.api.workspace.archiveSession(request)
       case 'skill.list': return this.api.skills.list(request)
+      case 'skill.install': return this.api.skills.install(request)
+      case 'skill.remove': return this.api.skills.remove(request)
+      case 'skill.installed': return this.api.skills.installed(request)
       case 'agentPreset.list': return this.api.agentPresets.list(request)
       case 'agentPreset.select': return this.api.agentPresets.select(request)
       case 'agentPreset.read': return this.api.agentPresets.read(request)

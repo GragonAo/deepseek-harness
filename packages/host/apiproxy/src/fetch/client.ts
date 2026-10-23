@@ -40,7 +40,9 @@ import {
   workspaceListValueSchema,
   workspaceRenameValueSchema,
 } from '../api/workspace.schema.ts'
-import { skillListValueSchema } from '../api/skills.schema.ts'
+import {
+  skillInstallValueSchema, skillInstalledValueSchema, skillListValueSchema, skillRemoveValueSchema,
+} from '../api/skills.schema.ts'
 import {
   agentPresetCopyValueSchema, agentPresetListValueSchema, agentPresetOpenDocumentValueSchema,
   agentPresetReadValueSchema, agentPresetRemoveValueSchema, agentPresetSelectValueSchema,
@@ -123,6 +125,9 @@ export interface IApiClient {
   }
   skills: {
     list(payload: RequestPayload<'skill.list'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'skill.list'>>>
+    install(payload: RequestPayload<'skill.install'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'skill.install'>>>
+    remove(payload: RequestPayload<'skill.remove'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'skill.remove'>>>
+    installed(payload: RequestPayload<'skill.installed'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'skill.installed'>>>
   }
   agentPresets: {
     list(payload: RequestPayload<'agentPreset.list'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'agentPreset.list'>>>
@@ -199,6 +204,9 @@ export const UNARY_VALUE_SCHEMAS: { [K in keyof RpcMethodMap]: z.ZodType<Wire<Re
   'workspace.insertSessionBefore': workspaceInsertSessionBeforeValueSchema,
   'workspace.archiveSession': workspaceArchiveSessionValueSchema,
   'skill.list': skillListValueSchema,
+  'skill.install': skillInstallValueSchema,
+  'skill.remove': skillRemoveValueSchema,
+  'skill.installed': skillInstalledValueSchema,
   'agentPreset.list': agentPresetListValueSchema,
   'agentPreset.select': agentPresetSelectValueSchema,
   'agentPreset.read': agentPresetReadValueSchema,
@@ -455,6 +463,9 @@ export abstract class AbstractApiClient implements IApiClient {
 
   readonly skills: IApiClient['skills'] = {
     list: (payload, signal) => this.callUnary('skill.list', payload, signal),
+    install: (payload, signal) => this.callUnary('skill.install', payload, signal),
+    remove: (payload, signal) => this.callUnary('skill.remove', payload, signal),
+    installed: (payload, signal) => this.callUnary('skill.installed', payload, signal),
   }
 
   // Annotated like every sibling, and load-bearing rather than cosmetic:

@@ -22,7 +22,8 @@ import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { SessionQueryError, type SessionSearchCursor } from '@deepseek-ai/dsh-session-query'
 import { SubagentError } from '@deepseek-ai/dsh-subagent'
 import type { SubagentListEntry as CatalogSubagentListEntry } from '@deepseek-ai/dsh-subagent'
-import { isUserInvocable } from '@deepseek-ai/dsh-skill'
+import { isUserInvocable, type SkillTierKind } from '@deepseek-ai/dsh-skill'
+import { SkillInstallError } from '@deepseek-ai/dsh-skill-install'
 import type { Workspace, WorkspaceRecord } from '@deepseek-ai/dsh-workspace'
 import {
   workspaceDomainState, workspaceRecord, WorkspaceId as brandWorkspaceId,
@@ -997,6 +998,54 @@ function presetError(agentPreset: string, error: unknown): RpcError {
     return { code: 'agent-preset-invalid', message: error.message, details: { agentPreset, reason: error.message } }
   }
   return { code: 'internal', message: `agent preset "${agentPreset}": ${String(error)}`, details: {} }
+}
+
+/** The one skill tier this surface writes: the calling user's own directory. */
+const USER_SKILL_TIER: SkillTierKind = 'user-global'
+
+/** Absence of the installation seam, phrased for the management caller that asked for a skill write. */
+function skillInstallAbsent(): RpcError {
+  return {
+    code: 'internal',
+    message: 'skill installation is absent: no composition mounts @deepseek-ai/dsh-skill-install',
+    details: {},
+  }
+}
+
+/**
+ * Map one skill-installation refusal onto its wire code. The seam's own reason
+ * rides along as `details.reason`, and the coded document issues it carries ride
+ * along too, so a caller can report which line of `SKILL.md` made a bundle or an
+ * installed entry unloadable instead of a generic failure.
+ * @param error - thrown value from `ctx.skillInstall`.
+ * @param what - the operation the message attributes an unrecognized failure to.
+ * @returns the wire error for the request that raised it.
+ */
+function skillRefusal(error: unknown, what: 'installation' | 'removal' | 'listing'): RpcError {
+  if (error instanceof SkillInstallError) {
+    return {
+      code: 'skill-rejected',
+      message: error.message,
+      details: { reason: error.code, issues: skillIssues(error.details?.['issues']) },
+    }
+  }
+  return { code: 'internal', message: `skill ${what} failed: ${String(error)}`, details: {} }
+}
+
+/**
+ * Forward the document issues a refusal carries, dropping anything that is not
+ * one (the seam's detail slot is untyped for callers).
+ * @param issues - the refusal detail slot that may hold document issues.
+ * @returns the issues carrying a code and a message, in their original order.
+ */
+function skillIssues(issues: unknown): { code: string; message: string; line?: number }[] {
+  if (!Array.isArray(issues)) return []
+  return issues.flatMap((issue: unknown) => {
+    if (typeof issue !== 'object' || issue === null) return []
+    const { code, message, line } = issue as { code?: unknown; message?: unknown; line?: unknown }
+    if (typeof code !== 'string' || typeof message !== 'string') return []
+    return [{ code, message, ...typeof line === 'number' ? { line } : {} }]
+  })
 }
 
 class AgentPresetConflict extends Error {
@@ -3205,6 +3254,66 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           })
         } catch (error: unknown) {
           return err(request, { code: 'internal', message: `skill listing failed: ${String(error)}`, details: {} })
+        }
+      },
+
+      // The user-global tier is the whole of this surface's write scope: its root
+      // resolves from the request's own tenant/user scope (dsh-skill-tier), so a
+      // payload tier would only be a way to name one the caller cannot reach. The
+      // management surface owns the system tier.
+      async install(request) {
+        const install = ctx.get('skillInstall')
+        if (install === undefined) return err(request, skillInstallAbsent())
+        try {
+          const installed = await install.install({
+            tier: USER_SKILL_TIER,
+            bundle: Buffer.from(request.payload.zip, 'base64'),
+            ...request.payload.replace === undefined ? {} : { replace: request.payload.replace },
+          })
+          return ok(request, {
+            name: installed.name,
+            directory: installed.directory,
+            replaced: installed.replaced,
+            files: installed.files,
+            visible: installed.visible,
+          })
+        } catch (error: unknown) {
+          return err(request, skillRefusal(error, 'installation'))
+        }
+      },
+
+      async remove(request) {
+        const install = ctx.get('skillInstall')
+        if (install === undefined) return err(request, skillInstallAbsent())
+        try {
+          const removed = await install.remove({ tier: USER_SKILL_TIER, name: request.payload.name })
+          return ok(request, { name: removed.name, directory: removed.directory, visible: removed.visible })
+        } catch (error: unknown) {
+          return err(request, skillRefusal(error, 'removal'))
+        }
+      },
+
+      async installed(request) {
+        const install = ctx.get('skillInstall')
+        if (install === undefined) return err(request, skillInstallAbsent())
+        try {
+          const listing = await install.list({ tier: USER_SKILL_TIER })
+          return ok(request, {
+            directory: listing.directory,
+            entries: listing.entries.map(entry => ({
+              entry: entry.entry,
+              ...entry.name === undefined ? {} : { name: entry.name },
+              ...entry.description === undefined ? {} : { description: entry.description },
+              loadable: entry.loadable,
+              issues: entry.issues.map(issue => ({
+                code: issue.code,
+                message: issue.message,
+                ...issue.line === undefined ? {} : { line: issue.line },
+              })),
+            })),
+          })
+        } catch (error: unknown) {
+          return err(request, skillRefusal(error, 'listing'))
         }
       },
     },

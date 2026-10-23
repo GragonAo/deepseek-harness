@@ -25,9 +25,13 @@ describe('generateOpenApiDocument', () => {
   it('declares one POST path per unary RPC route with bearer security', () => {
     expect(doc.openapi).toBe('3.1.0')
     const routes = Object.keys(doc.paths)
-    // session.* + subagent.* + host.* + workspace.* + skill.list + agentPreset.* +
-    // goal.* + settings.* + credentials.* + llm.* = 52 routes.
-    expect(routes).toHaveLength(52)
+    // session.* + subagent.* + host.* + workspace.* + skill.* + agentPreset.* +
+    // goal.* + settings.* + credentials.* + llm.* = 55 routes (the three skill
+    // tier methods included).
+    expect(routes).toHaveLength(55)
+    // Named so a route that stops being projected fails on its own name, not
+    // only on the group count above.
+    expect(routes).toContain('/api/skill.install')
     for (const route of routes) {
       const operation = (doc.paths[route] as Json).post as Json
       expect(operation.security).toEqual([{ bearerAuth: [] }])

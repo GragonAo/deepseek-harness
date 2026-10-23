@@ -72,6 +72,14 @@ export interface RpcErrorDetailsMap {
   /** A credential write was refused (read-only shadowing layer or storage failure); the message is the seam's own text. */
   'credential-rejected': { ref: string }
   /**
+   * A skill installation, removal, or tier listing was refused: the caller's
+   * user-global tier is not in scope, the zip is not an acceptable bundle, the
+   * skill document is unloadable, the name already exists, or no such skill is
+   * installed. `reason` is the installation seam's own code, and `issues` lists
+   * the coded document problems that made an entry unloadable.
+   */
+  'skill-rejected': { reason: string; issues: { code: string; message: string; line?: number }[] }
+  /**
    * Interrogating a draft provider endpoint did not produce a model listing:
    * no adapter family serves the namespace, the protocol has no listing this
    * build can read, or the endpoint was unreachable, refused the credential,
