@@ -280,6 +280,43 @@ export class WorkspaceRegistry extends Service {
   }
 
   /**
+   * Forget one session completely: drop it from every workspace account in the
+   * ambient request partition and from the archive set, in one operation. A
+   * hard-deleted session is gone for good, so unlike {@link archiveSession}
+   * this drops the `sessionIds` slot instead of preserving it for a restore.
+   * The archive snapshot subscribers receive is written last, so it never
+   * reports an id that workspace accounting still holds.
+   *
+   * Idempotent, and unlike {@link archiveSession} it never rejects: an id
+   * accounted nowhere and unarchived resolves without writing, and an id this
+   * partition has never seen is a success. The session's own log is deleted by
+   * the caller, so a retry after a partial delete must not fail on a session
+   * the registry can no longer observe.
+   * @param sessionId - The session to remove from this partition's registry state.
+   * @returns resolution after durability.
+   */
+  async forgetSession(sessionId: SessionId): Promise<void> {
+    const state = await this.ensurePartitionState()
+    return this.enqueueOperation(state, async () => {
+      const current = state.state
+      const archived = current.archivedSessionIds.includes(sessionId)
+      // The raw record decides holders, not the filtered `sessionIds`
+      // projection: a candidate the projection hides is still accounted, and
+      // forgetting it is what keeps it from resurfacing if its header becomes
+      // valid again.
+      const holders = [...state.entities.values()].filter(entity =>
+        (state.table.get(entity.id) as WorkspaceRecord).sessionIds.includes(sessionId))
+      if (holders.length === 0 && !archived) return
+      for (const entity of holders) await entity.detachSession(sessionId)
+      if (!archived) return
+      await this.setState(state, {
+        ...current,
+        archivedSessionIds: current.archivedSessionIds.filter(id => id !== sessionId),
+      })
+    })
+  }
+
+  /**
    * Resolve by canonical directory path without creating or mutating a
    * workspace. A missing path rejects during `realpath`; an existing unowned
    * directory returns `undefined`.

@@ -501,6 +501,34 @@ export function requireScope(scope: string): readonly string[] {
 }
 
 /**
+ * The one module-scoped store carrying the inbound request's headers. The
+ * carrier enters them for the execution tree of one request, so a provider
+ * acting later inside that tree — a tool call in the agent loop included —
+ * forwards the headers its caller sent, not a captured copy.
+ */
+const requestHeadersStorage = new AsyncLocalStorage<Readonly<Record<string, string>>>()
+
+/**
+ * Enter one inbound request's headers for an execution tree. Nested runs shadow
+ * the outer headers and restore them on unwind.
+ * @param headers - header values keyed by lowercased name.
+ * @param fn - work whose synchronous and asynchronous children read these headers.
+ * @returns `fn`'s result (possibly a promise).
+ */
+export function runWithRequestHeaders<T>(headers: Readonly<Record<string, string>>, fn: () => T): T {
+  return requestHeadersStorage.run(headers, fn)
+}
+
+/**
+ * The ambient inbound request headers, or `undefined` outside an authenticated
+ * request.
+ * @returns the headers keyed by lowercased name.
+ */
+export function currentRequestHeaders(): Readonly<Record<string, string>> | undefined {
+  return requestHeadersStorage.getStore()
+}
+
+/**
  * Whether a subject may act in the tenant. A tenant without a `members` list
  * (absent or empty) is open to any authenticated subject; one with a list
  * admits only the listed subjects.

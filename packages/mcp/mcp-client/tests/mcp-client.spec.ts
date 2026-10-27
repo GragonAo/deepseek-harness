@@ -513,6 +513,86 @@ describe('tool execution', () => {
     )
   })
 
+  it('sends the registered call metadata as params._meta, resolved per call', async () => {
+    const client = createMockClient([{ name: 'echo', inputSchema: { type: 'object' } }])
+    await syncTools(client as never, ctx, defaultOpts, new Map())
+
+    // No provider yet: the wire request carries no `_meta` at all.
+    await ctx.tools.execute({ signal: testToolSignal, callId: CallId('c0'), name: 'mcp__srv__echo', arguments: {} })
+    expect(client.callTool).toHaveBeenLastCalledWith(
+      { name: 'echo', arguments: {} },
+      undefined,
+      expect.objectContaining({ timeout: 60_000 }),
+    )
+
+    // The provider is read at call time, so a later registration reaches the wire.
+    let caseId = 'case-1'
+    ctx.provide('mcpCallMeta', { entries: () => ({ user_id: 'user-1', case_id: caseId }) })
+    await ctx.tools.execute({ signal: testToolSignal, callId: CallId('c1'), name: 'mcp__srv__echo', arguments: {} })
+    expect(client.callTool).toHaveBeenLastCalledWith(
+      { name: 'echo', arguments: {}, _meta: { user_id: 'user-1', case_id: 'case-1' } },
+      undefined,
+      expect.objectContaining({ timeout: 60_000 }),
+    )
+
+    caseId = 'case-2'
+    await ctx.tools.execute({ signal: testToolSignal, callId: CallId('c2'), name: 'mcp__srv__echo', arguments: {} })
+    expect(client.callTool).toHaveBeenLastCalledWith(
+      { name: 'echo', arguments: {}, _meta: { user_id: 'user-1', case_id: 'case-2' } },
+      undefined,
+      expect.objectContaining({ timeout: 60_000 }),
+    )
+  })
+
+  it('renders structuredContent for the model when the text blocks carry a placeholder', async () => {
+    const client = createMockClient(
+      [{ name: 'structured', inputSchema: { type: 'object' } }],
+      {
+        content: [{ type: 'text', text: 'result in structuredContent' }],
+        structuredContent: { person: { name: 'ada' }, accounts: ['1100', '2200'] },
+      },
+    )
+
+    await syncTools(client as never, ctx, defaultOpts, new Map())
+    const result = await ctx.tools.execute({
+      signal: testToolSignal, callId: CallId('c1'), name: 'mcp__srv__structured', arguments: {},
+    })
+
+    expect(result.isError).toBe(false)
+    expect(result.content).toEqual([{
+      type: 'text',
+      text: 'result in structuredContent\n{"person":{"name":"ada"},"accounts":["1100","2200"]}',
+    }])
+  })
+
+  it('renders an empty content array as the structuredContent serialization alone', async () => {
+    const client = createMockClient(
+      [{ name: 'structured_empty', inputSchema: { type: 'object' } }],
+      { content: [], structuredContent: { count: 2 } },
+    )
+
+    await syncTools(client as never, ctx, defaultOpts, new Map())
+    const result = await ctx.tools.execute({
+      signal: testToolSignal, callId: CallId('c1'), name: 'mcp__srv__structured_empty', arguments: {},
+    })
+
+    expect(result.content).toEqual([{ type: 'text', text: '{"count":2}' }])
+  })
+
+  it('does not repeat a structuredContent serialization the text already carries', async () => {
+    const client = createMockClient(
+      [{ name: 'structured_inlined', inputSchema: { type: 'object' } }],
+      { content: [{ type: 'text', text: '{"answer":42}' }], structuredContent: { answer: 42 } },
+    )
+
+    await syncTools(client as never, ctx, defaultOpts, new Map())
+    const result = await ctx.tools.execute({
+      signal: testToolSignal, callId: CallId('c1'), name: 'mcp__srv__structured_inlined', arguments: {},
+    })
+
+    expect(result.content).toEqual([{ type: 'text', text: '{"answer":42}' }])
+  })
+
   it('sends the raw name for normalized public names', async () => {
     const client = createMockClient(
       [{ name: 'admin.reset', inputSchema: { type: 'object' } }],

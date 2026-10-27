@@ -181,6 +181,53 @@ class CountingStartExecutor extends ShellExecutor {
   }
 }
 
+/** Foreground executor that reports the write effects its provider observed. */
+class ProducedExecutor extends ShellExecutor {
+  /** Paths this executor reports; empty models a provider that observed nothing. */
+  produced: readonly string[] = ['/sessions/session-7/out/report.docx']
+
+  resolve(request: ShellExecRequest): ShellExecSpec {
+    return {
+      command: request.command,
+      workdir: request.workdir ?? '/x',
+      timeoutMs: request.timeoutMs ?? 1000,
+      stdoutMaxBytes: request.stdoutMaxBytes ?? 64_000,
+      sandboxPolicy: request.sandboxPolicy,
+    }
+  }
+
+  run(spec: ShellExecSpec): Promise<ShellRunResult> {
+    return Promise.resolve({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      aborted: false,
+      timeoutMs: spec.timeoutMs,
+      stdout: { text: 'wrote the report', truncated: false },
+      stderr: { text: '', truncated: false },
+      ...this.produced.length > 0 ? { produced: this.produced } : {},
+    })
+  }
+
+  start(): ShellProcess {
+    // The produced chain is a foreground path; a background start has no
+    // settlement point to report write effects at.
+    throw new Error('unused: produced runs are foreground-only')
+  }
+}
+
+/** Harness whose shell provider reports `produced`, so the whole produced chain is observable. */
+async function setupProduced(produced?: readonly string[]) {
+  const ctx = new Context()
+  await ctx.plugin(SystemPrompt)
+  await ctx.plugin(ToolRuntime)
+  await ctx.plugin(BashEnvPlugin)
+  await ctx.plugin(ProducedExecutor)
+  if (produced !== undefined) (ctx.shell as ProducedExecutor).produced = produced
+  await ctx.plugin(ToolBash)
+  return ctx
+}
+
 async function setupSandboxed(withApproval = false) {
   const ctx = new Context()
   await ctx.plugin(SystemPrompt)
@@ -951,6 +998,38 @@ describe('tool-owned UI presentation (presentCall / presentResult)', () => {
       { content: [{ type: 'text', text: 'slow\n[timed out after 100ms]\n[exit code: 143]' }], isError: false },
     )
     expect(timedOut).toEqual({ card: 'terminal', output: 'slow\n[timed out after 100ms]', exitCode: 143 })
+  })
+
+  it('bash produced: an executed run carries the observed files in its canonical value and metadata', async () => {
+    const ctx = await setupProduced()
+    const result = await call(ctx, 'bash', { command: 'python make.py', description: 'Write the report' })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected bash success')
+    expect(result.value).toMatchObject({ produced: ['/sessions/session-7/out/report.docx'] })
+    // The canonical value is execution-local, so the same paths ride the
+    // persisted metadata as file locations and rebuild the card on replay.
+    expect(result.meta).toEqual({ produced: [{ path: '/sessions/session-7/out/report.docx' }] })
+    expect(ctx.tools.get('bash')!.presentResult!(
+      { command: 'python make.py', description: 'Write the report' },
+      result,
+    )).toEqual({
+      card: 'terminal',
+      output: 'wrote the report',
+      exitCode: 0,
+      produced: [{ path: '/sessions/session-7/out/report.docx' }],
+    })
+  })
+
+  it('bash produced: a run whose executor observed no write adds no produced metadata', async () => {
+    // A provider that observed nothing reports no paths, so neither the card nor
+    // the logged result grows a produced field.
+    const ctx = await setupProduced([])
+    const result = await call(ctx, 'bash', { command: 'echo hi', description: 'echo' })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected bash success')
+    expect(result.meta).toBeUndefined()
+    expect(ctx.tools.get('bash')!.presentResult!({ command: 'x', description: 'x' }, result))
+      .toEqual({ card: 'terminal', output: 'wrote the report', exitCode: 0 })
   })
 
   it('bash presentResult exit parse is the inverse of renderResult markers (round-trip)', async () => {

@@ -97,6 +97,14 @@ export interface TerminalCallView {
    * Omit entirely to let the bridge use the session workspace.
    */
   cwd?: string
+  /**
+   * Files this command creates or modifies, as opposed to {@link locations}
+   * which also covers what it only read. A call-time presenter cannot observe
+   * execution, so a terminal call view normally omits this; the completed
+   * {@link TerminalResultView} carries what the run actually wrote. Omit when
+   * the command changed no file, or when nothing could observe it.
+   */
+  produced?: FileLocation[]
 }
 
 /**
@@ -173,6 +181,13 @@ export interface TerminalResultView {
   exitCode?: number
   /** Signal name that killed the process (e.g. `SIGTERM`). Mutually exclusive with `exitCode`. */
   signal?: string
+  /**
+   * Files this command created or modified — the write effects of the run, not
+   * everything it looked at ({@link locations} covers follow-along reads too).
+   * A UI that lists a turn's produced files reads this. Omit when the command
+   * changed no file, or when the executor could not observe its effects.
+   */
+  produced?: FileLocation[]
 }
 
 /**

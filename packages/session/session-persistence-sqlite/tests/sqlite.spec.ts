@@ -831,3 +831,60 @@ describe('SessionPersistenceSqlite edge behavior', () => {
     await store.close()
   })
 })
+
+describe('SessionPersistenceSqlite deletion', () => {
+  it('removes the session metadata and event rows in one transaction', async () => {
+    const path = await freshDbPath('dsh-sqlite-remove-')
+    const store = new SqliteStore({ path, journalMode: 'wal', busyTimeoutMs: DEFAULT_BUSY_TIMEOUT_MS })
+    const removed = meta('removed')
+    const kept = meta('kept')
+    // Never-packed event types, so the physical row count is the event count.
+    await store.appendBatch(removed, [
+      { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+      { type: 'turn/end', seq: 1, time: 2, data: { turn: 1, reason: { kind: 'completed' } } },
+    ], false)
+    await store.appendBatch(kept, [{ type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } }], false)
+
+    await store.remove(removed.id)
+
+    // Physically gone from both tables, not merely hidden from the store's reads.
+    const db = new DatabaseSync(path)
+    expect(db.prepare(testSql('select-event-rows')).all(removed.id)).toEqual([])
+    expect(db.prepare(testSql('count-events')).get()).toEqual({ count: 1 })
+    db.close()
+    expect(await store.loadStored(removed.id)).toBeUndefined()
+    expect(await store.readStoredRevision(removed.id)).toBeUndefined()
+    expect((await store.list()).map(header => header.id)).toEqual([kept.id])
+    expect((await store.listSnapshots()).map(snapshot => snapshot.header.id)).toEqual([kept.id])
+
+    // An absent session, and a second removal of the same id, are no-ops.
+    await store.remove(removed.id)
+    await store.remove(meta('never-stored').id)
+    expect((await store.list()).map(header => header.id)).toEqual([kept.id])
+    await store.close()
+  })
+
+  it('rolls back a removal refused by a schema change and refuses an aborted signal', async () => {
+    const path = await freshDbPath('dsh-sqlite-remove-refused-')
+    const store = new SqliteStore({ path, journalMode: 'wal', busyTimeoutMs: DEFAULT_BUSY_TIMEOUT_MS })
+    const header = meta('remove-refused')
+    await store.appendBatch(header, chunkLog(2), false)
+
+    const reason = new Error('remove cancelled')
+    await expect(store.remove(header.id, AbortSignal.abort(reason))).rejects.toBe(reason)
+
+    // A foreign schema version observed at mutation time refuses the removal and
+    // rolls it back, so the session survives intact.
+    const migrated = new DatabaseSync(path)
+    migrated.exec(testSql('set-user-version-16'))
+    migrated.close()
+    await expect(store.remove(header.id)).rejects.toThrow(/schema changed before mutation/)
+
+    const restored = new DatabaseSync(path)
+    restored.exec(testSql('set-user-version-17'))
+    restored.close()
+    expect((await store.loadStored(header.id))?.events).toEqual(chunkLog(2))
+    expect((await store.list()).map(row => row.id)).toEqual([header.id])
+    await store.close()
+  })
+})

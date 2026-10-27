@@ -814,9 +814,6 @@
       "project": [
         "src/**/*.ts",
         "tests/**/*.ts"
-      ],
-      "ignoreDependencies": [
-        "@deepseek-ai/.+"
       ]
     },
     "packages/bundle/web-app": {

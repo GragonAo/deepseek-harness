@@ -95,9 +95,17 @@ function callToolUncached(
   args: Record<string, unknown>,
   exec: ToolExecution,
   opts: ToolBridgeOptions,
+  meta: Readonly<Record<string, string>> | undefined,
 ) {
   return client.request(
-    { method: 'tools/call', params: { name: rawName, arguments: args } },
+    {
+      method: 'tools/call',
+      params: {
+        name: rawName,
+        arguments: args,
+        ...(meta === undefined ? {} : { _meta: meta }),
+      },
+    },
     RawCallToolResultSchema,
     {
       signal: exec.signal,
@@ -309,7 +317,7 @@ function createDefinition(
   }
 }
 
-/** Build the canonical result schema and existing Native text projection. */
+/** Build the canonical result schema and the Native text projection. */
 function createOutput(rawName: string, structuredSchema: JsonSchemaNode | undefined): ToolDefinition['output'] {
   return {
     schema: {
@@ -323,9 +331,36 @@ function createOutput(rawName: string, structuredSchema: JsonSchemaNode | undefi
     },
     render(_args: unknown, value: JsonValue) {
       const result = value as unknown as McpResult
-      return [{ type: 'text', text: extractText(result.content, rawName) }]
+      return [{ type: 'text', text: modelVisibleText(result, rawName) }]
     },
   }
+}
+
+/**
+ * The text one MCP result contributes to the model's context.
+ *
+ * `content` blocks project exactly as they always have. A result that also
+ * carries `structuredContent` gets that value serialized as compact JSON on its
+ * own line, because the structured channel is where a server that answers with
+ * data puts the payload: a text-only projection would hand the model whatever
+ * placeholder the `content` blocks hold instead. Two cases avoid a doubled
+ * payload — a server that inlines the serialization in its text (what the MCP
+ * specification asks of servers that populate `structuredContent`) keeps its
+ * text untouched, and an empty `content` array becomes the serialization alone
+ * rather than a no-content placeholder followed by data.
+ *
+ * @param result - Canonical result value being projected.
+ * @param rawName - MCP wire tool name, named by non-text content placeholders.
+ * @returns Model-visible text for the result.
+ */
+function modelVisibleText(result: McpResult, rawName: string): string {
+  const serialized = result.structuredContent === undefined
+    ? undefined
+    : JSON.stringify(result.structuredContent)
+  if (serialized !== undefined && result.content.length === 0) return serialized
+  const text = extractText(result.content, rawName)
+  if (serialized === undefined || text.includes(serialized)) return text
+  return `${text}\n${serialized}`
 }
 
 /**
@@ -348,6 +383,7 @@ type CallAttempt =
  * @param args - parsed arguments, already normalized to an object.
  * @param exec - the harness execution carrying cancellation.
  * @param opts - bridge options owning the limiter and call timeout.
+ * @param meta - ambient `_meta` entries for this call, or `undefined`.
  * @returns The attempt's outcome.
  */
 async function attemptToolCall(
@@ -356,11 +392,12 @@ async function attemptToolCall(
   args: Record<string, unknown>,
   exec: ToolExecution,
   opts: ToolBridgeOptions,
+  meta: Readonly<Record<string, string>> | undefined,
 ): Promise<CallAttempt> {
   const release = await opts.limiter.acquire(exec.signal)
   let attempt: CallAttempt
   try {
-    attempt = { kind: 'served', result: await callToolUncached(client, rawName, args, exec, opts) }
+    attempt = { kind: 'served', result: await callToolUncached(client, rawName, args, exec, opts, meta) }
   } catch (error: unknown) {
     attempt = {
       kind: 'refused',
@@ -406,9 +443,10 @@ async function callToolWithinCap(
   exec: ToolExecution,
   opts: ToolBridgeOptions,
   retries: number,
+  meta: Readonly<Record<string, string>> | undefined,
 ): Promise<Record<string, unknown>> {
   for (let attempt = 0; ; attempt += 1) {
-    const outcome = await attemptToolCall(client, rawName, args, exec, opts)
+    const outcome = await attemptToolCall(client, rawName, args, exec, opts, meta)
     if (outcome.kind === 'served') return outcome.result
     if (!outcome.overload || attempt >= retries) throw outcome.error
     const delayMs = retryDelayMs(opts.concurrency, attempt + 1, Math.random)
@@ -455,7 +493,10 @@ function createExecutor(
     // string/number/null). Fallback to {} lets the MCP server produce a
     // specific "missing required param" error the model can learn from.
     const argsObj = (typeof args === 'object' && args !== null ? args : {}) as Record<string, unknown>
-    const result = await callToolWithinCap(client, rawName, argsObj, exec, opts, traits.retries)
+    // Read per call, not at registration: the carrier enters the caller's
+    // request context for the execution tree this call runs in.
+    const meta = ctx.get('mcpCallMeta')?.entries()
+    const result = await callToolWithinCap(client, rawName, argsObj, exec, opts, traits.retries, meta)
 
     // The SDK may return a legacy `toolResult` shape; normalize to content array.
     if (!Array.isArray(result.content)) {

@@ -49,7 +49,7 @@ async function harness(options: HarnessOptions = {}) {
   const list = vi.fn(async () => listed)
   const load = vi.fn(() => { throw new Error('event bodies must not be loaded') })
   const inspect = vi.fn(() => { throw new Error('event bodies must not be inspected') })
-  ctx.provide('sessionPersistence', { list, load, inspect } as never)
+  ctx.provide('sessionPersistence', { isDeleted: () => false, list, load, inspect } as never)
 
   if (options.sessionStore === true) {
     await ctx.plugin(SessionStore)
@@ -257,7 +257,7 @@ async function partitionHarness() {
   const list = vi.fn(async () => [] as SessionHeader[])
   const load = vi.fn(() => { throw new Error('event bodies must not be loaded') })
   const inspect = vi.fn(() => { throw new Error('event bodies must not be inspected') })
-  ctx.provide('sessionPersistence', { list, load, inspect } as never)
+  ctx.provide('sessionPersistence', { isDeleted: () => false, list, load, inspect } as never)
   await ctx.plugin(WorkspaceRegistry)
   return { ctx, scope, registry: ctx.workspaceRegistry }
 }
@@ -325,7 +325,7 @@ describe('WorkspaceRegistry lifecycle and bootstrap', () => {
     expect(pool.media.has('workspace')).toBe(false)
 
     const list = vi.fn(async () => [] as SessionHeader[])
-    ctx.provide('sessionPersistence', { list } as never)
+    ctx.provide('sessionPersistence', { isDeleted: () => false, list } as never)
     await fiber.await()
     expect(ctx.workspaceRegistry.list()).toEqual([])
     expect(list).toHaveBeenCalledTimes(1)
@@ -1072,6 +1072,111 @@ describe('registry-global session archive', () => {
     )
     const upgraded = await harness({ pool: legacy })
     expect(upgraded.registry.archivedSessionIds).toEqual([])
+  })
+})
+
+describe('session forget', () => {
+  it('drops the account slot and the archive membership, publishing a snapshot without the id', async () => {
+    const dir = await makeDir('forget-home')
+    const result = await harness({ sessions: [header('kept', dir, 100), header('gone', dir, 200)] })
+    const workspace = result.registry.list()[0]!
+    await result.registry.archiveSession(SessionId('gone'))
+    const written = result.changes.length
+
+    await result.registry.forgetSession(SessionId('gone'))
+
+    expect(workspace.sessionIds).toEqual(['kept'])
+    expect(result.registry.archivedSessionIds).toEqual([])
+    expect(storedRecord(result.pool, workspace.id).sessionIds).toEqual(['kept'])
+    expect(storedState(result.pool)).toEqual({
+      initialized: true,
+      workspaceIds: [workspace.id],
+      archivedSessionIds: [],
+    })
+    // The account write commits first, so the archive snapshot a subscriber
+    // receives — the one the host frame and the tenant carrier filter by —
+    // never carries an id an account still holds.
+    const emitted = result.changes.slice(written)
+    expect(emitted.map(change => change.table)).toEqual(['workspaces', ''])
+    const snapshot = emitted.at(-1)!.value as WorkspaceDomainState
+    expect(snapshot.archivedSessionIds).toEqual([])
+  })
+
+  it('drops an account slot of an unarchived session without writing the archive state', async () => {
+    const dir = await makeDir('forget-unarchived')
+    const result = await harness({ sessions: [header('kept', dir, 100), header('gone', dir, 200)] })
+    const workspace = result.registry.list()[0]!
+    const written = result.changes.length
+
+    await result.registry.forgetSession(SessionId('gone'))
+
+    expect(workspace.sessionIds).toEqual(['kept'])
+    expect(result.changes.slice(written).map(change => change.table)).toEqual(['workspaces'])
+    expect(storedState(result.pool)).toEqual({
+      initialized: true,
+      workspaceIds: [workspace.id],
+      archivedSessionIds: [],
+    })
+  })
+
+  it('drops an archived id that no workspace accounts', async () => {
+    const dir = await makeDir('forget-stray')
+    const live = await makeDir('forget-live')
+    const result = await harness({
+      sessions: [header('stray', dir, 100)],
+      liveSessions: [header('live-only', live, 200)],
+    })
+    await result.registry.archiveSession(SessionId('live-only'))
+    await result.registry.archiveSession(SessionId('stray'))
+
+    await result.registry.forgetSession(SessionId('stray'))
+    expect(result.registry.list()[0]!.sessionIds).toEqual([])
+    expect(result.registry.archivedSessionIds).toEqual(['live-only'])
+
+    const written = result.changes.length
+    await result.registry.forgetSession(SessionId('live-only'))
+    expect(result.registry.archivedSessionIds).toEqual([])
+    // An unaccounted session leaves only the archive write.
+    expect(result.changes.slice(written).map(change => change.table)).toEqual([''])
+    expect(storedState(result.pool).archivedSessionIds).toEqual([])
+  })
+
+  it('treats an unknown or already-forgotten id as a write-free success', async () => {
+    const dir = await makeDir('forget-idempotent')
+    const result = await harness({ sessions: [header('kept', dir, 100)] })
+    const workspace = result.registry.list()[0]!
+
+    await result.registry.forgetSession(SessionId('kept'))
+    expect(workspace.sessionIds).toEqual([])
+    const settled = result.changes.length
+    const updatedAt = workspace.updatedAt
+
+    await result.registry.forgetSession(SessionId('kept'))
+    await result.registry.forgetSession(SessionId('ghost'))
+    expect(result.changes).toHaveLength(settled)
+    expect(storedRecord(result.pool, workspace.id).sessionIds).toEqual([])
+    expect(workspace.updatedAt).toBe(updatedAt)
+  })
+
+  it('publishes nothing when the account write fails and forgets on the retry', async () => {
+    const dir = await makeDir('forget-write-failure')
+    const result = await harness({ sessions: [header('gone', dir, 100)] })
+    await result.registry.archiveSession(SessionId('gone'))
+    const written = result.changes.length
+
+    result.pool.failNextWrites = 1
+    await expect(result.registry.forgetSession(SessionId('gone'))).rejects.toThrow(/injected write failure/)
+
+    // The failed account write emits no change and never reaches the archive
+    // write, so no subscriber sees a snapshot the accounts contradict.
+    expect(result.changes.slice(written)).toEqual([])
+    expect(result.registry.archivedSessionIds).toEqual(['gone'])
+    expect(result.registry.list()[0]!.sessionIds).toEqual(['gone'])
+    expect(storedRecord(result.pool, result.registry.list()[0]!.id).sessionIds).toEqual(['gone'])
+
+    await result.registry.forgetSession(SessionId('gone'))
+    expect(result.registry.archivedSessionIds).toEqual([])
+    expect(result.registry.list()[0]!.sessionIds).toEqual([])
   })
 })
 

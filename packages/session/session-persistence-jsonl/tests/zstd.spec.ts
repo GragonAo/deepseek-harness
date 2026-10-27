@@ -356,6 +356,23 @@ describe('JsonlSessionPersistence: default Zstandard encoding', () => {
     expect((await ctx.sessionPersistence.load(header.id)).events).toEqual(oneTurnLog())
   })
 
+  it('removes the compressed artifact for this encoding and leaves no session behind', async () => {
+    const root = await freshRoot()
+    const ctx = await mount(root)
+    const header = meta('removable-zstd', '/work')
+    await ctx.sessionPersistence.create(header)
+    await ctx.sessionPersistence.append(header.id, oneTurnLog())
+    const path = logPath(root, header.cwd, header.id, 'zstd')
+    expect((await stat(path)).isFile()).toBe(true)
+
+    await ctx.sessionPersistence.delete(header.id)
+
+    await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await readdir(sessionDir(root, header.cwd, header.id))).toEqual([])
+    expect(await ctx.sessionPersistence.list()).toEqual([])
+    expect(await ctx.sessionPersistence.listSnapshots()).toEqual([])
+  })
+
   it('readRaw decodes the compressed artifact back to the original JSONL text', async () => {
     const root = await freshRoot()
     const ctx = await mount(root)

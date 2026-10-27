@@ -370,4 +370,24 @@ export interface SessionsApi {
    */
   cancel(request: RpcRequest<{ sessionId: SessionId }>): Promise<RpcResponse<{ accepted: true }>>
 
+  /**
+   * Deletes one session irreversibly: its durable log, its workspace
+   * accounting, and its addressability in this process. The log is the
+   * authoritative source of everything the session shows, so there is no
+   * restore path — unlike `workspace.archiveSession`, which only hides a
+   * session and keeps its place for an unarchive.
+   *
+   * A session whose turn is running rejects with `agent-busy`; cancel it first.
+   * A session this process still holds attached (an ordinary session stays
+   * attached after its turn ends) is deleted as well, and the identity is
+   * tombstoned for the rest of the process: `session.list` and `session.search`
+   * drop the id, `session.history` and the attachment reads answer
+   * `session-not-found`, and `session.prompt` refuses at the turn gate, so the
+   * attached Session can no longer write its log back. Methods that resolve that
+   * leftover Agent directly — the model reads, `session.rename`, the goal verbs,
+   * the preset switch, cancel, queue edits, `skill.list` — still reach it until
+   * the process restarts; their log writes are what the tombstone refuses.
+   */
+  delete(request: RpcRequest<{ sessionId: SessionId }>): Promise<RpcResponse<{ deleted: true }>>
+
 }

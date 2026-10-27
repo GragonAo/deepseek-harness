@@ -78,6 +78,7 @@ describe('session.search', () => {
     const cold = header('cold', '/cold')
     const legacy = header('legacy', null)
     ctx.provide('sessionPersistence', {
+      isDeleted: () => false,
       list: () => Promise.resolve([cold, legacy]),
       locate: () => undefined,
     } as never)
@@ -726,6 +727,7 @@ describe('session.search', () => {
       (_, index) => header(`cold-${index}`, `/cold-${index}`),
     )
     ctx.provide('sessionPersistence', {
+      isDeleted: () => false,
       list: () => Promise.resolve(cold),
       locate: () => undefined,
     } as never)
@@ -760,6 +762,7 @@ describe('session.search', () => {
     })
     let locateCalls = 0
     ctx.provide('sessionPersistence', {
+      isDeleted: () => false,
       list,
       locate: () => {
         locateCalls++
@@ -795,6 +798,7 @@ describe('session.search', () => {
       statMock.mockImplementationOnce((() => gate.promise) as never)
     }
     ctx.provide('sessionPersistence', {
+      isDeleted: () => false,
       list: () => Promise.resolve(cold),
       locate: (meta: SessionHeader) => ({ kind: 'jsonl', path: `/logs/${meta.id}.jsonl` }),
     } as never)

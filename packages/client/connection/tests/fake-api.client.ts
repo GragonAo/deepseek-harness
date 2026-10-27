@@ -70,6 +70,9 @@ export class FakeApiClient implements IApiClient {
     () => Promise.resolve(ok({ attachment: { attachmentId: 'a' as never, mediaType: 'image/png', bytes: 1, width: 1, height: 1 }, data: 'AA==' }))
   onUpdateQueue: (payload: unknown) => Promise<RpcResponse<{ accepted: true }>> = () => Promise.resolve(ok({ accepted: true as const }))
   onCancel: (payload: unknown) => Promise<RpcResponse<{ accepted: true }>> = () => Promise.resolve(ok({ accepted: true as const }))
+
+  onDelete: (payload: unknown) => Promise<RpcResponse<{ deleted: true }>> =
+    () => Promise.resolve(ok({ deleted: true as const }))
   onDescribe: (payload: unknown) => Promise<RpcResponse<{
     version: string
     cwd: string
@@ -122,6 +125,7 @@ export class FakeApiClient implements IApiClient {
     attachment: (payload: unknown) => this.record('session.attachment', payload, this.onAttachment(payload)),
     updateQueue: (payload: unknown) => this.record('session.updateQueue', payload, this.onUpdateQueue(payload)),
     cancel: (payload: unknown) => this.record('session.cancel', payload, this.onCancel(payload)),
+    delete: (payload: unknown) => this.record('session.delete', payload, this.onDelete(payload)),
   }
 
   readonly subagents: IApiClient['subagents'] = {
@@ -192,9 +196,14 @@ export class FakeApiClient implements IApiClient {
       this.record('agentPreset.remove', payload, Promise.resolve(ok({}))),
   }
 
-  readonly skills: IApiClient['skills'] = {
+  // This fake drives only `list`; the interface's remaining members are stubs, and the cast
+  // records that on purpose instead of letting the fake block the client build face.
+  readonly skills = {
     list: (payload: unknown) => this.record('skill.list', payload, this.onSkillList(payload)),
-  }
+    install: (payload: unknown) => this.record('skill.install', payload, Promise.resolve(ok({}))),
+    remove: (payload: unknown) => this.record('skill.remove', payload, Promise.resolve(ok({}))),
+    installed: (payload: unknown) => this.record('skill.installed', payload, Promise.resolve(ok({ installed: [] }))),
+  } as unknown as IApiClient['skills']
 
   readonly goals: IApiClient['goals'] = {
     create: payload => this.record('goal.create', payload, Promise.resolve(ok({ ref: { id: 'fake-goal' as never, revision: 1 } }))),

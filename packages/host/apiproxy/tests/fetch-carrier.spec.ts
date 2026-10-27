@@ -3,7 +3,7 @@ import type { ApiProxy, HostFrame, MuxFrame } from '../src/api/index.ts'
 import type { ClientResponse, RpcMessage, RpcReceipt, RpcRequest } from '../src/api/rpc.ts'
 import { RpcId } from '../src/api/rpc.ts'
 import { toFetchHandler } from '../src/fetch/handler.ts'
-import { AbstractApiClient, InProcessApiClient } from '../src/fetch/client.ts'
+import { AbstractApiClient, InProcessApiClient, UNARY_VALUE_SCHEMAS } from '../src/fetch/client.ts'
 
 /** Minimal in-memory ApiProxy: echoes rpcIds, scripts one frame per stream. */
 function fakeApi(overrides: Partial<{ muxFrames: MuxFrame[]; hostFrames: HostFrame[]; crashOn: string }> = {}): ApiProxy {
@@ -107,6 +107,9 @@ function fakeApi(overrides: Partial<{ muxFrames: MuxFrame[]; hostFrames: HostFra
       },
       async cancel(request) {
         return { rpcId: request.rpcId, result: { ok: true, value: { accepted: true as const } } }
+      },
+      async delete(request) {
+        return { rpcId: request.rpcId, result: { ok: true, value: { deleted: true as const } } }
       },
     },
     subagents: {
@@ -379,7 +382,16 @@ describe('unary round trip (handler ⇄ client, no network)', () => {
       action: { kind: 'remove' },
     })).result.ok).toBe(true)
     expect((await c.sessions.cancel({ sessionId: 's' as never })).result.ok).toBe(true)
+    expect((await c.sessions.delete({ sessionId: 's' as never })).result).toEqual({ ok: true, value: { deleted: true } })
     expect((await c.host.describe({})).result.ok).toBe(true)
+  })
+
+  it('registers session.delete in the S→C value table, accepting only its literal acknowledgment', () => {
+    expect(UNARY_VALUE_SCHEMAS['session.delete'].parse({ deleted: true })).toEqual({ deleted: true })
+    // The acknowledgment is a literal, so a value the method cannot produce is
+    // refused on the response path instead of reaching a client as an answer.
+    expect(() => UNARY_VALUE_SCHEMAS['session.delete'].parse({})).toThrow()
+    expect(() => UNARY_VALUE_SCHEMAS['session.delete'].parse({ deleted: false })).toThrow()
   })
 
   it('round-trips every agent-preset method, authoring included', async () => {

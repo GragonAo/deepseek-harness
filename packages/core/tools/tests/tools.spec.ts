@@ -163,6 +163,26 @@ describe('ToolRuntime', () => {
     expect('meta' in result).toBe(false)
   })
 
+  it('omits meta when the projection states no presentation fact', async () => {
+    const ctx = await setup()
+    ctx.tools.register({
+      ...echoTool,
+      name: 'empty-meta-tool',
+      output: {
+        ...echoTool.output,
+        // The memberless object a tool returns when a given result carries no
+        // presentation metadata of its own.
+        presentationMeta: () => ({}),
+      },
+      async execute() {
+        return 'ok'
+      },
+    })
+    const result = await ctx.tools.execute({ signal: testToolSignal, callId: CallId('c1'), name: 'empty-meta-tool', arguments: {} })
+    // An empty object would otherwise ride every such logged result.
+    expect('meta' in result).toBe(false)
+  })
+
   it('normalizes a contract-violating non-cloneable result before final notification', async () => {
     const ctx = await setup()
     let observedError: boolean | undefined

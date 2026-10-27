@@ -102,6 +102,8 @@ MCP 客户端桥接插件：连接外部 [Model Context Protocol](https://modelc
 - `toolConcurrency.retryAttempts` 会把被拒的调用最多额外重发该次数，每次先等 `retryBaseDelayMs` 并逐次翻倍，每个延迟再按 `retryJitterRatio` 缩放，以打散同时发起的批次。该预算只适用于自身注解声明 `readOnlyHint: true` 的工具，或列入 `retryTools` 的工具：`retryTools` 为空时只重发只读工具，因此写入被重发的原因只能是部署方明确说过重发它安全，绝不会是因为它没被列进某份名单。不在允许名单内的工具在首次被拒时即失败，且如实失败。每次尝试各自占用队列槽位、各自拥有 `toolCallTimeoutMs` 时限，因此排队与退避都不计入该次调用的超时，而每次被拒的尝试同样会下调自适应上限。等待重发期间被取消的调用会报告该取消。重发尝试是模型不会看到的服务器侧请求：被重发的调用仍然只产生一个结果。
 - 规范成功值是 `{ content: JsonValue[], structuredContent? }`；完整的 JSON MCP 块会保留给编程调用方。受支持且已声明的 `outputSchema` 会验证 `structuredContent`；不受支持的 schema 词汇会回退为不受约束的 `JsonValue`。
 - Native／模型渲染会保留 MCP 块顺序。文本类连续块以换行连接；资源链接以文本保留名称和 URI；只有挂载 `ctx.attachments` 且确切调用模型路由明确声明支持图片输入时，受支持的图片才会成为持久核心图片块。整个图片批次会先完成解码与准入，再保存任一成员。格式错误或被拒绝的图片批次、音频、嵌入资源和不受支持的块会成为明确诊断文本，而不会消失。
+- 同时带有 `structuredContent` 的结果，会把它的紧凑 JSON 序列化追加到新的一行，因此以数据作答的服务器会以数据形式抵达模型，而不是它 `content` 块里那句占位文本。文本中已经含有该序列化时不追加；`content` 为空数组时只渲染该序列化。规范值不受影响：程序化调用方和 Code Mode 仍分别收到 `content` 与 `structuredContent`。
+- 只要部署注册了 `ctx.mcpCallMeta`，每次 `tools/call` 都会带上 `params._meta`：该服务的 `entries()` 在调用时读取并合并进这一次请求，需要按调用方鉴权、或需要调用方案件上下文的服务器正是靠这条通道拿到信息。这些条目不会进入模型、工具参数或结果；没有注册服务的部署一个 `_meta` 都不发，因此不需要这条通道的集成完全不变。
 - 断开／崩溃时：supervisor 以指数退避（`reconnect.initialDelayMs` 逐次翻倍，上限 `reconnect.maxDelayMs`）重启原始服务器配置，成功后重新执行发现——恢复的世代会替换前一个，因此工具既不会重复也不会泄漏。中断期间最后一个正常世代保持注册；针对它的调用在恢复前会失败。
 - 重连按中断预算控制：连续失败达到 `reconnect.maxAttempts` 次后，该服务器的工具会被注销，重连停止，直到 HMR 重载或重启 Host。连接存活超过 `maxDelayMs` 会重置预算，因此偶尔崩溃的服务器可以无限恢复，而崩溃循环的服务器——即使短暂连接成功——仍会耗尽上限而非永远重启。
 - 重连状态在日志中对用户可见：reconnecting（warn，含尝试次数和延迟）、recovered（info）、最终失败和 disabled-loss（error）。dispose（资源释放）会取消任何待执行的重连。设置 `reconnect.enabled: false` 时，连接丢失后工具保持注册但调用失败，直到重载——即手动恢复行为。
@@ -113,6 +115,7 @@ MCP 客户端桥接插件：连接外部 [Model Context Protocol](https://modelc
 | `ctx.tools` | 注册／注销 MCP 工具 |
 | `ctx.attachments` | 可选；在模型投影前校验并持久保存图片结果批次 |
 | `ctx.llm` | 可选；证明确切调用路由明确支持图片输入 |
+| `ctx.mcpCallMeta` | 可选；为每次工具调用提供 `params._meta` |
 
 ## 模型体验
 
@@ -134,11 +137,11 @@ MCP 客户端桥接插件：连接外部 [Model Context Protocol](https://modelc
 
 #### 模型看到的内容
 
-公开工具名称和 JSON 参数会保留在 assistant 历史中。执行局部的规范值始终为程序化调用方和 Code Mode 保留完整 JSON MCP 块及可选结构化内容。在 Native 上下文中，受支持的图片块会在确切路由能力得到证明后，按原始顺序与文本一起持久投影；Code Mode 还会经外层 `run_code` 结果转运这份已经结算的丰富投影，而不改变规范绑定值。被拒绝的图片、音频、嵌入资源、资源链接和未知块会继续以有界文本诊断可见；MCP `isError` 会在持久化图片前拒绝调用。
+公开工具名称和 JSON 参数会保留在 assistant 历史中。执行局部的规范值始终为程序化调用方和 Code Mode 保留完整 JSON MCP 块及可选结构化内容。在 Native 上下文中，结果文本是投影后的 `content` 块，服务器报告了 `structuredContent` 时再接上它在新行上的序列化——文本中已含该序列化时省略，`content` 为空时单独使用。随后，受支持的图片块会在确切路由能力得到证明后，按原始顺序与文本一起持久投影；Code Mode 还会经外层 `run_code` 结果转运这份已经结算的丰富投影，而不改变规范绑定值。被拒绝的图片、音频、嵌入资源、资源链接和未知块会继续以有界文本诊断可见；MCP `isError` 会在持久化图片前拒绝调用。
 
 #### Token 影响
 
-参数、映射后的文本和持久图片引用会保留到压缩（compaction）发生时。内联 MCP base64 只存在于执行局部的规范值中，绝不会复制进会话事件；提供方会从附件存储读取经过校验的字节。音频和嵌入资源载荷仍不会进入模型上下文。
+参数、映射后的文本和持久图片引用会保留到压缩（compaction）发生时。`structuredContent` 的序列化与它所并入的文本一样被保留。内联 MCP base64 只存在于执行局部的规范值中，绝不会复制进会话事件；提供方会从附件存储读取经过校验的字节。音频和嵌入资源载荷仍不会进入模型上下文。
 
 #### KV Cache 影响
 
@@ -165,6 +168,7 @@ MCP 客户端桥接插件：连接外部 [Model Context Protocol](https://modelc
 - **重连在传输关闭时触发**：崩溃的 stdio 子进程会触发重连；Streamable HTTP 失败通过每次请求以及 SDK 传输自身的 SSE（Server-Sent Events）流恢复机制暴露，因此不可达的 HTTP 服务器会按调用重试，而非由 supervisor 重新 spawn。
 - **图片是唯一的持久丰富结果桥接**：PNG、JPEG、WebP 和 GIF 可以在确切能力得到证明后进入 Native 上下文。音频和嵌入资源载荷仍只存在于执行局部，并配有明确诊断；资源链接只以文本保留名称和 URI。
 - **不强制执行不受支持的 MCP 输出 schema**：已声明 schema 使用 harness 子集之外的词汇时，`structuredContent` 会回退到 `JsonValue`。
+- **`structuredContent` 整体追加、没有上限**：序列化本身没有大小上限，因此以大体量结构化载荷作答的服务器会让这些 token 在会话之后的每次请求中都被支付。需要上限的部署只能降低服务器返回的内容；投影本身没有截断设置。
 - **自适应模式按插件实例学习**：学到的上限是内存状态，不持久化、不记日志，也不在同一部署的副本之间或访问同一服务器的两台主机之间共享，因此若干独立实例叠加起来仍可能超过服务器能承受的量。跨副本的协同限流不在范围内；替代做法是调低 `maxConcurrentCalls` 或使用 `mode: "fixed"`。
 - **超时默认算作被拒**：`countTimeouts: true` 时，真正缓慢的服务器会被当作过载而下调，因此面向它的批次可能被毫无收益地串行化。对延迟本就可预期的服务器，可调大 `toolCallTimeoutMs`、调小 `recoveryQuietMs`，或设置 `countTimeouts: false`。
 - **重发允许名单信任服务器给出的 `readOnlyHint`**：该注解是服务器提供的线上数据，一个把写工具误标为只读的服务器，其被拒调用会被重发。这个判定没有反向开关：对某个服务器的这类注解信不过时，只能把该服务器的 `retryAttempts` 设为 0，而这同时也会关掉其列入 `retryTools` 的工具的重发预算。

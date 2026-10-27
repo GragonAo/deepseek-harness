@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 组合：把租户服务要用到的插件挂到一个自建的 Cordis 上下文上。
  *
  * 这里不经过 dsh 的 Loader、bundle 与 cordis.yml：配置由 {@link loadTenantAppConfig}
@@ -25,6 +25,7 @@ import { ContainerFileSystem } from '@deepseek-ai/dsh-fs-container'
 import { PostgresSessionPersistence } from '@deepseek-ai/dsh-session-persistence-postgres'
 import { SPINE, workDir } from './spine.ts'
 import type { SpineRow } from './spine.ts'
+import { TenantMcpCallMeta } from './mcp-meta.ts'
 import type { McpServerConfig, TenantApp, TenantAppConfig } from './types.ts'
 
 /**
@@ -49,6 +50,13 @@ export async function createTenantApp(config: TenantAppConfig): Promise<TenantAp
       what: `组合行 ${id}（@deepseek-ai/dsh-mcp-client）`,
       fiber: await mountModule(ctx, id, '@deepseek-ai/dsh-mcp-client', mcpServerMountConfig(server)),
     })
+  }
+  // The provider mounts after the clients: they read `mcpCallMeta` per call, so
+  // what matters is that it exists before the first tool call, not at load.
+  const mcpMeta = config.mcpMeta
+  if (mcpMeta !== undefined) {
+    const what = '组合行 mcp-meta（MCP 调用的 _meta 提供者）'
+    mounted.push({ what, fiber: await mountLabeled(what, async () => ctx.plugin(TenantMcpCallMeta, mcpMeta)) })
   }
   try {
     await assertLoaded(mounted)

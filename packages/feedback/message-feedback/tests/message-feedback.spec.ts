@@ -257,6 +257,7 @@ describe('MessageFeedbackService public contract', () => {
     const rawCtx = new Context()
     rawCtx.provide('sessions', { get: () => undefined } as never)
     rawCtx.provide('sessionPersistence', {
+      isDeleted: () => false,
       listSnapshots: () => Promise.resolve([{ header: fixture.session.header, revision: 'test' }]),
       inspect: () => Promise.resolve({ meta: fixture.session.header, events: fixture.session.events }),
     } as never)

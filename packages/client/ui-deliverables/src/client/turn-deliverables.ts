@@ -1,7 +1,8 @@
 /**
  * Turn-scoped produced-file Definition and readers. Client-only and
- * model-free: the vocabulary is the mutation tools' own follow-along
- * `locations`, never the closing prose.
+ * model-free: the vocabulary is the tools' own render intent — a diff card's
+ * follow-along `locations` and a terminal card's observed `produced` — never
+ * the closing prose.
  */
 import type {
   ConversationNodeDefinition, ToolResultNode,
@@ -33,17 +34,29 @@ interface DeliverablesState extends DeliverablesTurnData {
 }
 
 /**
- * Paths a call view reports having created or changed, by render intent rather
- * than tool name: a diff card, or a generic card whose kind is `edit` (the
+ * Paths a view reports having created or changed, by render intent rather than
+ * tool name: a terminal card's `produced` (a command the executor observed
+ * writing files), a diff card, or a generic card whose kind is `edit` (the
  * shape `str_replace_editor`'s insert presents). Every other card produces
- * nothing to open — a read looked, a delete removed, a terminal ran. Only
- * root call views enter this Turn accumulator; nested Code Mode dispatches
- * preserve the pre-assembly behavior and do not contribute independently.
+ * nothing to open — a read looked, a delete removed. Both card states count: a
+ * call view reports what the call declares, and a result view reports what the
+ * run actually did. Only root views enter this Turn accumulator; nested Code
+ * Mode dispatches preserve the pre-assembly behavior and do not contribute
+ * independently.
+ * @param view - the call or result view of one tool event, or null.
+ * @returns produced paths in card order, possibly empty.
  */
-function producedPaths(view: ToolResultNode['callView']): readonly string[] {
+function producedPaths(view: ToolResultNode['callView'] | ToolResultNode['resultView']): readonly string[] {
   if (view === null) return []
-  if (view.card === 'diff') return (view.locations ?? []).map(location => location.path)
-  if (view.card === 'generic' && view.kind === 'edit') {
+  if (view.card === 'terminal') return (view.produced ?? []).map(location => location.path)
+  if (view.card === 'diff') {
+    // A call declares the files it will change; a completed diff card reports
+    // only its hunks, whose paths are those same files.
+    return 'locations' in view
+      ? (view.locations ?? []).map(location => location.path)
+      : view.diffs.map(diff => diff.path)
+  }
+  if (view.card === 'generic' && 'kind' in view && view.kind === 'edit') {
     return (view.locations ?? []).map(location => location.path)
   }
   return []
@@ -52,15 +65,16 @@ function producedPaths(view: ToolResultNode['callView']): readonly string[] {
 /**
  * Files produced by one Turn data value.
  *
- * The source is the mutation tools' own follow-along `locations`, not the
- * closing prose: a produced file must be listed whether or not the model
- * remembered to name it. A mutation is recognized by render intent, not by
- * tool name — a diff card, or a generic card whose `kind` is `edit` (the shape
- * `str_replace_editor`'s insert presents) — so a new mutation tool joins by
- * declaring what it does. Reads contribute nothing (looking at a file does not
- * produce it), and neither do deletes (there is nothing left to open) or
- * failed calls. Paths keep first-seen order and appear once, so a file written
- * and then edited in the same turn is one entry.
+ * The source is the tools' own render intent, not the closing prose: a produced
+ * file must be listed whether or not the model remembered to name it. A mutation
+ * is recognized by render intent, not by tool name — a terminal card's `produced`
+ * (a command whose executor observed it writing files), a diff card, or a generic
+ * card whose `kind` is `edit` (the shape `str_replace_editor`'s insert presents) —
+ * so a new mutation tool joins by declaring what it does. Reads contribute
+ * nothing (looking at a file does not produce it), and neither do deletes (there
+ * is nothing left to open) or failed calls, whose views are never accumulated.
+ * Paths keep first-seen order and appear once, so a file written and then edited
+ * in the same turn is one entry.
  *
  * The Conversation Location index owns turn membership before this function
  * runs, so paths cannot spill across turns and this derivation does not infer
@@ -122,8 +136,15 @@ export const deliverablesDefinition: ConversationNodeDefinition<DeliverablesStat
     const result = match.event.data.message.content[0]
     if (result.isError === true) return context.state
     const callId = String(match.event.data.message.source.callId)
-    const additions = producedPaths(context.state.calls.get(callId) ?? null)
-      .map(path => ({ seq: match.event.seq, path }))
+    // A settled call reports through either state of its card: a call view
+    // declares what the call changes, while a terminal result view reports the
+    // files its executor observed the command write. The Set keeps first-seen
+    // order and folds a path both states name into one entry.
+    const paths = new Set([
+      ...producedPaths(context.state.calls.get(callId) ?? null),
+      ...producedPaths(match.view?.for === 'result' ? match.view.view : null),
+    ])
+    const additions = [...paths].map(path => ({ seq: match.event.seq, path }))
     return additions.length === 0
       ? context.state
       : { ...context.state, produced: [...context.state.produced, ...additions] }

@@ -54,7 +54,9 @@ import { TENANT_QUESTION_METHODS } from '@deepseek-ai/dsh-tenant-questions'
 import type { TenantQuestionMethod } from '@deepseek-ai/dsh-tenant-questions'
 import { swaggerRoutes } from './openapi-route.ts'
 import { consoleRoutes } from './console.ts'
-import { currentTenant, currentUser, runWithScopes, runWithTenant, runWithUser, TenantError, UserId } from '@deepseek-ai/dsh-tenant'
+import {
+  currentTenant, currentUser, runWithRequestHeaders, runWithScopes, runWithTenant, runWithUser, TenantError, UserId,
+} from '@deepseek-ai/dsh-tenant'
 import type { Tenant, TenantId } from '@deepseek-ai/dsh-tenant'
 import { TenantAuthError } from '@deepseek-ai/dsh-tenant-auth'
 
@@ -179,8 +181,9 @@ export class AgentHttp extends Service {
       }
       const subject = UserId(principal.subject)
       const tenant = this.ctx.tenants.resolveMember(tenantId, subject)
-      return await runWithScopes(principal.scopes, () =>
-        runWithTenant(tenant, () => runWithUser(subject, () => this.delegate(request, tenant, subject))))
+      return await runWithRequestHeaders(headerRecord(request.headers), () =>
+        runWithScopes(principal.scopes, () =>
+          runWithTenant(tenant, () => runWithUser(subject, () => this.delegate(request, tenant, subject)))))
     } catch (error: unknown) {
       if (error instanceof TenantAuthError) {
         return jsonError(401, error.code, error.message, { 'www-authenticate': 'Bearer' })
@@ -343,6 +346,21 @@ export class AgentHttp extends Service {
  * @param body - the replacement JSON value.
  * @returns a fresh response with an unread body.
  */
+/**
+ * The inbound request's headers as a plain record of lowercased names.
+ *
+ * `Headers` iterates already-lowercased names with repeated fields joined by
+ * `, `, which is the form a provider forwards: one value per header, no
+ * per-field parsing.
+ * @param headers - the request's header list.
+ * @returns header values keyed by lowercased name.
+ */
+function headerRecord(headers: Headers): Record<string, string> {
+  const record: Record<string, string> = {}
+  for (const [name, value] of headers) record[name] = value
+  return record
+}
+
 function reconstruct(original: Response, body: unknown): Response {
   const headers = new Headers(original.headers)
   headers.delete('content-length')

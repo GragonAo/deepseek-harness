@@ -42,6 +42,29 @@ export const name = 'mcp-client'
 /** Services required by this plugin. */
 export const inject = ['tools']
 
+/**
+ * Ambient per-call metadata for MCP `tools/call`.
+ *
+ * A deployment that sees the caller's own request registers this service under
+ * `mcpCallMeta`; the bridge copies what it returns into `params._meta` of every
+ * call it makes, which is the one field the MCP protocol reserves for context
+ * the model neither reads nor writes. The bridge sends no `_meta` when the
+ * service is absent, so an unconfigured deployment is unchanged.
+ */
+export interface McpCallMeta {
+  /**
+   * Entries to place on the next `tools/call` as `params._meta`.
+   * @returns entries keyed by their `_meta` name, or `undefined` to send none.
+   */
+  entries(): Readonly<Record<string, string>> | undefined
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    mcpCallMeta: McpCallMeta
+  }
+}
+
 /** Default timeout for individual MCP tool calls (ms). */
 const DEFAULT_TOOL_CALL_TIMEOUT_MS = 60_000
 

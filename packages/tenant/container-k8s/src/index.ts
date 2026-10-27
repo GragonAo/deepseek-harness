@@ -930,20 +930,20 @@ export class K8sContainerRuntime extends ContainerRuntime {
     const existing = await this.readStatus(podName, signal)
     if (existing.phase !== 'Missing') {
       // 沙箱由所有服务同一 (租户, 用户) 的 host 实例共享，不属于碰巧启动它的那一个实例。
-      // 两个实例若对 spec 的理解不一致，就会互相不停替换对方的沙箱，
-      // 所以这种不一致属于部署故障：报出来，别动那个正在运行的沙箱。
+      // 指纹不一致意味着这个沙箱不是按当前 spec 建的：滚动升级换了镜像、挂载或环境之后必然如此。
+      // 拒绝服务会让升级瞬间把在跑的每个案件都变成"执行层不存在"，所以按当前 spec 重建，
+      // 并把这个沙箱的来历与两边的指纹都记进日志——它丢掉的会话态只能从日志追。
       if (existing.fingerprint !== fingerprint) {
-        throw new Error(
-          `container-k8s: sandbox ${podName} runs a different spec than this host would create ` +
-            `(recorded ${existing.fingerprint || '<none>'}, local ${fingerprint}). Instances serving one ` +
-            'tenant must agree on image, command, mounts and environment; align them, or the ' +
-            'recorded sandbox must be deleted before this host can serve the tenant.',
+        this.ctx.logger.warn(
+          'container-k8s: replacing sandbox %s for tenant %s subject %s: it was created from a different spec (recorded %s, local %s)',
+          podName, tenantId, subject, existing.fingerprint || '<none>', fingerprint,
         )
+        await this.releasePod(podName, signal)
       }
       // Running 和 Pending 都算活着：直接收养。收养另一个实例还在启动的沙箱，
       // 才不会把一个实例的工作删掉另一个实例的手上；若这个沙箱最终不可用，
       // 下面的就绪等待会大声失败。
-      if (existing.phase === 'Running' || existing.phase === 'Pending') {
+      else if (existing.phase === 'Running' || existing.phase === 'Pending') {
         // 收养另一个实例的沙箱时日志里留一行：宿主之后执行的每一条命令都落在它上面，
         // 而这条对应关系只存在于内存里（`sandboxes` 缓存），进程一换就查不到了。
         this.ctx.logger.info(

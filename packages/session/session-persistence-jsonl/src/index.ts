@@ -181,6 +181,14 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     return this.coordinator.append(id, events)
   }
 
+  delete(id: SessionId): Promise<void> {
+    return this.coordinator.delete(id)
+  }
+
+  isDeleted(id: SessionId): boolean {
+    return this.coordinator.isDeleted(id)
+  }
+
   override prepare(id: SessionId, signal?: AbortSignal): Promise<SessionPreparation> {
     return this.coordinator.prepare(id, signal)
   }
@@ -279,6 +287,24 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     // The logical artifact name is `session.jsonl` regardless of the physical
     // encoding suffix (`.jsonl.zstd` marks compression only).
     return { meta, filename: 'session.jsonl', content }
+  }
+
+  /**
+   * Remove one session's durable transcript: the single artifact file holding
+   * its header line and event log, in this root's configured physical encoding.
+   * The session's directory stays behind — `list` finds sessions by transcript
+   * file, so an empty directory is not a session. Removing an absent session is
+   * a no-op, and a missing root has nothing to remove.
+   * @param id - the persisted session to remove.
+   * @param signal - optional cancellation for the artifact discovery and unlink work.
+   */
+  async remove(id: SessionId, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted()
+    await this.ensureRootEncoding()
+    signal?.throwIfAborted()
+    const path = await this.findLog(id, signal)
+    if (path === undefined) return
+    await rm(path, { force: true })
   }
 
   /**

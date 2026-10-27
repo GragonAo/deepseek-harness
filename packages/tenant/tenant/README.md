@@ -7,6 +7,7 @@
 - `TenantId` —— 不透明的 `Branded<'TenantId'>` id，配 `TenantId(id)` 工厂；`UserId` —— 不透明的 `Branded<'UserId'>` 主体，配 `UserId(id)` 工厂。
 - `Tenant` —— 认证请求所充当的已解析记录：`id`、`name`、`dataRoot`、`workspaceRoot`、可选 `toolsRoot`、可选 `enabled`、可选 `network` 出站策略，以及可选 `members`（被接纳的主体列表；缺省或为空表示对任意已认证主体开放）。
 - `runWithTenant(tenant, fn)` / `currentTenant()` / `requireTenant()` —— 请求作用域租户权威；`runWithUser(user, fn)` / `currentUser()` / `requireUser()` 以同样方式携载认证主体。每项权威是一个模块级 `AsyncLocalStorage`（`withInitiator` 模式），因此每个租户或用户感知的 provider 读同一份存储。`requireTenant()` 在无 run 环境外抛 `TenantError` code `NO_TENANT_IN_SCOPE`，`requireUser()` 抛 `NO_USER_IN_SCOPE`。
+- `runWithRequestHeaders(headers, fn)` / `currentRequestHeaders()` —— 同样的模块级 `AsyncLocalStorage`，携载这次入站请求的请求头（键名小写），供需要把调用方上下文转交给上游服务的 provider 读取；无请求环境外返回 `undefined`。工具调用发生在智能体循环里，但它与触发它的那次请求仍属同一棵异步执行树，因此这条作用域在工具调用时依然可读。
 - `isTenantMember(tenant, subject)` —— 主体是否被接纳进租户：`members` 缺省或为空即开放，否则主体必须在列表中。
 - `tenantPartitionName(tenantId)` / `userPartitionName(user)` —— 确定性的存储分区名：消毒后的 id 前缀加抗碰撞哈希后缀，始终是安全的 PostgreSQL 标识符（≤63 字符）。租户名是 Postgres 后端所用的每租户 schema；用户名是持久 `user_id` 的安全 token 形式，供内存守卫键与容器名使用。
 - `TenantRegistry`（`ctx.tenants`）—— 部署的租户记录：`register(tenant)` 返回精确 disposer、`get`、`resolve`（失败关闭地拒绝 `TENANT_UNKNOWN` / `TENANT_DISABLED`）、`resolveMember(id, subject)`（当租户列出的成员不包含该主体时追加 `NOT_A_MEMBER`）、`list`。租户也可经 cordis.yml 的 `Config.tenants` 声明（`{ id, name, dataRoot, workspaceRoot, toolsRoot?, enabled?, network?, members? }` 线上形态，其 `id` 在注册时被品牌铸造为 `TenantId`）；每条记录以 effect 挂载。

@@ -54,7 +54,7 @@ function fakePersistence(logs: Map<string, SessionEvent[]>) {
       events: events.filter(event => event.seq >= fromSeq),
     }
   })
-  return { readFrom }
+  return { isDeleted: () => false, readFrom }
 }
 
 /** Header shape for cachedSnapshot calls (fake logs stamp createdAt 0, no cwd). */

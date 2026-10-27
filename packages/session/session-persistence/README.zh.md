@@ -15,6 +15,8 @@
 | `readRaw(id, signal?): Promise<SessionRawArtifact \| undefined>` | 读取受支持后端自身的逐字工件文本；只解码物理编码，绝不从事件重建。`undefined` 仅表示所请求工件缺失；不支持的后端会拒绝。 |
 | `create(meta): Promise<void>` | 注册新会话元数据。可以将物理写入延迟到第一次 `append`（延迟实体化）。 |
 | `append(id, events): Promise<void>` | 持久保存一个批次。仅追加；任何修复后，第一个事件 `seq` == 已存储 next-seq；非 JSON 可序列化数据会被拒绝，并命名违规类型。 |
+| `delete(id): Promise<void>` | 通过后端可选的 `remove` 钩子硬删除一个会话的已存储日志与元数据。不可逆：之后 `load`、`inspect`、`readFrom`、`prepare`、`list`、`listSnapshots` 一律把该 id 当作不存在（而非空会话），其后对它的 `create`/`append` 会被拒绝，而不会把已删除的日志重新物化回来。删除不存在或从未实体化的会话是空操作。物理层未提供 `remove` 的后端会拒绝并指名自身；基于协调器的后端在绑定该 id 的活动会话轮次开放时拒绝（消息含 `agent-busy`），因为该日志记录着仍在进行中的工作。 |
+| `isDeleted(id): boolean` | 报告 `delete` 是否在当前进程内删除了该 id。这就是协调器为其写入拒绝本就持有的同一份墓碑集合，且与 `delete` 一样只存在于进程内：从未创建的 id、以及在重启之前被删除的 id 都答 `false`，因为此时持久缺失就是全部事实。 |
 | `prepare(id, signal?): Promise<SessionPreparation>` | 预留恢复所使用的那个未发布 Session。协调器会尽可能复用之前的检查结果、提交待处理恢复，并在 dispose（资源释放）时将未发布 reservation 释放回有界缓存。 |
 | `load(id): Promise<{ meta; events }>` | 转换同一格式版本中受支持的旧记录后，返回不可变、平衡的逻辑日志，并提交冷恢复。实时 load 先 flush 其快照，并在轮次开放时拒绝；冷 load 保留中断的最终轮次，并用合成 `tool/result`/`step/end?`/`turn/end {interrupted}` 事件持久关闭它。只丢弃撕裂尾部碎片；已提交损坏和格式错误的记录以 `SessionPersistenceCorruptionError` 拒绝，不支持的格式 `version` 或本构建不认识且信封未带 `ignorable` 标记的事件类型以 `SessionFormatUnsupportedError` 拒绝，消息说明拒绝方向，并在后端为每个会话保留独立文件时给出原始日志路径。 |
 | `inspect(id, signal?): Promise<{ meta; events }>` | 返回已经升级、验证和深度冻结的逻辑视图，但不提交恢复或发布 Session。冷视图会获得仅存在于内存的合成恢复 closer，物理撕裂尾部保持不变；实时状态下的视图则是当前不可变快照，可能包含开放的轮次。基于协调器的实现会在有界 LRU 中保留该冷状态下未发布的 Session 本身，供后续 `prepare` 使用，但已存储修订值变化后会丢弃并重新读取。同 id 检查共享进行中的读取。 |
@@ -39,7 +41,9 @@
 
 后端读取会在验证当前记录前，转换同一格式版本中明确受支持的旧记录。消息标识机制引入前的消息会获得确定性的 id `legacy-message:<session-id>:<event-seq>`；工具结果的内容替换会继承其目标导入后的 id。react-loop 引入前的 `turn/start` 会移除过时的 trigger，已移除的 steering（中途引导）事件 `steering/message` 会转换为同一条带标识的 `user/message`；旧版 `turn/end` 会映射终止原因，但不会虚构旧记录中没有记载的调用方。协调器对 `load`、`inspect`、`readFrom`、无所有者状态的认领和 HMR 前缀接管使用同一份转换后视图。存储仍然仅追加：读取不会重写旧记录，此后追加的事件使用当前格式。这些是[消息标识机制引入前的消息](../../../.agents/notes/implemented/bug-fix/2026-07-28-load-pre-identity-session-messages.md)与 [react-loop 引入前会话](../../../.agents/notes/implemented/bug-fix/2026-08-04-load-pre-react-loop-sessions.md)决策所规定的范围受限的导入例外，并不构成通用的 v0 迁移承诺。
 
-活动会话发出 `session/disposed` 时，协调器等待其 controller，以串行方式执行最终 drain，然后释放该精确 `Session` 对象拥有的状态。失败退役会将 controller 保留在活动会话 map 中，使后端拆卸可重试。后端拆卸先停止事件接纳，flush 每个剩余 controller，等待每 id 操作，最后才关闭存储句柄。
+活动会话发出 `session/disposed` 时，协调器等待其 controller，以串行方式执行最终 drain，然后释放该精确 `Session` 对象拥有的状态。失败退役会将 controller 保留在活动会话 map 中，使后端拆卸可重试。后端拆卸先停止事件接纳，flush 每个剩余 controller（跳过本进程中已删除的 id：其日志是应要求移除的，且被拒绝的那次写入已经报告过自身），等待每 id 操作，最后才关闭存储句柄。
+
+`delete(id)` 是唯一不可逆的操作，其进程级记账由协调器负责：它排在该 id 任何进行中操作之后串行执行，调用后端 `remove` 钩子，把该 id 记入墓碑集合，并丢弃会话写入状态、待写缓冲、写入 controller 和已缓存 preparation。墓碑使一切读取都报告不存在、一切写入都被拒绝，因此仍存活的 `Session` 无法重新物化其所有者已删除的日志；删除一个空闲活动会话后，该 `Session` 仍留在内存中但没有持久目标，它的下一次写入会报告这次删除。墓碑刻意只存在于进程内而不持久化：重启后没有任何活动会话，也不存在会重建日志的写入方，后端报告的持久缺失就是全部事实，因此该 id 重新可用。
 
 无副作用 `locate`、轻量 `listSnapshots` 和按 id 查询的 `readStoredRevision` 仍由后端负责，因为它们描述存储拓扑和修订身份，而非写入编排。`listSnapshots(signal?)` 将调用方传入的同一个信号传给后端发现流程，使观察者可在不脱离该工作的情况下取消。
 
@@ -53,6 +57,7 @@
 | `loadStoredFrom?(id, fromSeq, signal?)` | 服务 `readFrom` 背后的可选可寻址后缀读取：返回 header 和 `seq >= fromSeq` 的已存储事件，非修改式、无撕裂标记。SQLite 实现它（`WHERE seq >= ?`）；不实现的后端使用协调器回退——`loadStored` 加向前跳过。 |
 | `appendBatch(meta, events, isMaterialized)` | 持久追加连续批次；尚未实体化时以原子方式延迟实体化。 |
 | `commitRepair(meta, tornMarker, closers)` | 使崩溃修复持久：截断撕裂尾部（当且仅当 `tornMarker !== undefined`；标记可为 falsy，例如 seq/offset `0`），并追加 `closers`。不要求原子性。由 load（截断 + closer）和活动会话接管（仅截断）使用。 |
+| `remove?(id, signal?)` | 可选地不可逆删除该后端在 `id` 下持有的全部内容，元数据也包括在内，使 `loadStored`、`readStoredRevision`、`list` 不再能看到它。删除不存在的会话是空操作。未提供该钩子的后端无法删除，`PersistenceCoordinator.delete` 会指名拒绝。 |
 | `list(signal?)` | 列出全部已存储元数据，并遵循可选的取消信号。 |
 | `close?()` | 可选生命周期拆卸（例如关闭 db 句柄），在 dispose drain 后等待其完成。 |
 
@@ -80,6 +85,6 @@
 
 ## 已知限制与暂缓事项
 
-- **无删除或保留接口**：剪枝已存储会话是带外后端维护。
+- **删除一次只针对一个会话，且没有保留策略**：`delete(id)` 只移除其所有者要求移除的内容；不存在按时间、大小或数量的剪枝，也不存在批量删除。
 - **`list()` 无分页且无过滤**：它返回每个已存储会话的 header；适合本地存储，大规模时无索引。
 - **修复时合成 closer 是唯一崩溃方案**：后端必须在 load 时合成 `tool/result`/`step/end`/`turn/end` closer；没有继续中断轮次而不先关闭它的部分轮次恢复。

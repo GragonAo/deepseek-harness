@@ -12,7 +12,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { isAbsolute, resolve as resolvePath } from 'node:path'
 import { defineTool, TOOL_ABORTED } from '@deepseek-ai/dsh-tools'
-import type { GenericCallView, TerminalCallView, ToolExecution, ToolResult, ToolResultView } from '@deepseek-ai/dsh-tools'
+import type { FileLocation, GenericCallView, TerminalCallView, ToolExecution, ToolResult, ToolResultView } from '@deepseek-ai/dsh-tools'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-system-prompt'
@@ -120,6 +120,8 @@ function presentBashCall(args: BashCallArgs): GenericCallView | TerminalCallView
 /**
  * Present completed foreground output as a terminal; background acknowledgements
  * and execution errors use generic fenced output without an exit-status pill.
+ * The produced files travel in the persisted presentation metadata, so replay
+ * recomputes the same card without re-observing the run.
  */
 function presentBashResult(args: unknown, result: ToolResult): ToolResultView | undefined {
   const block = result.content.length === 1 ? result.content[0] : undefined
@@ -132,7 +134,13 @@ function presentBashResult(args: unknown, result: ToolResult): ToolResultView | 
   }
   // The exit marker becomes the card's exit pill, so it leaves the output body.
   const { body, ...exit } = parseExitStatus(raw)
-  return { card: 'terminal', output: body, ...exit }
+  const produced = producedFromMeta(result.meta)
+  return {
+    card: 'terminal',
+    output: body,
+    ...exit,
+    ...produced.length > 0 ? { produced } : {},
+  }
 }
 
 /**
@@ -178,7 +186,26 @@ function canonicalBashResult(result: ShellRunResult) {
         ...result.sandbox.runnerFailed !== undefined ? { runnerFailed: result.sandbox.runnerFailed } : {},
       },
     } : {},
+    // Files the executor observed this command create or modify; the renderer
+    // never prints them, so they reach only the terminal card.
+    ...result.produced !== undefined && result.produced.length > 0 ? { produced: [...result.produced] } : {},
   }
+}
+
+/**
+ * Files a settled foreground run reported as produced, read back from the
+ * persisted presentation metadata (the canonical value never replays).
+ * @param meta - the `tool/result` metadata, absent for a call without one.
+ * @returns one file location per produced path, or an empty list.
+ */
+function producedFromMeta(meta: unknown): FileLocation[] {
+  if (typeof meta !== 'object' || meta === null) return []
+  const produced = (meta as { produced?: unknown }).produced
+  if (!Array.isArray(produced)) return []
+  return produced.flatMap((entry) => {
+    const path = (entry as { path?: unknown } | null)?.path
+    return typeof path === 'string' && path.length > 0 ? [{ path }] : []
+  })
 }
 
 /** Canonical background-handle properties shared by the bash output union. */
@@ -316,6 +343,10 @@ export function apply(ctx: Context, config: Config = {}): void {
                   runnerFailed: { type: 'boolean' },
                 },
               },
+              produced: {
+                type: 'array',
+                items: { type: 'string' },
+              },
             },
           },
         ],
@@ -326,6 +357,9 @@ export function apply(ctx: Context, config: Config = {}): void {
           ? `started background job ${value.jobId}`
           : renderResult(value as { kind: 'foreground' } & ShellRunResult, escalationModes),
       }],
+      presentationMeta: (_args, value) => value.kind === 'background' || value.produced === undefined
+        ? {}
+        : { produced: value.produced.map(path => ({ path })) },
     },
     async execute(args: BashToolArgs, exec) {
       validateBashArgs(args)

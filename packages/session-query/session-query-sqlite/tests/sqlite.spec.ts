@@ -70,6 +70,7 @@ class TestPersistence extends SessionPersistence {
   override readonly supportsRawArtifacts = false
 
   static entries = new Map<SessionIdType, { meta: SessionHeader; events: SessionEvent[] }>()
+  static deleted = new Set<SessionIdType>()
   static revisions = new Map<SessionIdType, number>()
   static nextRevision = 0
   static loads = new Map<SessionIdType, number>()
@@ -93,7 +94,7 @@ class TestPersistence extends SessionPersistence {
 
   static reset(entries: readonly { meta: SessionHeader; events: SessionEvent[] }[] = []): void {
     this.entries = new Map()
-    this.revisions = new Map()
+    this.deleted = new Set()
     this.loads = new Map()
     this.inspections = new Map()
     this.inspectSignals = []
@@ -124,6 +125,17 @@ class TestPersistence extends SessionPersistence {
     entry.events.push(...structuredClone(events))
     TestPersistence.revisions.set(id, ++TestPersistence.nextRevision)
     return Promise.resolve()
+  }
+
+  delete(id: SessionIdType): Promise<void> {
+    TestPersistence.entries.delete(id)
+    TestPersistence.revisions.delete(id)
+    TestPersistence.deleted.add(id)
+    return Promise.resolve()
+  }
+
+  isDeleted(id: SessionIdType): boolean {
+    return TestPersistence.deleted.has(id)
   }
 
   async load(id: SessionIdType): Promise<{ meta: SessionHeader; events: SessionEvent[] }> {

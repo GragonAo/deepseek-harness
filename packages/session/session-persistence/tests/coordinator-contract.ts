@@ -3,7 +3,8 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
  * Shared write-path orchestration contract for backends using {@link PersistenceCoordinator}.
  * Unlike the public storage-semantics suite in `contract.ts`, it covers SessionStore event wiring,
  * lazy creation, fork seed persistence, four adoption/collision cases, crash-tail repair, reload,
- * flush, and disposal quiescence through public APIs rather than storage primitives.
+ * flush, deletion (live-turn refusal, tombstone, reload reuse), and disposal quiescence through
+ * public APIs rather than storage primitives.
  *
  * Each real backend supplies a shared storage scope and optional torn-tail injector; backend specs
  * retain only storage-mechanics tests, while these scenarios run once per backend.
@@ -1418,6 +1419,153 @@ export function runCoordinatorContract(name: string, makeFixture: () => Promise<
         expect(loaded.events).toHaveLength(3)
       } finally {
         await fiber.dispose()
+        await fix.cleanup()
+      }
+    })
+
+    // --- deletion: hard removal, live-turn refusal, in-process tombstone ---
+
+    it('delete removes a stored log: the read family reports the id as absent', async () => {
+      const fix = await makeFixture()
+      const { ctx, fiber } = await freshCtx(fix)
+      try {
+        const doomed = meta('deleted', WORK)
+        const kept = meta('kept', WORK)
+        await ctx.sessionPersistence.create(doomed)
+        await ctx.sessionPersistence.append(doomed.id, oneTurnLog())
+        await ctx.sessionPersistence.create(kept)
+        await ctx.sessionPersistence.append(kept.id, oneTurnLog())
+
+        expect(ctx.sessionPersistence.isDeleted(doomed.id)).toBe(false)
+
+        await ctx.sessionPersistence.delete(doomed.id)
+
+        // A missing log cannot distinguish deleted from never stored; the
+        // tombstone read is the only answer to that question.
+        expect(ctx.sessionPersistence.isDeleted(doomed.id)).toBe(true)
+        expect(ctx.sessionPersistence.isDeleted(kept.id)).toBe(false)
+        expect(ctx.sessionPersistence.isDeleted(meta('never-stored', WORK).id)).toBe(false)
+
+        // Absent, not empty: no read may present the deleted id as a session.
+        const listed = (await ctx.sessionPersistence.list()).map(header => header.id)
+        expect(listed).toContain(kept.id)
+        expect(listed).not.toContain(doomed.id)
+        expect((await ctx.sessionPersistence.listSnapshots()).map(snapshot => snapshot.header.id))
+          .not.toContain(doomed.id)
+        await expect(ctx.sessionPersistence.load(doomed.id))
+          .rejects.toThrow(`session "${doomed.id}" not found`)
+        await expect(ctx.sessionPersistence.inspect(doomed.id))
+          .rejects.toThrow(`session "${doomed.id}" not found`)
+        await expect(ctx.sessionPersistence.readFrom(doomed.id, 0))
+          .rejects.toThrow(`session "${doomed.id}" not found`)
+        await expect(ctx.sessionPersistence.prepare(doomed.id))
+          .rejects.toThrow(`session "${doomed.id}" not found`)
+
+        // The untouched session keeps its complete log.
+        expect((await ctx.sessionPersistence.load(kept.id)).events).toHaveLength(6)
+
+        // Deleting again, or deleting an id this store never held, is a no-op.
+        await expect(ctx.sessionPersistence.delete(doomed.id)).resolves.toBeUndefined()
+        await expect(ctx.sessionPersistence.delete(meta('never-stored', WORK).id)).resolves.toBeUndefined()
+      } finally {
+        await fiber.dispose()
+        await fix.cleanup()
+      }
+    })
+
+    it('delete refuses an open live turn, then deletes the same session once it closes', async () => {
+      const fix = await makeFixture()
+      const ctx = new Context()
+      await ctx.plugin(SessionStore)
+      await fix.mount(ctx)
+      let session!: Session
+      const sessionFiber = await ctx.plugin(Object.assign((inner: Context) => {
+        session = inner.sessions.create(SessionId('busy-delete'), { meta: { cwd: WORK } })
+      }, { inject: ['sessions'] }))
+      try {
+        session.append('turn/start', { turn: 1 })
+        await ctx.sessions.flush(session)
+
+        // The refusal names the busy live turn and carries the transport token.
+        await expect(ctx.sessionPersistence.delete(session.id))
+          .rejects.toThrow('cannot delete session "busy-delete" while its live turn is open (agent-busy)')
+
+        // A refused delete is not a partial one: the log is intact.
+        expect((await ctx.sessionPersistence.inspect(session.id)).events).toHaveLength(1)
+
+        // Disposal closes the turn and retires the live binding; the idle
+        // session's log is now deletable.
+        await sessionFiber.dispose()
+        await expect(ctx.sessionPersistence.delete(session.id)).resolves.toBeUndefined()
+        expect((await ctx.sessionPersistence.list()).map(header => header.id)).not.toContain(session.id)
+      } finally {
+        await ctx.fiber.dispose()
+        await fix.cleanup()
+      }
+    })
+
+    it('refuses to re-materialize a deleted log through its still-live Session', async () => {
+      const fix = await makeFixture()
+      const ctx = new Context()
+      await ctx.plugin(SessionStore)
+      const fiber = await fix.mount(ctx)
+      const session = await liveSessionInFiber(ctx, 'revive-delete', WORK)
+      try {
+        send(session, oneTurnLog())
+        await ctx.sessions.flush(session)
+        await ctx.sessionPersistence.delete(session.id)
+
+        // delete does NOT dispose the live Session: its in-memory log remains,
+        // but the next write must not materialize the deleted log again.
+        session.append('turn/start', { turn: 2 })
+        await expect(ctx.sessions.flush(session))
+          .rejects.toThrow('cannot append session "revive-delete": its stored log was deleted in this process')
+
+        // A write left buffered when the backend is torn down is dropped with
+        // the deleted log rather than failing teardown or reviving it.
+        session.append('turn/start', { turn: 3 })
+        await expect(fiber.dispose()).resolves.toBeUndefined()
+
+        // A fresh instance over the same storage still finds no log: the
+        // dropped buffer never materialized one after the deletion.
+        const second = await freshCtx(fix)
+        try {
+          expect((await second.ctx.sessionPersistence.list()).map(header => header.id))
+            .not.toContain(session.id)
+        } finally {
+          await second.fiber.dispose()
+        }
+      } finally {
+        await ctx.fiber.dispose()
+        await fix.cleanup()
+      }
+    })
+
+    it('forgets a deleted id on reload: durable absence, not a persisted tombstone, is the authority', async () => {
+      const fix = await makeFixture()
+      const first = await freshCtx(fix)
+      const m = meta('reused-after-delete', WORK)
+      try {
+        await first.ctx.sessionPersistence.create(m)
+        await first.ctx.sessionPersistence.append(m.id, oneTurnLog())
+        await first.ctx.sessionPersistence.delete(m.id)
+        // In this process the tombstone outranks storage.
+        await expect(first.ctx.sessionPersistence.create(m))
+          .rejects.toThrow(`cannot create session "${m.id}": its stored log was deleted in this process`)
+        await expect(first.ctx.sessionPersistence.append(m.id, oneTurnLog()))
+          .rejects.toThrow(`cannot append session "${m.id}": its stored log was deleted in this process`)
+      } finally {
+        await first.fiber.dispose()
+      }
+      // A second instance over the same storage has no tombstone: the id is
+      // free because the durable log is genuinely gone.
+      const second = await freshCtx(fix)
+      try {
+        await second.ctx.sessionPersistence.create(m)
+        await second.ctx.sessionPersistence.append(m.id, oneTurnLog())
+        expect((await second.ctx.sessionPersistence.load(m.id)).events).toHaveLength(6)
+      } finally {
+        await second.fiber.dispose()
         await fix.cleanup()
       }
     })

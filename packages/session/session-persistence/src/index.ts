@@ -79,7 +79,8 @@ export interface SessionLocation {
  * Durable append-only session storage. Implementations preserve contiguous,
  * losslessly JSON-serializable events; {@link append} resolves only after
  * durability, and {@link load} balances a complete interrupted tail without
- * rewriting committed events.
+ * rewriting committed events. Storage stays append-only per session:
+ * {@link delete} removes a whole session, never part of one.
  */
 export abstract class SessionPersistence extends Service {
   constructor(ctx: Context) {
@@ -141,6 +142,41 @@ export abstract class SessionPersistence extends Service {
    * @param events - the contiguous batch to persist, in seq order.
    */
   abstract append(id: SessionId, events: readonly SessionEvent[]): Promise<void>
+
+  /**
+   * Hard-delete one stored session — its log, its events, and its metadata.
+   * Irreversible: after it resolves, {@link load}, {@link inspect},
+   * {@link readFrom}, {@link prepare}, {@link list}, and {@link listSnapshots}
+   * treat the id as absent (not as an empty session), and a later {@link create}
+   * or {@link append} on it rejects rather than materializing the deleted log
+   * again. Deleting an absent or never-materialized session is a no-op.
+   *
+   * Abstract on purpose: deletion is destructive and backend-specific, so every
+   * backend states whether it can do it. A backend whose physical layer omits
+   * the `remove` hook rejects, and the error names that backend.
+   *
+   * A coordinator-backed backend refuses while a live session bound to the id
+   * has an open turn — the log records work still in flight — and its error
+   * message carries `agent-busy` for transport mapping. That refusal, and the
+   * deleted state itself, are per-process: a backend remembers a deleted id only
+   * while this process lives, because after a restart no live writer exists to
+   * re-create the log and the durable absence is authoritative.
+   * @param id - the stored session to remove.
+   */
+  abstract delete(id: SessionId): Promise<void>
+
+  /**
+   * Whether this backend deleted the id in this process, as distinct from never
+   * having stored it: both answer every read as absent, so a consumer that owns
+   * its own identity namespace asks here instead of inferring it from a missing
+   * log.
+   *
+   * Per-process, exactly like {@link delete}. After a restart the durable
+   * absence is the whole truth and this answers false for every id.
+   * @param id - the stored session to test.
+   * @returns true once {@link delete} removed the id in this process.
+   */
+  abstract isDeleted(id: SessionId): boolean
 
   /**
    * Prepare the exact unpublished Session used by resume. Implementations may

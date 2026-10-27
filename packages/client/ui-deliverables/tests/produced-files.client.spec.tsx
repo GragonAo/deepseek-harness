@@ -137,15 +137,36 @@ function call(
   )
 }
 
-function result(seq: number, callId: string, isError = false, turn = 1): ConversationEventInput {
-  return at(seq, 'tool/result', {
-    turn,
-    step: 1,
-    message: {
-      source: { type: 'tool-result', callId },
-      content: [{ type: 'tool-result', content: [], isError }],
+function result(
+  seq: number,
+  callId: string,
+  isError = false,
+  turn = 1,
+  view?: NonNullable<ToolResultNode['resultView']>,
+): ConversationEventInput {
+  return at(
+    seq,
+    'tool/result',
+    {
+      turn,
+      step: 1,
+      message: {
+        source: { type: 'tool-result', callId },
+        content: [{ type: 'tool-result', content: [], isError }],
+      },
     },
-  })
+    view === undefined ? undefined : { for: 'result', view },
+  )
+}
+
+/** A completed terminal command reporting `paths` as the files it wrote. */
+function terminal(...paths: string[]): NonNullable<ToolResultNode['resultView']> {
+  return {
+    card: 'terminal',
+    output: 'wrote the report',
+    exitCode: 0,
+    ...paths.length > 0 ? { produced: paths.map(path => ({ path })) } : {},
+  }
 }
 
 function diff(...paths: string[]): ToolResultNode['callView'] {
@@ -204,6 +225,50 @@ describe('produced-file Turn data', () => {
     expect(producedForClosing(deliverablesOf(value))).toEqual([
       'out/index.html', 'out/app.css', 'notes.md',
     ])
+  })
+
+  it('folds the files a successful terminal command produced', () => {
+    const value = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      // A terminal call declares no produced files; the settled result reports
+      // the ones the executor observed writing.
+      call(2, 'make', { card: 'terminal', title: 'python make.py', description: 'Build the report' }),
+      result(3, 'make', false, 1, terminal('out/report.docx', 'out/notes.md')),
+      // The same command again rewrites one file, which stays one entry.
+      call(4, 'rerun', { card: 'terminal', title: 'python make.py', description: 'Build the report' }),
+      result(5, 'rerun', false, 1, terminal('out/report.docx')),
+      // Both card states, when they name the same file, fold into one entry each.
+      call(6, 'both', {
+        card: 'terminal', title: 'python make.py', description: 'Build the report',
+        produced: [{ path: 'out/report.docx' }],
+      }),
+      result(7, 'both', false, 1, terminal('out/report.docx', 'out/appendix.md')),
+    ])
+
+    expect(producedForClosing(deliverablesOf(value)))
+      .toEqual(['out/report.docx', 'out/notes.md', 'out/appendix.md'])
+  })
+
+  it('a failed terminal command contributes no produced files', () => {
+    const value = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      call(2, 'make', { card: 'terminal', title: 'python make.py', description: 'Build the report' }),
+      result(3, 'make', true, 1, terminal('out/report.docx')),
+    ])
+
+    expect(producedForClosing(deliverablesOf(value))).toEqual([])
+  })
+
+  it('a terminal command that wrote nothing adds no entry', () => {
+    const value = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      call(2, 'ls', { card: 'terminal', title: 'ls', description: 'List files' }),
+      result(3, 'ls', false, 1, terminal()),
+    ])
+
+    // Empty rather than a pathless entry: the row never claims a file it cannot name.
+    expect(deliverablesOf(value)?.produced).toEqual([])
+    expect(producedForClosing(deliverablesOf(value))).toEqual([])
   })
 
   it('ignores calls without mutation locations, orphan results, and replacement results', () => {

@@ -7,7 +7,8 @@ import {
 import { z } from 'zod'
 import {
   contentBlockSchema, sessionCancelRequestSchema, sessionCancelValueSchema, sessionCreateRequestSchema,
-  sessionCreateValueSchema, sessionEventSchema, sessionHistoryRequestSchema, sessionHistoryValueSchema,
+  sessionCreateValueSchema, sessionDeleteRequestSchema, sessionDeleteValueSchema,
+  sessionEventSchema, sessionHistoryRequestSchema, sessionHistoryValueSchema,
   sessionIdSchema, sessionListRequestSchema, sessionListValueSchema, sessionModelsRequestSchema,
   sessionModelsValueSchema, sessionPromptRequestSchema, sessionPromptValueSchema,
   sessionSearchRequestSchema, sessionSearchValueSchema, sessionSelectModelRequestSchema,
@@ -285,6 +286,15 @@ describe('sessions domain schemas', () => {
       sessionId: 's1', itemId: 'i1', action: { kind: 'promote' },
     })).toThrow()
     expect(sessionCancelValueSchema.parse({ accepted: true }).accepted).toBe(true)
+    expect(sessionDeleteRequestSchema.parse({ sessionId: 's1' })).toEqual({ sessionId: 's1' })
+    // The id is a required non-empty string: a delete names exactly one session.
+    expect(() => sessionDeleteRequestSchema.parse({})).toThrow()
+    expect(() => sessionDeleteRequestSchema.parse({ sessionId: '' })).toThrow()
+    expect(() => sessionDeleteRequestSchema.parse({ sessionId: 1 })).toThrow()
+    expect(sessionDeleteValueSchema.parse({ deleted: true })).toEqual({ deleted: true })
+    // The acknowledgment is a literal, not a boolean: a failed delete is an error result.
+    expect(() => sessionDeleteValueSchema.parse({})).toThrow()
+    expect(() => sessionDeleteValueSchema.parse({ deleted: false })).toThrow()
     expect(sessionUpdateQueueValueSchema.parse({ accepted: true }).accepted).toBe(true)
     expect(contentBlockSchema.parse({ type: 'text', text: 'x', extra: 1 })).toMatchObject({ extra: 1 })
   })

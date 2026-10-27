@@ -1163,6 +1163,68 @@ describe('JsonlSessionPersistence: default packed chunk rows', () => {
   })
 })
 
+describe('JsonlSessionPersistence: deletion', () => {
+  let ctx: Context
+  let removeRoot: string
+  beforeEach(async () => {
+    removeRoot = await freshRoot()
+    ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(JsonlSessionPersistence, { root: removeRoot, compression: 'none' })
+  })
+  afterEach(async () => { await ctx.fiber.dispose() })
+
+  it('unlinks the session artifact while leaving its directory and every other session', async () => {
+    const removed = meta('removable', '/work')
+    const kept = meta('survivor', '/work')
+    await ctx.sessionPersistence.create(removed)
+    await ctx.sessionPersistence.append(removed.id, oneTurnLog())
+    await ctx.sessionPersistence.create(kept)
+    await ctx.sessionPersistence.append(kept.id, oneTurnLog())
+    const path = rawLogPath(removeRoot, '/work', removed.id)
+    expect((await stat(path)).isFile()).toBe(true)
+
+    await ctx.sessionPersistence.delete(removed.id)
+
+    await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' })
+    // The session-owned directory is scaffolding, not the session: list finds
+    // sessions by artifact file, and one log is one file.
+    expect((await stat(dirname(path))).isDirectory()).toBe(true)
+    expect((await stat(rawLogPath(removeRoot, '/work', kept.id))).isFile()).toBe(true)
+    expect((await ctx.sessionPersistence.list()).map(header => header.id)).toEqual([kept.id])
+    expect((await ctx.sessionPersistence.listSnapshots()).map(s => s.header.id)).toEqual([kept.id])
+  })
+
+  it('is a no-op for an absent session and for a root that does not exist yet', async () => {
+    const persistence = ctx.sessionPersistence as unknown as JsonlSessionPersistence
+    await expect(persistence.remove(SessionId('never-stored'))).resolves.toBeUndefined()
+
+    const missingRoot = join(removeRoot, 'not-created-yet')
+    const empty = new Context()
+    try {
+      await empty.plugin(SessionStore)
+      await empty.plugin(JsonlSessionPersistence, { root: missingRoot, compression: 'none' })
+      await expect((empty.sessionPersistence as unknown as JsonlSessionPersistence)
+        .remove(SessionId('never-stored'))).resolves.toBeUndefined()
+      await expect(stat(missingRoot)).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally {
+      await empty.fiber.dispose()
+    }
+  })
+
+  it('rejects a pre-aborted removal with the caller’s exact reason', async () => {
+    const persistence = ctx.sessionPersistence as unknown as JsonlSessionPersistence
+    const m = meta('aborted-removal', '/work')
+    await ctx.sessionPersistence.create(m)
+    await ctx.sessionPersistence.append(m.id, oneTurnLog())
+
+    const reason = new Error('removal cancelled')
+    await expect(persistence.remove(m.id, AbortSignal.abort(reason))).rejects.toBe(reason)
+    // The refusal happens before any unlink: the artifact is still there.
+    expect((await stat(rawLogPath(removeRoot, '/work', m.id))).isFile()).toBe(true)
+  })
+})
+
 describe('JsonlSessionPersistence: edge cases', () => {
   let ctx: Context
   beforeEach(async () => {

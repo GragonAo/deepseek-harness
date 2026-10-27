@@ -40,6 +40,8 @@
 
 工具持有自己的 `presentCall`/`presentResult` 渲染意图。前台调用是终端卡片，包含命令、说明、cwd、输出和解析后的退出状态。由于卡片以独立的 pill 展示退出状态，解析所消耗的 `[exit code: N]` / `[killed by signal: …]` 标记会从输出中移除；其他所有标记（截断、超时、沙箱）都保留在输出中。后台启动只返回 job id，因此使用通用执行卡片；通用 `job_*` 工具持有各自的卡片。这些 presenter 是纯函数，可安全回放。
 
+前台结果还携带 `produced`：执行器观测到的、该命令创建或修改的文件，以 `FileLocation` 形式作为该调用的产出文件列在终端卡片上。模型看不到它们 —— 渲染文本保持不变 —— 所以它们只经持久化的呈现元数据传递，由 `presentResult` 在实时与回放路径上同样地还原进视图。规范前台值把 `produced` 声明为可选的路径数组，因此生成的 Code Mode 输出类型也会带上它。缺失表示执行器无法观测本次运行的写入效果，此时卡片不列出任何文件，也不会失败。
+
 ## 工具仅使用具名参数构建请求
 
 `ShellExecRequest` 携带可选的 `stdoutMaxBytes`、`stdin`、普通 `env` 和托管 `dshEnv`，供可信进程内插件及此工具的环境注册表使用。模型侧工具不公开 `stdoutMaxBytes`、`stdin` 或 `env`：它使用具名的命令／工作目录／超时／信号／沙箱字段，加上从注册表收集的 `dshEnv` 来构建请求。额外模型键会被忽略，无法替换托管值。Shell 语法可以提供等价的命令级行为，而本地执行器会清除环境中的凭据和陈旧 `DSH_*` 值。参见 [stdin/env Agent Note](../../../.agents/notes/implemented/architecture/2026-06-30-bash-stdin-env-trusted-plugin-api.md)。
@@ -137,3 +139,5 @@ renderer 先输出依数据而定的 stdout 尾部，再输出可选的 `[stderr
 - **回放退出状态 pill 从结果文本解析**：如果输出最后一行恰好精确为 `[exit code: N]` / `[killed by signal: …]`，会话回放将显示错误的 pill，并且该行会从卡片正文中丢失，因为解析会把它当作自己消耗的标记；这是仅影响展示的已知残留问题。
 - **`bash` 工具不采用 `timeout-policy` 预算**：根据[工具调用 timeout-policy Agent Note](../../../.agents/notes/implemented/architecture/2026-07-07-tool-call-timeout-policy.md)，它保留由执行器持有的 `BASH_TIMEOUT` 路径。
 - **后台进程没有执行器超时**：工作不再需要时，调用方必须使用 `job_kill`，或依赖持有者／服务的 dispose。
+- **产出文件来自执行器，而非本工具**：卡片报告的是 `ShellRunResult.produced` 观测到的内容，因此不观测写入效果的本地与 pwsh 执行器不会产出 `produced`。只有会话内的容器执行器报告它，且只限它扫描的会话目录下的文件。
+- **`tool-bash-persistent` 不渲染产出文件**：它的 PTY 路径只返回字符串输出，没有可供观测的运行结果，因此持久 shell 命令不报告任何文件。

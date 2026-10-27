@@ -6,7 +6,7 @@ import type { JWTPayload } from 'jose'
 import { SessionStore, type Session } from '@deepseek-ai/dsh-session'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
-import { currentTenant, currentUser, runWithTenant, runWithUser, TenantId, UserId } from '@deepseek-ai/dsh-tenant'
+import { currentRequestHeaders, currentTenant, currentUser, runWithTenant, runWithUser, TenantId, UserId } from '@deepseek-ai/dsh-tenant'
 import type { Tenant } from '@deepseek-ai/dsh-tenant'
 import { TenantRegistry } from '@deepseek-ai/dsh-tenant'
 import JwtTenantAuthenticator from '@deepseek-ai/dsh-tenant-auth-jwt'
@@ -47,6 +47,8 @@ async function issueToken(tenantId: string | undefined, subject = 'user-1'): Pro
  */
 class FakeGateway extends Service {
   readonly tenantSeen: Array<string | undefined> = []
+  /** Headers the carrier's request scope answered while serving, per call. */
+  readonly headersSeen: Array<Readonly<Record<string, string>> | undefined> = []
   listItems: Array<{ sessionId: string }> = []
   muxPayloads: Array<{ type: string; sessionId?: string }> = []
   hostPayloads: Array<Record<string, unknown>> = []
@@ -60,6 +62,7 @@ class FakeGateway extends Service {
   sessions = {
     list: async (r: { rpcId: unknown }) => {
       this.tenantSeen.push(currentTenant()?.id)
+      this.headersSeen.push(currentRequestHeaders())
       return {
         rpcId: r.rpcId,
         result: {
@@ -112,8 +115,8 @@ async function boot(): Promise<{ ctx: Context; gateway: FakeGateway }> {
   return { ctx, gateway }
 }
 
-function sessionListRequest(token?: string): Request {
-  const headers: Record<string, string> = { 'content-type': 'application/json' }
+function sessionListRequest(token?: string, extraHeaders: Record<string, string> = {}): Request {
+  const headers: Record<string, string> = { 'content-type': 'application/json', ...extraHeaders }
   if (token !== undefined) headers.authorization = `Bearer ${token}`
   return new Request('http://localhost/api/session.list', {
     method: 'POST',
@@ -246,6 +249,25 @@ describe('AgentHttp', () => {
       const body = await response.json() as { result?: { value?: { items?: unknown[] } } }
       expect(body.result?.value?.items).toEqual([])
       expect(gateway.tenantSeen).toEqual(['acme'])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('answers the inbound request headers inside the scope it serves', async () => {
+    const { ctx, gateway } = await boot()
+    try {
+      const token = await issueToken('acme')
+      const response = await ctx.agentHttp.fetch(sessionListRequest(token, { 'x-user': 'u-9', 'x-case': 'case-9' }))
+      expect(response.status).toBe(200)
+      // Lowercased names, and the credential travels with the rest: a provider
+      // forwarding these decides what leaves the process.
+      expect(gateway.headersSeen).toEqual([{
+        'content-type': 'application/json',
+        authorization: `Bearer ${token}`,
+        'x-user': 'u-9',
+        'x-case': 'case-9',
+      }])
     } finally {
       await ctx.fiber.dispose()
     }

@@ -7,7 +7,7 @@ import {
   SessionPersistence, SessionPersistenceRevision, PersistenceCoordinator,
   type PersistenceBackend, type SessionPersistenceSnapshot, type StoredPrefix, type StoredSuffix,
 } from '../src/index.ts'
-import { runPersistenceContract, meta, oneTurnLog } from './contract.ts'
+import { runPersistenceContract, meta, oneTurnLog, appendLog } from './contract.ts'
 import { runCoordinatorContract, type CoordinatorFixture } from './coordinator-contract.ts'
 
 /** The durable store shape: materialized sessions only (no lazy entries). */
@@ -59,6 +59,7 @@ interface CoordinatorInternals {
   }>
   chains: Map<unknown, unknown>
   retirements: Map<unknown, Promise<void>>
+  preparations: { has: (id: unknown) => boolean }
 }
 
 /**
@@ -99,6 +100,14 @@ class MemoryPersistence extends SessionPersistence implements PersistenceBackend
 
   append(id: SessionId, events: readonly SessionEvent[]): Promise<void> {
     return this.coordinator.append(id, events)
+  }
+
+  delete(id: SessionId): Promise<void> {
+    return this.coordinator.delete(id)
+  }
+
+  isDeleted(id: SessionId): boolean {
+    return this.coordinator.isDeleted(id)
   }
 
   override prepare(id: SessionId, signal?: AbortSignal): ReturnType<PersistenceCoordinator['prepare']> {
@@ -164,6 +173,12 @@ class MemoryPersistence extends SessionPersistence implements PersistenceBackend
   async list(signal?: AbortSignal): Promise<SessionHeader[]> {
     signal?.throwIfAborted()
     return [...this.store.values()].map(e => structuredClone(e.meta))
+  }
+
+  /** Delete a materialized entry outright: a Map store keeps no other trace of it. */
+  async remove(id: SessionId, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted()
+    this.store.delete(id)
   }
 
   async listSnapshots(signal?: AbortSignal): Promise<SessionPersistenceSnapshot[]> {
@@ -1775,6 +1790,103 @@ describe('PersistenceCoordinator retirement', () => {
     } finally {
       appendGate.resolve(true)
       await fiber.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+})
+
+describe('PersistenceCoordinator deletion', () => {
+  it('refuses to delete on a backend without the remove hook, naming that backend', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const backend = new ControlledBackend()
+    let coordinator!: PersistenceCoordinator<never>
+    const fiber = await ctx.plugin(Object.assign((inner: Context) => {
+      coordinator = new PersistenceCoordinator(inner, backend)
+    }, { inject: ['sessions'] }))
+
+    try {
+      const m = meta(SessionId('undeletable'))
+      await coordinator.create(m)
+      await coordinator.append(m.id, oneTurnLog())
+
+      await expect(coordinator.delete(m.id))
+        .rejects.toThrow('cannot delete session "undeletable": backend "session-persistence-controlled" does not support deleting a stored session')
+
+      // The refusal is capability-only: nothing was deleted and the id stays readable.
+      expect((await coordinator.load(m.id)).events).toHaveLength(6)
+    } finally {
+      await fiber.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('drops live ownership and buffered writes for a deleted id', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const store: MemoryStore = new Map()
+    const fiber = await ctx.plugin(MemoryPersistence, { store })
+    const internals = (ctx.sessionPersistence as unknown as {
+      coordinator: CoordinatorInternals
+    }).coordinator
+    const m = meta(SessionId('deleted-live-state'))
+
+    let session!: Session
+    const sessionFiber = await ctx.plugin(Object.assign((inner: Context) => {
+      session = inner.sessions.create(m.id, { meta: { cwd: '/w' } })
+    }, { inject: ['sessions'] }))
+
+    try {
+      appendLog(session, oneTurnLog())
+      await ctx.sessions.flush(session)
+      expect(internals.states.has(m.id)).toBe(true)
+      expect(internals.live.size).toBe(1)
+
+      await ctx.sessionPersistence.delete(m.id)
+
+      expect(internals.states.has(m.id)).toBe(false)
+      expect(internals.live.size).toBe(0)
+      expect(store.has(m.id)).toBe(false)
+      await expect(ctx.sessionPersistence.load(m.id)).rejects.toThrow(`session "${m.id}" not found`)
+
+      // The live Session survives the delete, so its next write is the one that
+      // reports the deletion — and teardown drops it instead of failing.
+      session.append('turn/start', { turn: 2 })
+      await expect(ctx.sessions.flush(session))
+        .rejects.toThrow(`cannot append session "${m.id}": its stored log was deleted in this process`)
+      await expect(fiber.dispose()).resolves.toBeUndefined()
+      expect(store.has(m.id)).toBe(false)
+    } finally {
+      await sessionFiber.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('invalidates a cached preparation whose log was deleted', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const store: MemoryStore = new Map()
+    await ctx.plugin(MemoryPersistence, { store })
+    const internals = (ctx.sessionPersistence as unknown as {
+      coordinator: CoordinatorInternals
+    }).coordinator
+    const m = meta(SessionId('deleted-cached-source'))
+
+    try {
+      await ctx.sessionPersistence.create(m)
+      await ctx.sessionPersistence.append(m.id, oneTurnLog())
+      // A cold inspect caches a reusable prepared source for this id.
+      await ctx.sessionPersistence.inspect(m.id)
+      expect(internals.preparations.has(m.id)).toBe(true)
+
+      await ctx.sessionPersistence.delete(m.id)
+
+      // The stale source no longer owns the identity, so a later writer of the
+      // same id reports the deletion rather than a preparation collision.
+      expect(internals.preparations.has(m.id)).toBe(false)
+      await expect(ctx.sessionPersistence.create(m))
+        .rejects.toThrow(`cannot create session "${m.id}": its stored log was deleted in this process`)
+    } finally {
       await ctx.fiber.dispose()
     }
   })

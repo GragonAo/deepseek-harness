@@ -93,6 +93,7 @@ async function buildApi(
   }
   if (persistence) {
     ctx.provide('sessionPersistence', {
+      isDeleted: () => false,
       supportsRawArtifacts: persistence !== 'unsupported',
       readRaw: services.readRaw ?? (async (id: SessionId) => {
         if (persistence === 'throw') throw new Error('/host/private/session.jsonl')

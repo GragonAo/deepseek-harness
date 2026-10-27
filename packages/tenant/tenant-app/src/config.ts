@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 租户服务配置的读取与校验。
  *
  * 配置只有一个来源：一个 YAML/JSON 文件（`--config` 或 `DSH_TENANT_CONFIG`），加上一组
@@ -278,7 +278,7 @@ function validate(config: Record<string, unknown>): TenantAppConfig {
   const root = new Reader('配置', config)
   root.rejectUnknown([
     'http', 'database', 'auth', 'admin', 'tenants', 'sandbox',
-    'permissions', 'model', 'web', 'telemetry', 'surfaces', 'tools', 'plugins', 'mcpServers',
+    'permissions', 'model', 'web', 'telemetry', 'surfaces', 'tools', 'plugins', 'mcpServers', 'mcpMeta',
   ])
 
   const http = readHttp(root.child('http'))
@@ -295,6 +295,7 @@ function validate(config: Record<string, unknown>): TenantAppConfig {
   const tools = readTools(root.optionalChild('tools'))
   const plugins = readPlugins(root.optionalChild('plugins'))
   const mcpServers = readMcpServers(root)
+  const mcpMeta = readMcpMeta(root)
 
   return {
     http,
@@ -311,7 +312,23 @@ function validate(config: Record<string, unknown>): TenantAppConfig {
     ...(tools !== undefined ? { tools } : {}),
     ...(plugins !== undefined ? { plugins } : {}),
     ...(mcpServers !== undefined ? { mcpServers } : {}),
+    ...(mcpMeta !== undefined ? { mcpMeta } : {}),
   }
+}
+
+/**
+ * 入站请求头到 MCP `_meta` 的映射。
+ *
+ * 没配 `mcpMeta` 就返回 `undefined`，那条通道整块不挂：`mcp-client` 读不到提供者，
+ * 每次调用不带 `_meta`，与加这条通道之前完全一致。
+ * @param reader - 配置根。
+ * @returns 已校验的映射；未配置时为 `undefined`。
+ */
+function readMcpMeta(reader: Reader): TenantAppConfig['mcpMeta'] {
+  if (!reader.keys().includes('mcpMeta')) return undefined
+  const meta = reader.child('mcpMeta')
+  meta.rejectUnknown(['fromHeaders'])
+  return { ...present('fromHeaders', meta.optionalStringMap('fromHeaders')) }
 }
 
 function readHttp(reader: Reader): TenantAppConfig['http'] {

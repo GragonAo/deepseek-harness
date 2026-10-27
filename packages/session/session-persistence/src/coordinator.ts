@@ -193,6 +193,18 @@ export interface PersistenceBackend<TornMarker = unknown> {
   commitRepair(meta: SessionHeader, tornMarker: TornMarker | undefined, closers: readonly SessionEvent[]): Promise<void>
 
   /**
+   * Optional irreversible removal of one session's complete stored footprint,
+   * metadata included: every row, artifact, or object this backend holds under
+   * the id. After it resolves, {@link loadStored}, {@link readStoredRevision},
+   * and {@link list} no longer observe the session. Removing an absent session
+   * is a no-op. A backend that omits this hook cannot delete, and
+   * {@link PersistenceCoordinator.delete} then refuses by name.
+   * @param id - stored session id to remove.
+   * @param signal - optional cancellation for backend removal work.
+   */
+  remove?(id: SessionId, signal?: AbortSignal): Promise<void>
+
+  /**
    * List all stored (materialized) sessions' metadata.
    * @param signal - optional cancellation for backend listing work.
    */
@@ -592,6 +604,11 @@ export class PersistenceCoordinator<TornMarker = unknown> {
   private live = new Map<Session, LiveSessionState>()
   /** Exact disposed lifecycles whose buffered tail is still draining. */
   private retirements = new Map<SessionId, Promise<void>>()
+  /**
+   * Ids this coordinator deleted, so a deleted log cannot come back within this
+   * process. Deliberately in-memory only: see {@link delete}.
+   */
+  private deleted = new Set<SessionId>()
   /** Shared cold reads, unpublished reservations, and completed LRU entries. */
   private readonly preparations: SessionPreparations<PreparedSessionSource<TornMarker>, SessionState>
   /**
@@ -643,6 +660,7 @@ export class PersistenceCoordinator<TornMarker = unknown> {
   }
 
   private async createCore(meta: SessionHeader): Promise<void> {
+    this.assertNotDeletedWrite(meta.id, 'create')
     // Do NOT clobber an existing session: the SessionId IS the identity.
     if (this.states.has(meta.id) || this.preparations.has(meta.id)) {
       throw new Error(`session "${meta.id}" already exists in this backend`)
@@ -680,6 +698,7 @@ export class PersistenceCoordinator<TornMarker = unknown> {
   }
 
   private async appendCore(id: SessionId, events: readonly SessionEvent[]): Promise<void> {
+    this.assertNotDeletedWrite(id, 'append')
     // Every append route converges here: the public service, live write-behind
     // drains, and HMR seed/suffix adoption. Legacy-shape rejection stays at
     // this shared boundary so a stale JavaScript plugin cannot persist a
@@ -710,6 +729,96 @@ export class PersistenceCoordinator<TornMarker = unknown> {
   }
 
   /**
+   * Hard-delete one session's stored log and metadata through the backend's
+   * `remove` hook. Irreversible: after it resolves, every read treats the id as
+   * absent rather than as an empty session.
+   *
+   * The refusal while a live session's turn is open is deliberate — that log
+   * records work still in flight — and the message carries `agent-busy` so a
+   * transport can map it to its own rejection code. An idle live session MAY be
+   * deleted. It is not disposed by this call: its in-memory log stays, its
+   * buffered tail and write controller are dropped, its next write is refused by
+   * the tombstone set below, and teardown skips its drain instead of failing on
+   * the log the caller deleted on purpose. A host that keeps using that live
+   * Session therefore sees its writes rejected until it disposes the Session.
+   *
+   * The tombstone lives only in this process. After a restart nothing is live,
+   * so no writer exists to re-create the log, the durable absence the backend
+   * reports is the whole truth, and there is nothing to persist or recover.
+   *
+   * Deleting an absent, never-stored, or already-deleted session is a no-op.
+   * @param id - the session to remove.
+   * @throws when the backend omits its `remove` hook (the message names that
+   *   backend), or when the live session bound to the id has an open turn.
+   */
+  async delete(id: SessionId): Promise<void> {
+    if (this.deleted.has(id)) return
+    await this.waitForRetirement(id)
+    await this.serialize(id, () => this.deleteCore(id))
+  }
+
+  /**
+   * Whether this coordinator deleted the id in this process.
+   *
+   * A read cannot tell the two absences apart: {@link delete} leaves the id
+   * looking exactly like one that was never stored. The tombstone is the only
+   * record of the difference, so a caller that owns its own identity namespace
+   * asks here rather than inferring it from a missing log.
+   * @param id - the session id to test.
+   * @returns true once {@link delete} removed the id in this process.
+   */
+  isDeleted(id: SessionId): boolean {
+    return this.deleted.has(id)
+  }
+
+  private async deleteCore(id: SessionId): Promise<void> {
+    // Capability first: a backend that cannot delete is a static deployment
+    // fact, so the refusal names it before any session state is consulted.
+    const remove = this.backend.remove?.bind(this.backend)
+    if (remove === undefined) {
+      throw new Error(`cannot delete session "${id}": backend "${this.backend.name}" does not support deleting a stored session`)
+    }
+    const owner = this.states.get(id)?.owner
+    if (owner !== undefined && interruptedTurnClosers(owner.events).length > 0) {
+      throw new Error(`cannot delete session "${id}" while its live turn is open (agent-busy); cancel the turn or wait for it to end`)
+    }
+    await remove(id)
+    // Tombstone before touching in-memory state: from this point the id is
+    // deleted in this process whatever a still-live Session does next.
+    this.deleted.add(id)
+    this.forget(id, owner)
+  }
+
+  /** Drop every in-memory trace of one deleted id, live ownership included. */
+  private forget(id: SessionId, owner: Session | undefined): void {
+    if (owner !== undefined) {
+      // The buffered tail belonged to the deleted log: stop its automatic
+      // window rather than let it run a write the tombstone refuses.
+      /* v8 ignore next -- a state owner is always registered in `live`; the two are set together */
+      this.live.get(owner)?.writes.cancelAutomaticWait()
+      this.live.delete(owner)
+    }
+    this.states.delete(id)
+    this.preparations.invalidate(id)
+  }
+
+  /** Report a session this coordinator deleted as absent, per the read contract. */
+  private assertNotDeleted(id: SessionId): void {
+    if (this.deleted.has(id)) throw new Error(`session "${id}" not found`)
+  }
+
+  /**
+   * Refuse a write to a session this coordinator deleted. Reads report the
+   * session as absent instead ({@link assertNotDeleted}); a write must reject
+   * loudly, because it would materialize the deleted log again.
+   */
+  private assertNotDeletedWrite(id: SessionId, operation: 'create' | 'append'): void {
+    if (this.deleted.has(id)) {
+      throw new Error(`cannot ${operation} session "${id}": its stored log was deleted in this process`)
+    }
+  }
+
+  /**
    * Prepare and reserve the exact unpublished Session used by resume.
    * Revision retries converge once the durable log remains unchanged for one
    * read/check round trip; continuous external writers may delay completion.
@@ -718,6 +827,7 @@ export class PersistenceCoordinator<TornMarker = unknown> {
    * @returns an owned preparation released after publication or rollback.
    */
   async prepare(id: SessionId, signal?: AbortSignal): Promise<SessionPreparation> {
+    this.assertNotDeleted(id)
     for (;;) {
       await this.waitForRetirement(id, signal)
       if (this.ctx.sessions.get(id) !== undefined) {
@@ -754,6 +864,7 @@ export class PersistenceCoordinator<TornMarker = unknown> {
    * @returns prepared header and balanced events.
    */
   async load(id: SessionId): Promise<SessionInspection> {
+    this.assertNotDeleted(id)
     for (;;) {
       await this.waitForRetirement(id)
       const live = this.ctx.sessions.get(id)
@@ -785,6 +896,7 @@ export class PersistenceCoordinator<TornMarker = unknown> {
    * @returns immutable prepared metadata and events; a live view may have an open turn.
    */
   async inspect(id: SessionId, signal?: AbortSignal): Promise<SessionInspection> {
+    this.assertNotDeleted(id)
     for (;;) {
       signal?.throwIfAborted()
       if (this.retirements.has(id)) await this.waitForRetirement(id, signal)
@@ -843,6 +955,7 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     fromSeq: number,
     signal?: AbortSignal,
   ): Promise<{ meta: SessionHeader; events: SessionEvent[] }> {
+    this.assertNotDeleted(id)
     signal?.throwIfAborted()
     if (this.backend.loadStoredFrom !== undefined) {
       let suffix: StoredSuffix | undefined
@@ -1092,7 +1205,17 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     ctx.effect(() => async () => {
       let disposeError: unknown
       try {
-        const errors = await settledErrors([...this.live.keys()].map(session => this.flush(session)))
+        const errors = await settledErrors([...this.live].map(async ([session, live]) => {
+          if (this.deleted.has(session.id)) {
+            // A deleted id has no durable lifecycle left to drain: its buffer
+            // belongs to a log removed on request, and the write that carried
+            // those events already reported the refusal. Cancelling the window
+            // keeps a deleted session from failing teardown or writing after it.
+            live.writes.cancelAutomaticWait()
+            return
+          }
+          await this.flush(session)
+        }))
         while (this.chains.size > 0) await Promise.allSettled([...this.chains.values()])
         if (errors.length > 0) {
           throw new AggregateError(errors, `${this.backend.name} dispose failed`)
@@ -1177,8 +1300,13 @@ export class PersistenceCoordinator<TornMarker = unknown> {
       writes: this.createWriteBehind(session, () => live.init),
     }
     this.live.set(session, live)
-    live.init = this.serialize(session.header.id, () => this.onCreated(session, seed))
-    live.init.catch(() => { /* observed by flush/dispose through the controller */ })
+    // A deleted id has no durable lifecycle to initialize: its log was removed
+    // on request, so admission is skipped rather than re-created here, and the
+    // first write reports the deletion from appendCore.
+    if (!this.deleted.has(session.header.id)) {
+      live.init = this.serialize(session.header.id, () => this.onCreated(session, seed))
+      live.init.catch(() => { /* observed by flush/dispose through the controller */ })
+    }
     return live
   }
 

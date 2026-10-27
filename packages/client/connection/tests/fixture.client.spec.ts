@@ -341,6 +341,26 @@ describe('createFixtureApi', () => {
     expect(idleCancel.result).toMatchObject({ ok: true })
   })
 
+  it('delete drops the session row with its log, freezes an in-flight replay, and is an idempotent no-op', async () => {
+    const api = createFixtureApi()
+    const created = await api.sessions.create(req({}))
+    if (!created.result.ok) throw new Error('create failed')
+    const id = created.result.value.sessionId
+    expect((await api.sessions.prompt(req({
+      sessionId: id,
+      mode: 'queue',
+      content: [{ type: 'text', text: '嗨' }],
+    }))).result.ok).toBe(true)
+    const deleted = await api.sessions.delete(req({ sessionId: id }))
+    expect(deleted.result).toMatchObject({ ok: true, value: { deleted: true } })
+    const list = await api.sessions.list(req({}))
+    if (!list.result.ok) throw new Error('list failed')
+    expect(list.result.value.items.map(item => item.sessionId)).not.toContain(id)
+    // An id with neither a row nor a replay deletes as a successful no-op.
+    expect((await api.sessions.delete(req({ sessionId: sid('session-missing') }))).result)
+      .toMatchObject({ ok: true, value: { deleted: true } })
+  })
+
   it('steer during a replay lands a user/message inside the current turn and the replay continues', async () => {
     const api = createFixtureApi()
     const created = await api.sessions.create(req({}))
@@ -1029,6 +1049,10 @@ describe('FixtureApiClient (protocol-level fake carrier)', () => {
     expect((await client.sessions.history({ sessionId: id })).result.ok).toBe(true)
     expect((await client.sessions.prompt({ sessionId: id, mode: 'queue', content: [{ type: 'text', text: '嗨' }] })).result.ok).toBe(true)
     expect((await client.sessions.cancel({ sessionId: id })).result.ok).toBe(true)
+    const doomed = await client.sessions.create({})
+    if (!doomed.result.ok) throw new Error('doomed create failed')
+    expect((await client.sessions.delete({ sessionId: doomed.result.value.sessionId })).result)
+      .toMatchObject({ ok: true, value: { deleted: true } })
     expect((await client.host.describe({})).result.ok).toBe(true)
     expect((await client.workspace.list({})).result.ok).toBe(true)
     const workspace = await client.workspace.create({ path: '/tmp/fixture-workspaces/via-client' })

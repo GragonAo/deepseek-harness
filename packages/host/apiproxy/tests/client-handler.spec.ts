@@ -61,6 +61,7 @@ function scriptedApi(overrides: {
       }),
       updateQueue: r => ok(r, { accepted: true as const }),
       cancel: r => ok(r, { accepted: true as const }),
+      delete: r => ok(r, { deleted: true as const }),
       ...overrides.sessions,
     },
     subagents: {
@@ -272,6 +273,26 @@ describe('unary round trip', () => {
       sessions: { list: () => Promise.resolve({ rpcId: RpcId('forged'), result: { ok: true, value: { items: [] } } }) },
     })
     await expect(client(api).sessions.list({})).rejects.toThrow(/rpcId mismatch/)
+  })
+
+  it('routes session delete through the wire and refuses a malformed payload before the impl', async () => {
+    const remove = vi.fn((r: RpcRequest<{ sessionId: SessionId }>) => ok(r, { deleted: true as const }))
+    const api = scriptedApi({ sessions: { delete: remove } })
+    const c = client(api)
+
+    const deleted = await c.sessions.delete({ sessionId: sid('s-doomed') })
+    expect(deleted.result).toEqual({ ok: true, value: { deleted: true } })
+    expect(remove).toHaveBeenCalledTimes(1)
+    expect(remove.mock.calls[0]?.[0].payload).toEqual({ sessionId: 's-doomed' })
+
+    // The delete names exactly one session: a payload that names none, or names
+    // it with the wrong type, is refused at the carrier and never reaches the impl.
+    for (const payload of [{}, { sessionId: 7 }]) {
+      const refused = await c.sessions.delete(payload as never)
+      expect(refused.result.ok).toBe(false)
+      if (!refused.result.ok) expect(refused.result.error.code).toBe('bad-request')
+    }
+    expect(remove).toHaveBeenCalledTimes(1)
   })
 
   it('rejects an invalid payload at the handler as 200 + bad-request with issues', async () => {

@@ -224,6 +224,7 @@ describe('ShellEnvRegistry', () => {
     const ctx = new Context()
     await ctx.plugin(BashEnvPlugin)
     ctx.provide('sessionPersistence', {
+      isDeleted: () => false,
       locate: () => ({ kind: 'jsonl' as const, path: 'C:\\sessions\\s.jsonl' }),
     })
     expect(ctx.shellEnv.collect(execution('sess-p')).DSH_SESSION_JSONL).toBe('C:\\sessions\\s.jsonl')
@@ -233,6 +234,7 @@ describe('ShellEnvRegistry', () => {
     const ctx = new Context()
     await ctx.plugin(BashEnvPlugin)
     ctx.provide('sessionPersistence', {
+      isDeleted: () => false,
       locate: () => ({ kind: 'sqlite' as const, path: 'C:\\sessions\\s.db' }),
     })
     expect(ctx.shellEnv.collect(execution('sess-p'))).not.toHaveProperty('DSH_SESSION_JSONL')
@@ -300,6 +302,7 @@ describe('ShellEnvRegistry.collectSession', () => {
     const ctx = new Context()
     await ctx.plugin(BashEnvPlugin, { dshHome: './test-dsh-home' })
     ctx.provide('sessionPersistence', {
+      isDeleted: () => false,
       locate: () => ({ kind: 'jsonl' as const, path: 'C:\\sessions\\s.jsonl' }),
     })
     provideAgents(ctx, () => agent('ambient-session'))

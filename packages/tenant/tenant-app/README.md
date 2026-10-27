@@ -32,6 +32,7 @@ dsh-tenant --config /etc/dsh/tenant.config.yaml
 | `tools` | 工具呈现方式（`code`/`native`/`both`，默认 `both`）与 `run_code` 子调用的并发上限。 |
 | `plugins` | 逐行覆盖组合清单：停用某一行，或追加它的配置。 |
 | `mcpServers` | 要接入的 MCP 服务器列表：`serverName`、`transport: streamable-http`、`url`、可选的 `headers`、每条自己的工具调用并发策略与上限、必须串行的工具名单与单次调用超时，以及初次连不上时是否让这一行启动失败。 |
+| `mcpMeta` | 每次 MCP 工具调用随 `params._meta` 上送的入站请求头：`fromHeaders` 是 `_meta` 键 → 请求头名（大小写不敏感）。省略则一个都不送。 |
 
 校验在这一层完成：缺必填项、类型不符、同一组里给了互斥的两项、写了不存在的字段名，启动前就抛 `TenantAppConfigError` 并指出是哪个字段。拼错字段名不会静默忽略——静默忽略会让部署以为某项已生效，而实际跑的是默认值。
 
@@ -50,6 +51,8 @@ dsh-tenant --config /etc/dsh/tenant.config.yaml
 每条 MCP 服务器还能带自己的 `toolConcurrency`（字段与 `@deepseek-ai/dsh-mcp-client` 的同名字段同名同义，共十二个键）：`policy` 决定这条服务器的调用凭什么判可否重叠（`annotations` 信它自己声明的注解、`parallel` 一律允许、`exclusive` 一律不许），`maxConcurrentCalls` 是它同时在途的调用上限，`exclusiveTools` 列出必须保持提交顺序的原工具名。**顺序与重发是两件事**：写进 `exclusiveTools` 只保证不与其他调用重叠，重发由 `retryTools` 或工具自己声明的 `readOnlyHint: true` 决定，所以「串行的写工具永不重发」并不成立——不写 `retryTools` 才是「只有只读工具会重发」。剩下八个键回答「这个上限怎么随时间变」与「被拒之后怎么办」：`mode`（默认 `adaptive`，从 `maxConcurrentCalls` 起步、被拒一次就往下学、静默窗口后回升；已量过容量的 server 写 `fixed` 固定住）、`decreaseFactor`、`recoveryStep`、`recoveryQuietMs`、`countTimeouts`、`retryAttempts`（最多 5）、`retryBaseDelayMs`、`retryJitterRatio`。租户栈只按原名转发并校验取值（枚举、正整数、非负整数、0..1 比例、布尔、非空名字数组），更细的边界（`decreaseFactor` 必须严格落在 0 与 1 之间、`retryAttempts` 最多 5、两个定时器的上界）由客户端自己的 resolve 步骤在挂载那一行时判定；整段省略或某个键不写，都由 MCP 客户端补自己的默认值，租户侧不给它兜数。
 
 同一条 server 上还能给出 `toolCallTimeoutMs`（单次调用超时，毫秒）与 `failOnStartupError`，同样只按原名转发、不给默认值：不写就是客户端的 60 秒与 `false`。`false` 值得逐条改成 `true`——那时一次连不上只留一条日志，这一行安静地挂成「这个 server 没有工具」，与「配置错误必须响亮失败」相反；写成 `true` 之后，地址写错、端口不通或对方没起来都会让启动失败，错误里指名是那一行（`组合行 mcp-<序号>-<serverName>`），两份部署示例因此逐条写明。客户端的 `reconnect` 段没有转发：当前没有用到它的场景，不写就用它自己的默认重连策略。
+
+`mcpMeta` 是给「按调用方鉴权的 MCP 服务器」的那条通道：`fromHeaders` 把 `_meta` 键映射到入站请求头名（例如 `user_id: x-user`），每次工具调用时从 `agent-http` 已建立的请求作用域里读出那次请求的头，写进 `params._meta`。它必须是 `_meta` 而不是普通请求头：工具调用发生在智能体循环里，与某一次 HTTP 请求不同步，而 MCP 协议把这类「调用方上下文」放在 `params._meta` 上；`headers` 是连接级的固定值、整条服务器共用一份，按调用方区分不了。没配 `mcpMeta` 就整块不挂，每次调用不带 `_meta`，与没有这条通道时完全一致；映射里没出现在请求中的头会被省略，不会以空串上送——服务器要能区分「这次没带案件」与「案件是空」。
 
 这里的 MCP server 全部按第三方对待：不由我们维护，所以不能指望它们声明 `readOnlyHint` / `idempotentHint`，客户端默认的 `annotations` 策略读不出并发意图。因此部署示例在每条 server 上写明 `policy: parallel`（并发的判断与责任由我们承担），写数据的工具进 `exclusiveTools`（只管顺序，是否允许重发另说），`maxConcurrentCalls` 按分配给。两层上限的关系是「天花板与分配」：每 server 的 `maxConcurrentCalls` 是一道全宿主共用的硬闸（所有会话、所有程序一起走它），全局 `maxParallelSubCalls` 是**按程序**算的天花板；一批入口共用同一个后端进程时（同 host:port、只有路径不同），各条 cap 之和就是打到那个后端的并发，所以天花板设成后端扛得住的总量，再按各组扇出把 cap 分下去。12 条入口的完整示例见 `docker/tenant.config.example.yaml`。
 

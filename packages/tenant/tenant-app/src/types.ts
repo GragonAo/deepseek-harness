@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 租户服务的启动配置类型。
  *
  * 这里只放类型：全部字段在 {@link loadTenantAppConfig} 里解析并校验。配置的归属很明确——
@@ -314,6 +314,19 @@ export interface TenantAppConfig {
   readonly plugins?: Readonly<Record<string, PluginOverride>>
   /** 要接入的 MCP 服务器。 */
   readonly mcpServers?: readonly McpServerConfig[]
+  /** 每次 MCP 工具调用随 `params._meta` 上送的入站请求头。省略则一个都不送。 */
+  readonly mcpMeta?: McpMetaConfig
+}
+
+/** 入站请求头到 MCP `_meta` 的映射。 */
+export interface McpMetaConfig {
+  /**
+   * `_meta` 键 → 入站请求头名（大小写不敏感）。
+   *
+   * 服务器按它自己的键名从 `_meta` 里取用户、案件这类上下文；部署在这里说清哪个头对应哪个键。
+   * 本服务不做猜测：头名是调用方与服务器之间的事实，不是这里能推导的。
+   */
+  readonly fromHeaders?: Readonly<Record<string, string>>
 }
 
 /** 已启动的租户服务。 */

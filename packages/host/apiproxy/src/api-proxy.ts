@@ -1549,6 +1549,17 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     })
   }
 
+  /**
+   * Whether `session.delete` removed one identity in this process. The
+   * tombstone outlives the log until restart, so a deleted session stays
+   * unlisted and unaddressable while its Session is still attached.
+   * @param sessionId - the identity to test.
+   * @returns `true` when this process deleted it.
+   */
+  function sessionDeleted(sessionId: SessionId): boolean {
+    return ctx.get('sessionPersistence')?.isDeleted(sessionId) === true
+  }
+
   type SessionReadState = {
     id: SessionId
     header: SessionHeader
@@ -1558,7 +1569,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   /** Read one stable session prefix without acquiring an Agent owner. */
   async function readSessionState(sessionId: SessionId): Promise<SessionReadState> {
     const attached = ctx.sessions.get(sessionId)
-    if (attached !== undefined) {
+    // A deleted identity falls through to the log read, which answers
+    // not-found because the log really is gone.
+    if (attached !== undefined && !sessionDeleted(sessionId)) {
       return {
         id: attached.id,
         header: attached.header,
@@ -1593,7 +1606,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
    */
   async function historySourceFor(sessionId: SessionId): Promise<HistorySource> {
     const attached = ctx.sessions.get(sessionId)
-    if (attached !== undefined) return { kind: 'attached', session: attached }
+    // A deleted identity falls through to the log read, which answers
+    // not-found because the log really is gone.
+    if (attached !== undefined && !sessionDeleted(sessionId)) return { kind: 'attached', session: attached }
     const inspected = await inspectServable(sessionId)
     return { kind: 'detached', header: inspected.meta, events: inspected.events }
   }
@@ -1682,6 +1697,10 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     checkPersistedIdentity: boolean,
     presetId?: string,
   ): Promise<Agent> {
+    // Deleting an identity is final for this process: a session the user
+    // removed is not resumable, and answering with the live Session a delete
+    // left behind would run a turn whose log write the tombstone refuses.
+    if (sessionDeleted(sessionId)) throw new SessionNotFound(`session "${sessionId}" was deleted`)
     let creation = sessionCreations.get(sessionId)
     if (creation === undefined) {
       creation = (async () => {
@@ -1781,7 +1800,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   /**
    * Build the session.list baseline shared by listing and search visibility.
    * Attached sessions come from memory; servable cold sessions merge from
-   * persistence, and the final order is newest-first.
+   * persistence, and the final order is newest-first. A deleted identity is
+   * dropped from both sources: it stays attached for the life of the process,
+   * so memory is where a removed session would otherwise reappear.
    */
   async function listVisibleSessionSummaries(signal?: AbortSignal): Promise<SessionSummary[]> {
     signal?.throwIfAborted()
@@ -1793,10 +1814,12 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         ...projections === undefined ? {} : { projections },
       }
     }
-    const items = ctx.sessions.list().map(summarizeAttached)
+    const persistence = ctx.get('sessionPersistence')
+    const items = ctx.sessions.list()
+      .filter(session => !sessionDeleted(session.id))
+      .map(summarizeAttached)
     signal?.throwIfAborted()
     const attached = new Set(items.map(item => item.sessionId))
-    const persistence = ctx.get('sessionPersistence')
     if (persistence !== undefined) {
       const cold = (await persistence.list(signal))
         .filter(meta => !attached.has(meta.id) && meta.cwd !== undefined)
@@ -1907,10 +1930,23 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
    * model the session is pointed at while the draft is still in the composer.
    * This is `session.prompt`'s enforcement boundary: a client that disables
    * its input is an affordance, and the method stays callable regardless.
+   *
+   * A deleted identity is refused before any agent lookup. `session.delete`
+   * leaves the live Session attached until the process restarts, and that
+   * leftover must not admit a turn whose log write the tombstone refuses.
    */
   async function turnAgentFor<T>(
     request: RpcRequest<unknown>, sessionId: SessionId,
   ): Promise<{ agent: Agent } | { refused: RpcResponse<T> }> {
+    if (sessionDeleted(sessionId)) {
+      return {
+        refused: err(request, {
+          code: 'session-not-found',
+          message: `session "${sessionId}" was deleted`,
+          details: { sessionId },
+        }),
+      }
+    }
     const found = await agentFor(sessionId)
     if ('error' in found) return { refused: err(request, found.error) }
     const agent = found.agent
@@ -2663,6 +2699,36 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         }
         agent.cancel({ kind: 'user' }, { keepInbox: true })
         return Promise.resolve(ok(request, { accepted: true as const }))
+      },
+
+      async delete(request) {
+        const { sessionId } = request.payload
+        const attached = ctx.agents.get(sessionId)
+        if (attached !== undefined && hasSubagentOwner(attached.session, attached)) {
+          return err(request, subagentOwnershipError(sessionId))
+        }
+        if (attached !== undefined && attached.status === 'running') {
+          return err(request, {
+            code: 'agent-busy',
+            message: `session "${sessionId}" has a running turn; cancel it before deleting`,
+            details: { reason: 'TURN_RUNNING' },
+          })
+        }
+        const persistence = ctx.get('sessionPersistence')
+        if (persistence === undefined) {
+          return err(request, {
+            code: 'internal',
+            message: 'session deletion is unavailable: this deployment mounts no session persistence',
+            details: { sessionId },
+          })
+        }
+        // The log first: forgetting the registry account is idempotent, so a
+        // retry after a durability failure still finds the session and finishes
+        // the removal. Deleting tombstones the identity, which is what keeps a
+        // still-attached Session from writing its log back.
+        await persistence.delete(sessionId)
+        await ctx.workspaceRegistry.forgetSession(sessionId)
+        return ok(request, { deleted: true as const })
       },
     },
 

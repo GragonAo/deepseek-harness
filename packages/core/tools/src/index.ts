@@ -250,7 +250,11 @@ export interface ToolOutputDefinition {
   readonly schema: JsonSchemaNode
   /** Pure projection from validated arguments and value to Native/model content. */
   render(args: unknown, value: JsonValue): ContentBlock[]
-  /** Pure replayable presentation projection, computed only for top-level calls. */
+  /**
+   * Pure replayable presentation projection, computed only for top-level calls.
+   * A memberless object states no fact and persists nothing, so a tool that has
+   * no presentation metadata for a given result returns `{}`.
+   */
   presentationMeta?(args: unknown, value: JsonValue): JsonValue
 }
 
@@ -574,6 +578,11 @@ function snapshotProjection<T>(toolName: string, projector: 'render' | 'presenta
     if (error instanceof ToolOutputError) throw error
     throw projectionError(toolName, projector, error)
   }
+}
+
+/** True for the memberless object a projector returns when it has no fact to state. */
+function isEmptyJsonObject(value: JsonValue): boolean {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) && Object.keys(value).length === 0
 }
 
 /** Snapshot one body or policy value into the canonical invalid-output failure class. */
@@ -1958,7 +1967,10 @@ export class ToolRuntime extends Service {
       } catch (error: unknown) {
         throw projectionError(tool.name, 'presentationMeta', error)
       }
-      meta = snapshotProjection(tool.name, 'presentationMeta', projected)
+      const detached = snapshotProjection(tool.name, 'presentationMeta', projected)
+      // A projection with no members states no presentation fact, so it persists
+      // nothing: an empty object would ride every logged result that has none.
+      if (!isEmptyJsonObject(detached)) meta = detached
     }
     const concludesTurn = this.concludingExecutions.has(exec)
     return this.markCanonical(exec, this.materializeFinalResult({

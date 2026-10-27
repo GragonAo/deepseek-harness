@@ -32,6 +32,7 @@ class TestPersistence extends SessionPersistence {
   override readonly supportsRawArtifacts = false
 
   static entries = new Map<SessionIdType, { meta: SessionHeader; events: SessionEvent[] }>()
+  static deleted = new Set<SessionIdType>()
   static listFailure: unknown
   static listOverride: ((signal?: AbortSignal) => Promise<SessionHeader[]>) | undefined
   static inspectFailure: unknown
@@ -48,6 +49,7 @@ class TestPersistence extends SessionPersistence {
 
   static reset(entries: readonly { meta: SessionHeader; events: SessionEvent[] }[] = []): void {
     this.entries = new Map(entries.map(entry => [entry.meta.id, structuredClone(entry)]))
+    this.deleted = new Set()
     this.listFailure = undefined
     this.listOverride = undefined
     this.inspectFailure = undefined
@@ -74,6 +76,16 @@ class TestPersistence extends SessionPersistence {
     if (entry === undefined) return Promise.reject(new Error('missing test session'))
     entry.events.push(...structuredClone(events))
     return Promise.resolve()
+  }
+
+  delete(id: SessionIdType): Promise<void> {
+    TestPersistence.entries.delete(id)
+    TestPersistence.deleted.add(id)
+    return Promise.resolve()
+  }
+
+  isDeleted(id: SessionIdType): boolean {
+    return TestPersistence.deleted.has(id)
   }
 
   load(id: SessionIdType): Promise<{ meta: SessionHeader; events: SessionEvent[] }> {

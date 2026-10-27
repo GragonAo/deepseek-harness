@@ -120,10 +120,22 @@ class TestPersistence extends SessionPersistence {
   readFromCalls = 0
   onReadFrom: (() => void | Promise<void>) | undefined
   onListSnapshots: (() => void | Promise<void>) | undefined
+  private readonly deleted = new Set<SessionId>()
 
   locate(_meta: SessionHeader): SessionLocation | undefined { return undefined }
   create(_meta: SessionHeader): Promise<void> { return Promise.resolve() }
   append(_id: SessionId, _events: readonly SessionEvent[]): Promise<void> { return Promise.resolve() }
+
+  delete(id: SessionId): Promise<void> {
+    this.durable.delete(id)
+    this.logical.delete(id)
+    this.deleted.add(id)
+    return Promise.resolve()
+  }
+
+  isDeleted(id: SessionId): boolean {
+    return this.deleted.has(id)
+  }
 
   load(id: SessionId): Promise<SessionInspection> {
     return this.readFrom(id, 0)

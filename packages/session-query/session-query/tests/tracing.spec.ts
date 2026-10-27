@@ -35,6 +35,7 @@ class TracePersistence extends SessionPersistence {
   override readonly supportsRawArtifacts = false
 
   static entries = new Map<SessionIdType, { meta: SessionHeader; events: SessionEvent[] }>()
+  static deleted = new Set<SessionIdType>()
   static listCalls = 0
   static inspectCalls = 0
   static listFailure: Error | undefined
@@ -43,6 +44,7 @@ class TracePersistence extends SessionPersistence {
 
   static reset(entries: readonly { meta: SessionHeader; events: SessionEvent[] }[] = []): void {
     this.entries = new Map(entries.map(entry => [entry.meta.id, structuredClone(entry)]))
+    this.deleted = new Set()
     this.listCalls = 0
     this.inspectCalls = 0
     this.listFailure = undefined
@@ -64,6 +66,16 @@ class TracePersistence extends SessionPersistence {
     if (entry === undefined) return Promise.reject(new Error('missing test session'))
     entry.events.push(...structuredClone(events))
     return Promise.resolve()
+  }
+
+  delete(id: SessionIdType): Promise<void> {
+    TracePersistence.entries.delete(id)
+    TracePersistence.deleted.add(id)
+    return Promise.resolve()
+  }
+
+  isDeleted(id: SessionIdType): boolean {
+    return TracePersistence.deleted.has(id)
   }
 
   load(id: SessionIdType): Promise<{ meta: SessionHeader; events: SessionEvent[] }> {

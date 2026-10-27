@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Kubernetes 沙箱 provider 的运行期行为：沙箱内写进去的事实、句柄缓存与空闲回收、
  * 冷启动期限，以及「取消一次调用」与「取消一次共享启动」的区别。
  * 这些都是答错时只会悄悄出错、不会大声崩掉的决定，所以在这里钉死。
@@ -316,14 +316,18 @@ describe('跨 host 实例的沙箱归属', () => {
     expect(cluster.deletes()).toBe(0)
   }, 30000)
 
-  it('refuses to replace a sandbox built from a different spec', async () => {
+  it('replaces a sandbox built from a different spec instead of refusing to serve', async () => {
     const cluster = new FakeCluster()
     cluster.pod = { spec: '{"kind":"Pod"}', phase: 'Running', ready: true, podIP: '10.0.0.9' }
-    // 两个实例对 spec 的理解不一致时，它们会互相不停替换对方的沙箱。这属于部署故障，
-    // 所以报出来，且不去动那个正在运行的沙箱。
-    await expect(execOnce(harness({}, cluster).rt)).rejects.toThrow(/runs a different spec/)
-    expect(cluster.deletes()).toBe(0)
-    expect(cluster.creates()).toBe(0)
+    // 滚动升级换了镜像、挂载或环境之后，新实例算出的指纹与线上沙箱记录的必然不同。拒绝服务会让
+    // 升级瞬间把正在跑的每个案件都变成「执行层不存在」，所以按当前 spec 重建，并把旧指纹记进日志。
+    const { rt, logs } = harness({}, cluster)
+    await expect(execOnce(rt)).resolves.toMatchObject({ exitCode: 0 })
+    expect(cluster.deletes()).toBeGreaterThanOrEqual(1)
+    expect(cluster.creates()).toBe(1)
+    expect(logs.warns.map(entry => entry.format)).toContain(
+      'container-k8s: replacing sandbox %s for tenant %s subject %s: it was created from a different spec (recorded %s, local %s)',
+    )
   }, 30000)
 
   it('adopts the winner when two instances create the same sandbox concurrently', async () => {
