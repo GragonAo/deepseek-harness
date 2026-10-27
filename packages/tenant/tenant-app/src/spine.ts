@@ -165,7 +165,14 @@ export const SPINE: readonly SpineRow[] = [
   { id: 'attachment-local', module: '@deepseek-ai/dsh-attachment-local' },
   { id: 'session-query-sqlite', module: '@deepseek-ai/dsh-session-query-sqlite', config: () => ({ path: ':memory:', openAt: 'never' }) },
   { id: 'session-projection', module: '@deepseek-ai/dsh-session-projection' },
-  { id: 'session-projection-cache', module: '@deepseek-ai/dsh-session-projection-cache', disabled: '缓存服务于浏览器订阅，租户服务没有浏览器订阅' },
+  // 冷会话的投影基线只有这个缓存能给：会话一旦离开附着态，api-proxy 的 null 列表行就从
+  // `cachedSnapshot` 取 projections，没有这一行则整块缺席——标题随会话一起变成 id。
+  // 租户没有浏览器订阅，但列表冷读本身就是它的第二个消费者。
+  {
+    id: 'session-projection-cache',
+    module: '@deepseek-ai/dsh-session-projection-cache',
+    config: () => ({ writeEveryEvents: 200, writeIntervalMs: 5000 }),
+  },
   { id: 'session-log-download', module: '@deepseek-ai/dsh-session-log-export' },
   { id: 'session-reference', module: '@deepseek-ai/dsh-session-reference' },
   { id: 'file-reference-local', module: '@deepseek-ai/dsh-file-reference-local' },
