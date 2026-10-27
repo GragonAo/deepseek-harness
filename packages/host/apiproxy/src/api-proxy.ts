@@ -842,18 +842,19 @@ function listProjectionsFor(ctx: Context, meta: SessionHeader, session: Session 
 }
 
 /**
- * Projection baseline for one cold session.list row, with the durable cache's
- * cold-read ladder as the fallback for a session that has no checkpoint yet —
- * a deployment that mounted the cache after the session was written, or one
- * whose throttled write-behind had not fired when the process stopped. The
- * zero-I/O row read stays the fast path; the miss pays one log read, the
- * ladder writes the checkpoint back, so the next listing takes the fast path
- * again. Fail-soft on the same terms as {@link listProjectionsFor}: a listing
- * without projections is degraded, never broken.
- * @param ctx - context carrying the projection cache and the logger for the degradation warning.
+ * Projection baseline for one cold session.list row whose persisted checkpoint
+ * is missing — a deployment without the projection cache (a tenant service,
+ * whose storage domain is request-scoped and therefore cannot open at boot),
+ * or one whose throttled write-behind had not fired when the process stopped.
+ * The zero-I/O checkpoint read stays the fast path; the miss pays one log read
+ * and re-derives the baseline through the registry, so a client still receives
+ * every projection the session log implies (the title included) instead of a
+ * bare session id. Fail-soft on the same terms as {@link listProjectionsFor}:
+ * a listing without projections is degraded, never broken.
+ * @param ctx - context carrying the projection registry, persistence and logger.
  * @param meta - the cold session's stored header.
- * @param signal - cancellation for the persistence reads.
- * @returns the baseline cut, or undefined when nothing can serve one.
+ * @param signal - cancellation for the persistence read.
+ * @returns the derived baseline, or undefined when nothing can serve one.
  */
 async function coldListProjections(
   ctx: Context,
@@ -862,10 +863,13 @@ async function coldListProjections(
 ): Promise<SessionProjectionsBlock | undefined> {
   const cached = listProjectionsFor(ctx, meta, undefined)
   if (cached !== undefined) return cached
-  const cache = ctx.get('sessionProjectionCache')
-  if (cache === undefined) return undefined
+  const registry = ctx.get('sessionProjections')
+  const persistence = ctx.get('sessionPersistence')
+  if (registry === undefined || persistence === undefined) return undefined
   try {
-    const block = await cache.coldSnapshot(meta.id, signal)
+    const { events } = await persistence.readFrom(meta.id, 0, signal)
+    signal?.throwIfAborted()
+    const block = registry.restore({}, events, 0).snapshot
     return Object.keys(block.values).length > 0 ? block : undefined
   } catch (error) {
     signal?.throwIfAborted()

@@ -133,36 +133,39 @@ describe('sessions.list cold merge', () => {
     ]))
   })
 
-  it('cold-reads a session the projection cache never checkpointed instead of serving the row without its title', async () => {
+  it('re-derives the projection baseline for a cold row no cache can serve, so the title survives a refresh', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     await ctx.plugin(UserQuestionService)
     const meta = header('never-checkpointed', 100)
+    const readFrom = vi.fn((_id: SessionId, _floor: number) => Promise.resolve({ meta, events: [] as SessionEvent[] }))
     ctx.provide('sessionPersistence', {
       isDeleted: () => false,
       list: () => Promise.resolve([meta]),
       locate: () => undefined,
-      readFrom: vi.fn(),
+      readFrom,
     } as never)
-    const coldSnapshot = vi.fn(async (_id: SessionId, _signal?: AbortSignal) => ({ asOfSeq: 2, values: { title: 'Cold-read title' } }))
-    ctx.provide('sessionProjectionCache', {
-      cachedSnapshot: () => undefined,
-      coldSnapshot,
-    } as never)
+    const restore = vi.fn(() => ({
+      snapshot: { asOfSeq: 2, values: { title: 'Derived title' } },
+      checkpoint: {},
+    }))
+    ctx.provide('sessionProjections', { restore } as never)
     const api = createApiProxy(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
 
     const response = await api.sessions.list(request({}))
     if (!response.result.ok) throw new Error('unreachable')
-    expect(coldSnapshot.mock.calls[0]?.[0]).toBe(meta.id)
+    expect(readFrom.mock.calls[0]?.[0]).toBe(meta.id)
+    expect(readFrom.mock.calls[0]?.[1]).toBe(0)
+    expect(restore).toHaveBeenCalled()
     expect(response.result.value.items).toEqual([
       expect.objectContaining({
         sessionId: meta.id,
-        projections: { asOfSeq: 2, values: { title: 'Cold-read title' } },
+        projections: { asOfSeq: 2, values: { title: 'Derived title' } },
       }),
     ])
   })
 
-  it('serves the row without projections when the cold read rejects', async () => {
+  it('serves the row without projections when re-deriving the baseline fails', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     await ctx.plugin(UserQuestionService)
@@ -171,11 +174,10 @@ describe('sessions.list cold merge', () => {
       isDeleted: () => false,
       list: () => Promise.resolve([meta]),
       locate: () => undefined,
-      readFrom: vi.fn(),
+      readFrom: async () => { throw new Error('not found') },
     } as never)
-    ctx.provide('sessionProjectionCache', {
-      cachedSnapshot: () => undefined,
-      coldSnapshot: async () => { throw new Error('not found') },
+    ctx.provide('sessionProjections', {
+      restore: () => { throw new Error('corrupt payload') },
     } as never)
     const api = createApiProxy(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
 
