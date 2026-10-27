@@ -46,10 +46,11 @@
 - id: tenant-questions
   name: '@deepseek-ai/dsh-tenant-questions'
   config:
-    answerTimeoutMs: 60000
+    # 多租户组合清单里的取值；包自身的默认是 60000。
+    answerTimeoutMs: 300000
 ```
 
-`answerTimeoutMs` 默认 60000（1 分钟）。它必须小于 `user-questions` 行自身的 `answerTimeoutMs`（多租户编排里默认给到 120000）：seam 更长的期限到期时以 abort 撤回提问，本通道只能记成 `cancelled`，模型看到的是 seam 的 `NO_ANSWER` 而不是本通道的超时原因。
+`answerTimeoutMs` 默认 60000（1 分钟）。它必须小于 `user-questions` 行自身的 `answerTimeoutMs`（多租户编排里给到 360000，本通道取 300000，余量 60 秒）：seam 更长的期限到期时以 abort 撤回提问，本通道只能记成 `cancelled`，模型看到的是 seam 的 `NO_ANSWER` 而不是本通道的超时原因。窗口一过提问即从 `list()` 消失、答案不再被 `answer` 受理，所以它同时是前端能渲染那张卡片的最长时限。
 
 ## Model Experience
 

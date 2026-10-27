@@ -38,11 +38,11 @@ An answer is reported accepted only once its resolution is logged. The channel c
 
 `answerTimeoutMs` is a validated `Config` field (default 60000). When it expires the ask rejects with `ANSWER_TIMEOUT` — naming that no answer arrived, that the deadline is why, and that the model should state its assumption and proceed rather than ask again — and the pair is completed with `'timed-out'`. No answer is invented and no default option is selected.
 
-The tenant spine configures the channel below the seam's own window (`120000` for the `user-questions` row), because reaching the seam's deadline aborts the ask: the model would then see the seam's `NO_ANSWER` and lose the reason this channel exists.
+The tenant spine configures the channel below the seam's own window (`360000` for the `user-questions` row, the channel `300000`), because reaching the seam's deadline aborts the ask: the model would then see the seam's `NO_ANSWER` and lose the reason this channel exists. Five minutes is the window an analyst working a case has to answer before the turn proceeds without them; it is also the lifetime a business client must treat a rendered question as answerable, since an expired ask leaves `list` and `answer` refuses it.
 
 ### Assembly
 
-Two rows join the tenant spine: `tool-ask-user` (the model-facing tool) and `tenant-questions` (the channel, with an explicit `answerTimeoutMs: 60000`). `compose.ts` probes both `userQuestions` and `tenantQuestions` as required services, each gated on its row, so a channel row enabled without the seam fails the boot by name instead of leaving a silently absent surface.
+Two rows join the tenant spine: `tool-ask-user` (the model-facing tool) and `tenant-questions` (the channel, with an explicit `answerTimeoutMs: 300000`). `compose.ts` probes both `userQuestions` and `tenantQuestions` as required services, each gated on its row, so a channel row enabled without the seam fails the boot by name instead of leaving a silently absent surface.
 
 ## Alternatives considered
 
@@ -78,6 +78,6 @@ The pending table is process-local, so more than one replica must route a subjec
 
 `packages/tenant/agent-http/tests/agent-http.spec.ts` runs the two methods over the carrier with real bearer tokens: 401 without a credential, a list plus an answer that resolves the model's ask, another subject's answer refused with the payload detail, an unreadable envelope and a path/method mismatch as 200 `bad-request` with a salvageable `rpcId` echoed, 415 and 400 for the carrier-layer failures, 404 for a non-POST and for the same method name outside the `/api` prefix, 500 for a channel failure the envelope cannot describe, and 503 when the channel is not mounted.
 
-`packages/tenant/tenant-app/tests/app.spec.ts` proves the assembly: the two rows mount their plugins with `answerTimeoutMs` `60000` and `120000`, the `ask_user_question` schema is registered, and the channel row enabled without the seam fails the named-service check at boot.
+`packages/tenant/tenant-app/tests/app.spec.ts` proves the assembly: the two rows mount their plugins with `answerTimeoutMs` `300000` and `360000` and the test asserts the channel's window is the shorter of the two, the `ask_user_question` schema is registered, and the channel row enabled without the seam fails the named-service check at boot.
 
 Not covered by a repo test, and to be verified on a cluster by the owner: that a business client subscribed to `events.mux` renders an ask and its resolution end to end, that a real analyst's answer reaches the parked tool call, and that more than one replica behaves as the README describes. The repo's Web and ACP compositions mount their own answerers and are untouched by this channel.

@@ -546,8 +546,11 @@ describe('租户问答通道', () => {
     const app = await bootQuestions(configFrom(MINIMAL))
     try {
       // 两个窗口都从清单取值：通道自己的窗口必须短于 seam 的，模型才看得到通道的超时原因。
-      expect(mountedConfigs(app, 'UserQuestionService')).toEqual([{ answerTimeoutMs: 120000 }])
-      expect(mountedConfigs(app, 'TenantQuestionService')).toEqual([{ answerTimeoutMs: 60000 }])
+      expect(mountedConfigs(app, 'UserQuestionService')).toEqual([{ answerTimeoutMs: 360000 }])
+      expect(mountedConfigs(app, 'TenantQuestionService')).toEqual([{ answerTimeoutMs: 300000 }])
+      const seamWindow = mountedConfigs(app, 'UserQuestionService')[0]?.answerTimeoutMs as number
+      const channelWindow = mountedConfigs(app, 'TenantQuestionService')[0]?.answerTimeoutMs as number
+      expect(channelWindow).toBeLessThan(seamWindow)
       expect(app.ctx.tools.schemas().map(schema => schema.name)).toContain('ask_user_question')
       expect(app.ctx.get('tenantQuestions')).toBeDefined()
     } finally {

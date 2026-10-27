@@ -142,7 +142,8 @@ export const SPINE: readonly SpineRow[] = [
   // 提问能力缝的 Service Definition。它自己不注册任何提供者，所以这一行必须开着：停用会让缝
   // 消失，下面 api-gateway 与 tenant-questions 两行的注入都不满足，业务面的 RPC 网关与 /api
   // 会一起挂不上，启动末尾的核对会直接报「组合里缺少这些服务」。
-  { id: 'user-questions', module: '@deepseek-ai/dsh-user-questions', config: () => ({ answerTimeoutMs: 120000 }) },
+  // 窗口取 360000：它是下面 tenant-questions 那一行 300000 的上界，留 60 秒余量让通道先到期。
+  { id: 'user-questions', module: '@deepseek-ai/dsh-user-questions', config: () => ({ answerTimeoutMs: 360000 }) },
   { id: 'agent', module: '@deepseek-ai/dsh-agent' },
   {
     id: 'agent-default-model',
@@ -320,8 +321,10 @@ export const SPINE: readonly SpineRow[] = [
   // 常驻 bash 不单列一行：它注册的工具名与 `tool-bash` 同为 `bash`，两行同时挂载会在启动时
   // 报重复注册。要跨调用保留状态，用上面 terminal 行的常驻 PTY——租户沙箱里它就是同一个 shell。
   { id: 'tool-ask-user', module: '@deepseek-ai/dsh-tool-ask-user' },
-  // 问答通道的等待窗口必须短于上面 user-questions 行的 120000：seam 自己的期限一到就以 abort
+  // 问答通道的等待窗口必须短于上面 user-questions 行的 360000：seam 自己的期限一到就以 abort
   // 撤回提问，再长也只会让模型看到 seam 的 NO_ANSWER，看不到本通道「谁没回答、等了多久」的超时原因。
+  // 300000 是办案研判里分析师在屏幕前作答的现实窗口：一分钟几乎必然过期，超时的提问对业务面
+  // 已经不可作答（`tenantQuestion.list` 不再列出它），前端据此不再渲染那张卡片。
   // 对象存储默认不挂：它需要部署给出端点、桶与对外下载基址，缺一项就起不来。哪些部署用得上，
   // 就在自己的 `plugins.object-store` 里把端点与桶写全并置 `enabled: true`；公开性由桶策略给出，
   // 属于部署步骤，不由这一行负责。
@@ -330,7 +333,7 @@ export const SPINE: readonly SpineRow[] = [
     module: '@deepseek-ai/dsh-object-store',
     disabled: '对象存储的端点、桶与对外基址是部署专有的，未配置的部署不挂这一行',
   },
-  { id: 'tenant-questions', module: '@deepseek-ai/dsh-tenant-questions', config: () => ({ answerTimeoutMs: 60000 }) },
+  { id: 'tenant-questions', module: '@deepseek-ai/dsh-tenant-questions', config: () => ({ answerTimeoutMs: 300000 }) },
 ]
 
 /** 审批策略：显式配置优先，否则由权限档位推导（`danger-full-access` 不再追问）。 */

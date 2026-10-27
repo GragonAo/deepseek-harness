@@ -38,11 +38,11 @@ Status: implemented
 
 `answerTimeoutMs` 是经过校验的 `Config` 字段（默认 60000）。到期时提问以 `ANSWER_TIMEOUT` 拒绝——说明没有答案到达、期限就是原因，并要求模型陈述自己的假设继续推进而不是再问一次——同时这一对以 `'timed-out'` 结算。不会编造答案，也不会替它选中任何默认选项。
 
-租户组合清单把通道的窗口配在 seam 自己的窗口之内（`user-questions` 行是 `120000`），因为一旦到达 seam 的期限，提问会被中止：模型届时只会看到 seam 的 `NO_ANSWER`，丢掉这条通道存在的理由。
+租户组合清单把通道的窗口配在 seam 自己的窗口之内（`user-questions` 行是 `360000`，通道是 `300000`），因为一旦到达 seam 的期限，提问会被中止：模型届时只会看到 seam 的 `NO_ANSWER`，丢掉这条通道存在的理由。五分钟是办案分析师在轮次自行推进之前作答的窗口；它同时也是业务客户端渲染出的那张提问卡片的可作答时限——过期的提问会离开 `list()`，`answer` 也不再受理。
 
 ### 装配
 
-两行加入租户组合清单：`tool-ask-user`（面向模型的工具）与 `tenant-questions`（通道，显式带 `answerTimeoutMs: 60000`）。`compose.ts` 把 `userQuestions` 与 `tenantQuestions` 都当作必需服务探测，各自以对应组合行是否启用为条件，因此启用了通道行却没有 seam 时，启动会按名字失败，而不是留下一个静默缺席的面。
+两行加入租户组合清单：`tool-ask-user`（面向模型的工具）与 `tenant-questions`（通道，显式带 `answerTimeoutMs: 300000`）。`compose.ts` 把 `userQuestions` 与 `tenantQuestions` 都当作必需服务探测，各自以对应组合行是否启用为条件，因此启用了通道行却没有 seam 时，启动会按名字失败，而不是留下一个静默缺席的面。
 
 ## 被否决的备选
 
@@ -78,6 +78,6 @@ Status: implemented
 
 `packages/tenant/agent-http/tests/agent-http.spec.ts` 用真实 bearer 令牌在载体上跑这两个方法：无凭据 401；列表加作答确实唤醒了模型的提问；别人主体的作答被拒并附载荷细节；信封读不出来与路径／方法不匹配是 200 `bad-request` 且可回收的 `rpcId` 被回显；载体层的失败是 415 与 400；非 POST、以及同一个方法名出现在 `/api` 前缀之外，都是 404；信封无法描述的通道失败是 500；通道未挂载是 503。
 
-`packages/tenant/tenant-app/tests/app.spec.ts` 证明装配：两行以 `answerTimeoutMs` `60000` 与 `120000` 挂上各自的插件，`ask_user_question` schema 已注册，且启用通道行而没有 seam 时，启动会因按名指出的缺服务而失败。
+`packages/tenant/tenant-app/tests/app.spec.ts` 证明装配：两行以 `answerTimeoutMs` `300000` 与 `360000` 挂上各自的插件，且测试断言通道的窗口是两者中较短的那个；`ask_user_question` schema 已注册；启用通道行而没有 seam 时，启动会因按名指出的缺服务而失败。
 
 仓库测试未覆盖、需负责人在集群上验证的部分：订阅了 `events.mux` 的业务客户端端到端呈现一次提问及其结局；真实分析师的作答抵达停等的工具调用；以及多副本的行为与 README 所述一致。仓库的 Web 与 ACP 组合挂的是各自的应答者，不受这条通道影响。
