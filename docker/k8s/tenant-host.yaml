@@ -1,4 +1,4 @@
-﻿# 生产形态：租户服务宿主在 k8s 里的 Secret + Deployment + Service。
+# 生产形态：租户服务宿主在 k8s 里的 Secret + Deployment + Service。
 #
 # 用法（在部署机上）：
 #
@@ -31,6 +31,24 @@
 #   - 服务账号 dsh-host 及其 Role —— k8s 沙箱后端要按 (租户,用户) 建 Pod 与 PVC；
 #   - 沙箱镜像 dsh-tool-exec:latest 已在节点上（k8s 回退到 Docker Hub，而部署网络通常拉不到）；
 #   - 宿主目录 /opt/dsh（config 里的四条路径、systemRoot、pythonRoot 都在它下面）。
+#
+# 现役实例（130）的实际取值，排查时对照：
+#   - 镜像 dsh-tenant:e2e-present2；沙箱执行层 dsh-tool-exec:icac-20261028-cba072acd8
+#     （写在配置的 sandbox.image 里，本仓留 :latest 占位）；
+#   - PVC dsh-workspace 30Gi `rook-cephfs`（RWX，沙箱 Pod 挂同一份）、dsh-pgdata 10Gi
+#     `rook-ceph-block`（postgres 是集群既有设施，本仓不含它的清单）；
+#   - Service dsh-tenant 用 NodePort 30788 对外；另有 dsh-host ClusterIP 8787 是我们早期
+#     留下的孤儿（selector 是 app=dsh-host，而 Deployment 的标签是 app=dsh-tenant-host），
+#     没有任何消费者，新环境不要照抄；
+#   - 探针 httpGet /openapi.json：readiness 10s/10s、liveness 120s/30s、terminationGrace 30s。
+#
+# 两处现役与本文件的漂移，都是有意记录而非待办：
+#   1) 130 把租户配置放在 ConfigMap `dsh-tenant-config` 里（挂 subPath 到
+#      /etc/dsh/tenant.config.yaml），而本文件已经改成 Secret —— 因为配置里的 mcpServers
+#      请求头是凭据，见上面第 18 行的理由。130 是这次加固之前的形态。
+#   2) tenant-rbac.yaml 声明“Role 刻意不授予 secrets/configmaps 任何权限”，但 130 上的
+#      dsh-host Role 实际给了 configmaps 的增删改查与 secrets 的读，且缺少 pods/log 的 get。
+#      新环境按 tenant-rbac.yaml 建；收紧 130 需要单独验证排障路径。
 apiVersion: v1
 kind: Secret
 metadata:
