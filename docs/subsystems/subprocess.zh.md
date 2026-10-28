@@ -228,13 +228,23 @@ interface SubprocessCollectedOutputs {
  * Deliberately carries NO timeout or cancellation classification (the caller
  * reads the signal it owns to classify causes) and NO output: collected
  * streams stay readable through {@link SubprocessHandle.collected} after
- * settlement, so batch and streaming callers share one access path.
+ * settlement, so batch and streaming callers share one access path. Write
+ * effects are the exception, because no collected stream reports them.
  */
 interface SubprocessOutcome {
   /** Exit code; null when the process died from a signal. */
   exitCode: number | null
   /** Terminating signal (e.g. 'SIGTERM'); null on normal exit. */
   signal: NodeJS.Signals | null
+  /**
+   * Files the process created or modified, in this provider's own path
+   * vocabulary, when the provider observed its write effects. Paths carry the
+   * provider's spelling, not the host's: a container provider reports paths
+   * inside the execution world. Absent when the provider cannot observe write
+   * effects, when it observed none, or when observation failed — a caller must
+   * read absence as "no reportable writes", never as "the run failed".
+   */
+  produced?: readonly string[]
 }
 ```
 

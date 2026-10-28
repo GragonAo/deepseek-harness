@@ -133,6 +133,14 @@ interface ShellRunResult {
   stderr: CollectedOutput
   /** Sandbox execution facts, absent for an unsandboxed executor. */
   sandbox?: ShellSandboxInfo
+  /**
+   * Files the command created or modified, in the executor's own path
+   * vocabulary, when the executor observed its write effects — a container
+   * executor reports paths inside the execution world. Absent when the executor
+   * cannot observe them, observed none, or failed to observe them; a consumer
+   * reads absence as "no reportable writes", never as a run failure.
+   */
+  produced?: readonly string[]
 }
 ```
 
