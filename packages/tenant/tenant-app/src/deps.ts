@@ -97,6 +97,7 @@ import type {} from '@deepseek-ai/dsh-spill-policy'
 import type {} from '@deepseek-ai/dsh-session-checkpoint-policy'
 import type {} from '@deepseek-ai/dsh-compaction-tool-result-pruner'
 import type {} from '@deepseek-ai/dsh-tool-todo'
+import type {} from '@deepseek-ai/dsh-tool-present'
 import type {} from '@deepseek-ai/dsh-tool-goal'
 import type {} from '@deepseek-ai/dsh-tool-ralph'
 import type {} from '@deepseek-ai/dsh-tool-str-replace-editor'
@@ -215,6 +216,7 @@ export const SPINE_MODULES = [
   '@deepseek-ai/dsh-session-checkpoint-policy',
   '@deepseek-ai/dsh-compaction-tool-result-pruner',
   '@deepseek-ai/dsh-tool-todo',
+  '@deepseek-ai/dsh-tool-present',
   '@deepseek-ai/dsh-tool-goal',
   '@deepseek-ai/dsh-tool-ralph',
   '@deepseek-ai/dsh-tool-str-replace-editor',

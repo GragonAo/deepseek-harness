@@ -61,6 +61,7 @@ import * as ToolTasks from '@deepseek-ai/dsh-tool-jobs'
 import type TeamService from '@deepseek-ai/dsh-experimental-agent-team'
 import * as ToolTeam from '@deepseek-ai/dsh-experimental-tool-agent-team'
 import * as ToolTodo from '@deepseek-ai/dsh-tool-todo'
+import * as ToolPresent from '@deepseek-ai/dsh-tool-present'
 import * as ToolSubagent from '@deepseek-ai/dsh-tool-subagent'
 import * as ToolWeb from '@deepseek-ai/dsh-tool-web'
 import VmWorkflowEngine from '@deepseek-ai/dsh-workflow-worker-thread'
@@ -573,6 +574,18 @@ const TOOL_PACKAGES: ToolPackage[] = [
     },
     note:
       'todo_write is session-owned state; UIs render the latest todo/write event as a checklist. `allowParallelInProgress` is required with no default, so the catalog states its choice: `true`, whose description invites several `in_progress` items. A deployment choosing `false` receives the same tool with a description asking for exactly one active task.',
+  },
+  {
+    pkg: '@deepseek-ai/dsh-tool-present',
+    dir: 'tool-present',
+    source: 'packages/deliverables/tool-present/src/index.ts',
+    requires: ['ctx.tools', 'ctx.systemPrompt', 'owning Agent session', 'optional ctx.fs'],
+    writes: ['tool/call', 'deliverables/presented', 'tool/result'],
+    async mount(ctx) {
+      await ctx.plugin(ToolPresent, { retainTurns: 50 })
+    },
+    note:
+      'present is the model\'s declaration of the files one turn delivers; the deliverables projection folds those declarations per turn so a client renders what the turn handed over rather than every path it touched. Each path is resolved through the composed filesystem, so a declaration cannot advertise a file that does not exist.',
   },
   {
     pkg: '@deepseek-ai/dsh-tool-workflow',

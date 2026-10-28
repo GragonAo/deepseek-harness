@@ -120,7 +120,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/tenant/agent-http/src/index.ts:102`](../packages/tenant/agent-http/src/index.ts)
+Source: [`packages/tenant/agent-http/src/index.ts:104`](../packages/tenant/agent-http/src/index.ts)
 
 <a id="deepseek-aidsh-agent-instructions"></a>
 
@@ -1067,12 +1067,15 @@ Requires: `containerRuntime`
 ```ts config-catalog
 /** Plugin configuration. */
 export interface Config {
-  /** Container path relative requests resolve against (the tenant workspace mount). */
+  /**
+   * Container path relative requests resolve against when no ambient session
+   * supplies one (the tenant workspace mount).
+   */
   root?: string
 }
 ```
 
-Source: [`packages/tenant/fs-container/src/index.ts:28`](../packages/tenant/fs-container/src/index.ts)
+Source: [`packages/tenant/fs-container/src/index.ts:38`](../packages/tenant/fs-container/src/index.ts)
 
 <a id="deepseek-aidsh-fs-local"></a>
 
@@ -1251,7 +1254,9 @@ export interface Config {
    * Default project directory for sessions created without a workspace or
    * `cwd`. Absent, the Host process cwd is used. A container-backed carrier
    * (e.g. multi-tenant) pins this to the container's workspace path, since
-   * the Host cwd does not exist inside the execution container.
+   * the Host cwd does not exist inside the execution container; `{sessionId}`
+   * in the value becomes the created session's id, which is how a carrier
+   * gives each session its own directory inside that container.
    */
   cwd?: string
   /**
@@ -1282,6 +1287,15 @@ export interface Config {
    * @default true
    */
   userQuestionsProvider?: boolean
+  /**
+   * Whether a new session's project directory is created on this Host before
+   * the session starts. A container-backed carrier sets `false`: that
+   * directory lives inside the execution container, the container's sandbox
+   * creates it on the session's first command, and the Host must not create a
+   * path it does not own.
+   * @default true
+   */
+  createProjectDirectory?: boolean
 }
 ```
 
@@ -1978,7 +1992,7 @@ export type ToolConcurrencyPolicy = 'annotations' | 'parallel' | 'exclusive'
 export type ToolConcurrencyMode = 'fixed' | 'adaptive'
 ```
 
-Source: [`packages/mcp/mcp-client/src/index.ts:114`](../packages/mcp/mcp-client/src/index.ts)
+Source: [`packages/mcp/mcp-client/src/index.ts:137`](../packages/mcp/mcp-client/src/index.ts)
 
 <a id="deepseek-aidsh-message-feedback"></a>
 
@@ -3115,7 +3129,7 @@ export interface TenantInput {
 }
 ```
 
-Source: [`packages/tenant/tenant/src/index.ts:341`](../packages/tenant/tenant/src/index.ts)
+Source: [`packages/tenant/tenant/src/index.ts:352`](../packages/tenant/tenant/src/index.ts)
 
 <a id="deepseek-aidsh-tenant-admin"></a>
 
@@ -3565,6 +3579,26 @@ export interface Config {
 
 Source: [`packages/lsp/tool-lsp/src/index.ts:58`](../packages/lsp/tool-lsp/src/index.ts)
 
+<a id="deepseek-aidsh-tool-present"></a>
+
+## `@deepseek-ai/dsh-tool-present`
+
+Requires: `tools` · `systemPrompt`
+
+```ts config-catalog
+/** Model-facing deliverable declaration configuration. */
+export interface Config {
+  /**
+   * How many of the most recent turns the projection retains. Older turns drop out of the state,
+   * which bounds what a long session ships to a client on every delivery; the session log keeps
+   * every declaration, so a client that reads history can still find them.
+   */
+  retainTurns: number
+}
+```
+
+Source: [`packages/deliverables/tool-present/src/index.ts:36`](../packages/deliverables/tool-present/src/index.ts)
+
 <a id="deepseek-aidsh-tool-pwsh"></a>
 
 ## `@deepseek-ai/dsh-tool-pwsh`
@@ -3891,7 +3925,7 @@ export interface Config {
 export type ToolPresentationMode = 'native' | 'code' | 'both'
 ```
 
-Source: [`packages/core/tools/src/index.ts:690`](../packages/core/tools/src/index.ts)
+Source: [`packages/core/tools/src/index.ts:699`](../packages/core/tools/src/index.ts)
 
 <a id="deepseek-aidsh-tools-manifest"></a>
 

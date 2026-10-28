@@ -393,6 +393,36 @@ Types: [ContentBlock](subsystems/core.md) · [TokenUsage](subsystems/llm-streami
 
 Source: [`packages/compaction/compaction/src/types.ts:33`](../packages/compaction/compaction/src/types.ts)
 
+### `deliverables/*`
+
+<a id="deliverablespresented--log-only"></a>
+
+#### `deliverables/presented` — log-only
+
+```ts persistence-catalog
+/**
+ * The model declared which files this turn delivers to the user. Log-only: the `present` tool
+ * writes it and the `deliverables` projection folds it; no model request derives from it, so a
+ * declaration can never change what the model sees next.
+ *
+ * A turn is attributed from its own `turn/start` boundary at append time, so the payload names
+ * the turn directly and a later turn cannot adopt an earlier declaration.
+ *
+ * @param turn - the turn whose work produced these files.
+ * @param callId - the `present` call that declared them.
+ * @param files - the delivered files, in declaration order.
+ */
+'deliverables/presented': {
+  turn: number
+  callId: CallId
+  files: PresentedFile[]
+}
+```
+
+Types: [CallId](subsystems/core.md)
+
+Source: [`packages/deliverables/tool-present/src/types.ts:53`](../packages/deliverables/tool-present/src/types.ts)
+
 ### `feedback/*`
 
 <a id="feedbackrecord--log-only"></a>
@@ -423,6 +453,33 @@ Source: [`packages/feedback/command-feedback/src/index.ts:62`](../packages/feedb
 ```
 
 Source: [`packages/goal/goal/src/domain.ts:66`](../packages/goal/goal/src/domain.ts)
+
+### `goal-round-driver/*`
+
+<a id="goal-round-driverdisarmed--log-only"></a>
+
+#### `goal-round-driver/disarmed` — log-only
+
+```ts persistence-catalog
+/**
+ * One release of a goal's automatic continuation: the durable counterpart
+ * of `GoalService.disarm()`, which itself writes no event.
+ */
+'goal-round-driver/disarmed': GoalRoundDriverDisarmedEvent
+```
+
+Source: [`packages/goal/goal-round-driver/src/types.ts:17`](../packages/goal/goal-round-driver/src/types.ts)
+
+<a id="goal-round-driverrearmed--log-only"></a>
+
+#### `goal-round-driver/rearmed` — log-only
+
+```ts persistence-catalog
+/** The automatic re-arm that followed a scheduled error retry; its absence after a release reports no scheduled retry. */
+'goal-round-driver/rearmed': GoalRoundDriverRearmedEvent
+```
+
+Source: [`packages/goal/goal-round-driver/src/types.ts:19`](../packages/goal/goal-round-driver/src/types.ts)
 
 ### `hook/*`
 

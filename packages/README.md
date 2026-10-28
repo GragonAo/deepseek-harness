@@ -17,35 +17,36 @@ Groups hold `packages/<group>/<pkg>/`; names stay `@deepseek-ai/dsh-<pkg>`. **Gr
 | [`schedule/`](schedule/README.md) | Session-local scheduled follow-ups | Product — stable API |
 | [`feedback/`](feedback/README.md) | Human feedback | Product — stable API |
 | [`identity/`](identity/README.md) | Shared anonymous identity | Product — stable API |
-| [`tenant/`](tenant/README.md) | Multi-tenant isolation: identity, auth, Postgres state, container execution world, and HTTP API | Product — stable API |
+| [`tenant/`](tenant/README.md) | Multi-tenant isolation: identity, auth, Postgres state, container execution world, HTTP API | Product — stable API |
 | [`llm/`](llm/README.md) | LLM capability family: the abstract service + provider adapters | Product — stable API |
 | [`e2b/`](e2b/README.md) | E2B providers | POC |
 | [`subprocess/`](subprocess/README.md) | Subprocess capability family: Service Definition + local process-tree provider | Product — stable API |
 | [`shell/`](shell/README.md) | Bash capability family: executor seam, local impl, model-facing tool | Product — stable API |
-| [`terminal/`](terminal/README.md) | Persistent PTY capability family: owner-scoped sessions, local implementation, and model-facing tools | Product — stable API |
+| [`terminal/`](terminal/README.md) | Persistent PTY capability family: owner-scoped sessions, local implementation, model-facing tools | Product — stable API |
 | [`code-runtime/`](code-runtime/README.md) | Code-execution capability family: Service Definition + worker-thread provider + Code Mode Consumer | Product — stable API |
 | [`sandbox/`](sandbox/README.md) | Process-confinement seam; bwrap/Landlock/Seatbelt backends | Product — stable API |
-| [`fs/`](fs/README.md) | Filesystem capability family: seam, local impl, model-facing file tools, bash-backed discovery tools | Product — stable API |
+| [`fs/`](fs/README.md) | Filesystem capability family: seam, local impl, file tools, bash-backed discovery tools | Product — stable API |
 | [`lsp/`](lsp/README.md) | LSP capability family: seam, generic stdio provider, and the `lsp` tool | Product — stable API |
-| [`skill/`](skill/README.md) | Skill capability family: the provider registry, local provider, and model-facing catalog/loader | Product — stable API |
+| [`skill/`](skill/README.md) | Skill capability family: provider registry, local provider, model-facing catalog/loader | Product — stable API |
 | [`compaction/`](compaction/README.md) | Compaction capability family: Service Definition + basic provider + command Consumer | Product — stable API |
-| [`context/`](context/README.md) | Model-visible request context, including workspace instructions and time context | Product — stable API |
-| [`subagent/`](subagent/README.md) | Subagent capability family: the provider-registry contract and the model-facing delegation tool | Product — stable API |
+| [`context/`](context/README.md) | Model-visible request context: workspace instructions, time context | Product — stable API |
+| [`subagent/`](subagent/README.md) | Subagent capability family: provider-registry contract + model-facing delegation tool | Product — stable API |
 | [`jobs/`](jobs/README.md) | Generic background-job runtime and model-facing `job_*` control tools | Product — stable API |
 | [`experimental/`](experimental/README.md) | Private prototypes and internal-only plugins | Unreleased |
 | [`workflow/`](workflow/README.md) | Workflow seam, worker-thread engine, and model-facing `workflow`/`ralph` tools | Product — stable API |
-| [`web/`](web/README.md) | Web capability family: seam, search/fetch provider impls, and the model-facing web tools | Product — stable API |
+| [`web/`](web/README.md) | Web capability family: seam, search/fetch provider impls, model-facing web tools | Product — stable API |
 | [`attachment/`](attachment/README.md) | Durable attachment identity, validation, local content-addressed storage | Product — stable API |
 | [`spill/`](spill/README.md) | Spill capability family: storage seam, local impl, tool-result spill policy | Product — stable API |
 | [`todo/`](todo/README.md) | The model-facing `todo_write` tool | Product — stable API |
+| [`deliverables/`](deliverables/README.md) | The model-facing `present` tool and its per-turn projection | Product — stable API |
 | [`plan/`](plan/README.md) | Plan collaboration state with a direct entry command and reviewed exit | Product — stable API |
 | [`preset/`](preset/README.md) | Per-session agent composition from preset `cordis.yml` files | Product — stable API |
-| [`guard/`](guard/README.md) | Loop-hygiene guards: advisory repeat-call reminders + the `tools/execute` deadline enforcer | Product — stable API |
+| [`guard/`](guard/README.md) | Loop-hygiene guards: advisory repeat-call reminders + `tools/execute` deadline enforcer | Product — stable API |
 | [`bundle/`](bundle/README.md) | Installable `dsh --profile` patch layers | Product — stable API |
-| [`extensions/`](extensions/README.md) | Agent runtime self-modification: live plugin/service inspection and model-written plugin mount/unmount ([design](../.agents/notes/implemented/feature/2026-07-08-self-referential-cordis-toolset.md)) | Product — stable API |
+| [`extensions/`](extensions/README.md) | Agent runtime self-modification: live plugin/service inspection, model-written plugin mount/unmount ([design](../.agents/notes/implemented/feature/2026-07-08-self-referential-cordis-toolset.md)) | Product — stable API |
 | [`hooks/`](hooks/README.md) | Hook bridges + the shared Claude Code / Codex wire-protocol library | Product — stable API |
 | [`session/`](session/README.md) | Durable session data plane: persistence seam + JSONL/SQLite backends, projection seam, log-backed titles, session reporting | Product — stable API |
-| [`session-query/`](session-query/README.md) | Session retrieval family: logical corpus, bounded reads, lineage, event relationships, semantic filtering, and SQLite full-text search | Product — stable API |
+| [`session-query/`](session-query/README.md) | Session retrieval family: logical corpus, bounded reads, lineage, event relationships, semantic filtering, SQLite full-text search | Product — stable API |
 | [`settings/`](settings/README.md) | User-settings seam + file-backed provider | Product — stable API |
 | [`credentials/`](credentials/README.md) | Credential-reference seam + env-over-`.env` provider | Product — stable API |
 | [`storage/`](storage/README.md) | Non-session storage hub + backends + domain form | Product — stable API |

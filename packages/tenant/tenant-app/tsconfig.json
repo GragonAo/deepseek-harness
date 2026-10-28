@@ -288,6 +288,9 @@
       "path": "../../todo/tool-todo/tsconfig.json"
     },
     {
+      "path": "../../deliverables/tool-present/tsconfig.json"
+    },
+    {
       "path": "../../typert/loader/tsconfig.json"
     },
     {

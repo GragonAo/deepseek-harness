@@ -280,6 +280,9 @@ export const SPINE: readonly SpineRow[] = [
   { id: 'session-checkpoint-policy', module: '@deepseek-ai/dsh-session-checkpoint-policy' },
   { id: 'tool-result-pruner', module: '@deepseek-ai/dsh-compaction-tool-result-pruner', config: () => ({ thresholdChars: 8192, headChars: 4096, tailChars: 1024 }) },
   { id: 'tool-todo', module: '@deepseek-ai/dsh-tool-todo', config: () => ({ allowParallelInProgress: true }) },
+  // 交付物声明：模型把"这一轮交给用户的成品"记成会话事件，投影给出按轮分组的清单。业务面按轮取
+  // 这份清单出产物卡——既不看模型收尾时说的那句话，也不拿"这一轮动过的所有文件"充数。
+  { id: 'tool-present', module: '@deepseek-ai/dsh-tool-present', config: () => ({ retainTurns: 50 }) },
   { id: 'tool-goal', module: '@deepseek-ai/dsh-tool-goal' },
   { id: 'tool-ralph', module: '@deepseek-ai/dsh-tool-ralph', config: () => ({ subagentProvider: 'spawn', maxRounds: 64 }) },
   { id: 'tool-str-replace-editor', module: '@deepseek-ai/dsh-tool-str-replace-editor', config: () => ({ maxOutputChars: 16000 }) },
