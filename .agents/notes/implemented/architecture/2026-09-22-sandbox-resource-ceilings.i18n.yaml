@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-09-22-sandbox-resource-ceilings.md
-2026-09-22-sandbox-resource-ceilings.md: 5a372a5d6f882ad67331e4aa858e688c91d14d3e
-2026-09-22-sandbox-resource-ceilings.zh.md: f7002334dda0d7005b79fc293f7264264aab900a
+2026-09-22-sandbox-resource-ceilings.md: 744b7b67ecb8a44fc7aab4c77112874bee8e258c
+2026-09-22-sandbox-resource-ceilings.zh.md: c1430b153a2416c2c9b31bcd6dbade87ba8cf763

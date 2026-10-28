@@ -20,17 +20,18 @@ Status: implemented
 
 已准备 Session 的后缀，以及进入 write-behind 队列的事件，仍保留现有复制。这些路径会逐个后缀或事件建立异步队列所有权，且没有已测得的完整日志克隆成本；移除这些复制属于单独的所有权审计，不属于创建种子的借用决策。
 
-协调器通过 `session/disposed` 退役会话：它等待控制器完成初始化和当前 flush，串行执行最后一次排空，且仅在成功后才移除控制器与其拥有的每 id 状态。失败时保持控制器可被找到，以供后端 teardown（拆除）重试。每个 id 的已结算链尾仅在其仍是当前链尾时才移除自身，因此旧操作完成后不会抹除同一 id 的新操作。后端 teardown 会注销写入路径监听器、flush 每个剩余的控制器、等待所有按 id 串行化的操作，最后关闭后端。
+协调器通过 `session/disposed` 退役会话：它等待控制器完成初始化和当前 flush，串行执行最后一次排空，且仅在成功后才移除控制器与其拥有的每 id 状态。失败时保持控制器可被找到，以供后端 teardown（拆除）重试。每个 id 的已结算链尾仅在其仍是当前链尾时才移除自身，因此旧操作完成后不会抹除同一 id 的新操作。后端 teardown 会注销写入路径监听器、flush 每个剩余的控制器、等待所有按 id 串行化的操作，最后关闭后端。协调器已删除的会话是这条排空的唯一例外：其日志是应要求移除的，因此 teardown 会取消它的批处理窗口并跳过它，而不是因删除所拒绝的那次写入而失败（见[会话日志删除](2026-10-19-session-log-deletion.md)）。
 
 ### 钩子接口（`PersistenceBackend<TornMarker>`）
 
-五个必需成员加一个可选的生命周期钩子，构成协调器与存储之间唯一的边界：
+五个必需成员加可选的生命周期钩子，构成协调器与存储之间唯一的边界：
 
 - `name`——后端标签，用于 dispose 失败时的 `AggregateError`。
 - `loadStored(id)`——按 id 跨所有存储范围读取一个已存储前缀（JSONL 的所有项目目录；SQLite 的 id 全局唯一）。准备、逻辑加载/检查、物理后缀读取、存活会话接管与创建碰撞探测共用此查找。协调器会断言返回的 id，并在修复或发布状态之前拒绝已存储记录与存活会话的 cwd 不匹配。
 - `appendBatch(meta, events, isMaterialized)`——持久追加一个连续批次，在尚未物化时原子地惰性物化会话（物化写入与首批事件必须一起提交——二者之间发生崩溃时，不得留下一个已物化但为空的会话；这就是为什么没有单独的 `materialize` 钩子）。
 - `commitRepair(meta, tornMarker, closers)`——使崩溃修复持久化：截断损坏的尾部（当且仅当 `tornMarker !== undefined`）并追加 `closers`。**不要求原子性**——JSONL 合理地分两步 fsync（先截断再追加），SQLite 在一个事务中完成 DELETE+INSERT。用于 `prepare`/`load`（截断 + 合成收尾事件）和存活会话接管（仅截断，`closers = []`）。
 - `list()`——列出所有已存储的元数据。
+- `remove?(id)`——可选地不可逆删除该后端在 id 下持有的全部内容（元数据含在内）；后端省略它时 `PersistenceCoordinator.delete` 会指名拒绝。该操作、进程内墓碑与活动轮次拒绝由[会话日志删除决策](2026-10-19-session-log-deletion.md)负责。
 - `close?()`——可选的生命周期清理（SQLite 关闭 db 句柄；JSONL 省略），在 dispose effect 中于排空至完全停稳之后被 await，因此 close 失败不会掩盖排空错误。
 
 ### 不透明的 torn marker

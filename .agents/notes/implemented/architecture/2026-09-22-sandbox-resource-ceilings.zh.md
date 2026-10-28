@@ -32,7 +32,7 @@ Status: implemented
 
 ## 后果
 
-- 运维可以从 `cordis.yml` 约束单个主体的影响范围；多租户部署在 `idleTimeoutMs`（它限定有多少容器保持停着）之外同时设置 `memoryLimit: '2g'` 与 `cpuLimit: 2`。
+- 运维可以从 `cordis.yml` 约束单个主体的影响范围；多租户部署在 `idleTimeoutMs`（它限定有多少容器保持停着）之外同时设置 `memoryLimit: '2g'` 与 `cpuLimit: 2`。这两个字段同样到达 Kubernetes 后端，只是内存值写成 quantity（`8Gi`）、落在 Pod 容器的 `limits` 上（见[沙箱资源上限](2026-10-14-sandbox-resource-limits.md)）；本条里的 `cordis.yml` 示例是 docker 语法。
 - 作业正当需要超过上限的主体，现在会在自己的容器内以 OOM kill 失败（退出码 137），而不是慢慢跑完；上限按容器计，更重的工作负载意味着改部署配置。
 - 本次变更不带磁盘上限，因此主体仍能通过它的挂载写满宿主的磁盘。
 - 交叉链接：容器模型与生命周期来自 [多租户第二阶段](../../proposed/architecture/2026-08-24-multi-tenant-phase-2.md) 与 [container-docker 预热](2026-08-26-container-docker-prewarm.md)。

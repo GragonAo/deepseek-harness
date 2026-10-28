@@ -32,7 +32,7 @@ An omitted field passes no flag, so single-tenant and development deployments ar
 
 ## Consequences
 
-- An operator bounds one subject's blast radius from `cordis.yml`; the multi-tenant deployment sets `memoryLimit: '2g'` and `cpuLimit: 2` alongside `idleTimeoutMs`, which bounds how many containers stay parked.
+- An operator bounds one subject's blast radius from `cordis.yml`; the multi-tenant deployment sets `memoryLimit: '2g'` and `cpuLimit: 2` alongside `idleTimeoutMs`, which bounds how many containers stay parked. Both fields reach the Kubernetes backend too, where the memory value is written as a quantity (`8Gi`) and lands on the Pod container's `limits` ([sandbox resource limits](2026-10-14-sandbox-resource-limits.md)); the `cordis.yml` example here is the docker syntax.
 - A subject whose job legitimately needs more than its ceiling now fails as an OOM kill inside its container (exit 137) rather than succeeding slowly; ceilings are per container, so a heavier workload means editing the deployment config.
 - No disk ceiling ships with this change, so a subject can still fill the host's disk through its mounts.
 - Cross-links: the container model and its lifecycle come from [multi-tenant phase 2](../../proposed/architecture/2026-08-24-multi-tenant-phase-2.md) and [container-docker pre-warm](2026-08-26-container-docker-prewarm.md).

@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-10-14-sandbox-resource-limits.md
+2026-10-14-sandbox-resource-limits.md: 40246bfe35a5ae6ab826b2c1a800fb98ab0dc92d
+2026-10-14-sandbox-resource-limits.zh.md: a065e69304f2a79790bb8faef98b18af2fec71b9

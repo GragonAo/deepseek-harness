@@ -20,17 +20,18 @@ Creation borrows the exact `Session.events` snapshot as its persistence seed. `S
 
 Prepared-session suffixes and events admitted to the write-behind queue retain their existing copies. Those paths establish asynchronous queue ownership one suffix or event at a time and have no measured whole-log clone cost; removing their copies remains a separate ownership audit rather than part of creation-seed borrowing.
 
-The coordinator retires a session from `session/disposed`: it waits for the controller's initialization and current flush, serializes a final drain, and removes the controller and owned per-id state only after success. A failure leaves the controller discoverable for backend teardown to retry. Settled per-id chain tails remove themselves only when they are still current, so a completion cannot erase a newer operation for the same id. Backend teardown unregisters write-path listeners, flushes every remaining controller, awaits per-id operations, and then closes the backend.
+The coordinator retires a session from `session/disposed`: it waits for the controller's initialization and current flush, serializes a final drain, and removes the controller and owned per-id state only after success. A failure leaves the controller discoverable for backend teardown to retry. Settled per-id chain tails remove themselves only when they are still current, so a completion cannot erase a newer operation for the same id. Backend teardown unregisters write-path listeners, flushes every remaining controller, awaits per-id operations, and then closes the backend. A session the coordinator deleted is the one exception to that drain: its log is gone by request, so teardown cancels its batching window and skips it rather than failing on the write that deletion refused ([session log deletion](2026-10-19-session-log-deletion.md)).
 
 ### The hook interface (`PersistenceBackend<TornMarker>`)
 
-Five required members plus an optional lifecycle hook form the only boundary between the coordinator and storage:
+Five required members plus optional lifecycle hooks form the only boundary between the coordinator and storage:
 
 - `name` — backend label for the dispose-failure `AggregateError`.
 - `loadStored(id)` — read one stored prefix by id across every storage scope (every JSONL project directory; SQLite's id is globally unique). Preparation, logical load/inspection, physical suffix reads, live adoption, and the create-collision probe share this lookup. The coordinator asserts the returned id and rejects a stored/live cwd mismatch before repair or state publication.
 - `appendBatch(meta, events, isMaterialized)` — durably append a contiguous batch, lazily materializing the session ATOMICALLY when not yet materialized (the materialize-write and the first event batch must commit together — a crash between them must not leave a materialized-but-empty session; this is why there is no separate `materialize` hook).
 - `commitRepair(meta, tornMarker, closers)` — make a crash repair durable: truncate the torn tail (iff `tornMarker !== undefined`) and append `closers`. **NOT required to be atomic** — JSONL legitimately truncates-then-appends in two fsync'd steps, SQLite does DELETE+INSERT in one transaction. Used by `prepare`/`load` (truncate + synthetic closers) and live-adoption (truncate only, `closers = []`).
 - `list()` — list all stored metadata.
+- `remove?(id)` — optional irreversible removal of everything the backend holds under the id, metadata included; `PersistenceCoordinator.delete` refuses by name when a backend omits it. The [session log deletion decision](2026-10-19-session-log-deletion.md) owns the operation, the in-process tombstone, and the live-turn refusal.
 - `close?()` — optional lifecycle teardown (SQLite closes its db handle; JSONL omits it), awaited in the dispose effect AFTER the quiescence drain so a close failure never masks a drain error.
 
 ### The opaque torn marker

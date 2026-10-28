@@ -42,7 +42,7 @@ tool-exec 服务用管道 stdio 拉起命令，把每一块到达的输出 push 
 - 一条正在跑的命令最多占住 `maxOutputBytes` × 流的数量（同时写两条流时是字段值的两倍）的内存，这就是沙箱现在持有的量，而不再是整条流。
 - k8s 沙箱多了一个环境变量，Pod spec 指纹因此变化：由更早的 provider 启动的 Pod 会被判为 `/runs a different spec/`，被第一次发现它的调用删掉并重建一次。docker 的启动参数同样变化，但没有对应代价，因为容器由缓存的启动过程重建。
 - `packages/tenant/tenant-app/src/config.ts` 用 `rejectUnknown` 校验 `sandbox` 的键集合；租户应用部署按 provider 自己的字段名在那里设 `maxOutputBytes`，与该 provider 其余 `Config` 字段一样（见[租户栈的工具呈现与并发](2026-10-08-tenant-tool-presentation-and-concurrency.md)）。
-- 这条上界保护的是捕获，不是命令自己的内存：自己吃掉容器内存的命令照样死，那个只能用 `memoryLimit`（docker）或 Pod `resources`（尚未实现）来管。
+- 这条上界保护的是捕获，不是命令自己的内存：自己吃掉容器内存的命令照样死，那个只能由 `memoryLimit` 管——docker 侧走 `--memory`，Kubernetes 侧走 Pod 容器的 `limits`（见[沙箱资源上限](2026-10-14-sandbox-resource-limits.md)）。
 - 不经变量、直接 `docker run` 这个 tool-exec 镜像时，捕获仍然无界——与空闲预算一样是「省略即不限」；两个 provider 总会注入值，所以没有配置会意外走到这条路径上。
 - 把一大段脚本交给「读都不读就退出」的命令不再打断这条通道：命令自己的退出码与输出照常答回，没送完的 stdin 只是没送完。
 

@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-10-26-mcp-structured-content-model-visible.md
+2026-10-26-mcp-structured-content-model-visible.md: c4978fa080b06229abe4bc9ac3baaae80f660713
+2026-10-26-mcp-structured-content-model-visible.zh.md: d62c70aa411ce72f5daa3b8ff1de4d58b1cd0700
