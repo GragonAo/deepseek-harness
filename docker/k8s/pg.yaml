@@ -1,0 +1,98 @@
+# 宿主用的 PostgreSQL：dsh-pg。租户服务的 database.connectionString 指向它。
+#
+# 130 现役就是这个形态（pgvector:pg16，一个 PVC 一个 Deployment），导出后只把口令换成
+# Secret 引用。仓里原先把它当成「集群既有设施」不提供清单，但那样空集群起不来，
+# 所以补在这里；不想要它（比如用托管数据库）就删掉本文件，改配置里的 connectionString 即可。
+#
+#   kubectl -n dsh create secret generic dsh-pg-secret --from-literal=POSTGRES_PASSWORD=...
+#   kubectl -n dsh apply -f docker/k8s/pg.yaml
+#
+# 注意 130 现役的库口令与配置里的 connectionString 必须一致，两边对不上时宿主启动即报认证失败。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dsh-pgdata
+  namespace: dsh
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: rook-ceph-block
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dsh-pg
+  namespace: dsh
+  labels:
+    app: dsh-pg
+spec:
+  replicas: 1
+  # 单实例数据库：先把旧 Pod 停掉再起新的，别让两个进程同时挂一个数据卷
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: dsh-pg
+  template:
+    metadata:
+      labels:
+        app: dsh-pg
+    spec:
+      containers:
+        - name: postgres
+          image: docker.m.daocloud.io/pgvector/pgvector:pg16
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: pg
+              containerPort: 5432
+              protocol: TCP
+          env:
+            - name: POSTGRES_USER
+              value: dsh
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: dsh-pg-secret
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              value: dsh
+            # 数据放子目录：initdb 要求数据目录为空，而卷根目录带 lost+found
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: [pg_isready, -U, dsh]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command: [pg_isready, -U, dsh]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: dsh-pgdata
+      terminationGracePeriodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dsh-pg
+  namespace: dsh
+spec:
+  selector:
+    app: dsh-pg
+  ports:
+    - name: pg
+      port: 5432
+      targetPort: pg
+      protocol: TCP

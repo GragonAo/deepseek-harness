@@ -27,7 +27,8 @@
 # 覆盖没生效时表现为第一次管理面调用返回 INVALID_TOKEN，而不是启动失败。
 #
 # 前提条件（属集群既有设施，不在这份清单里）：
-#   - 命名空间 dsh、PostgreSQL 服务 dsh-pg、RWX StorageClass（沙箱工作区 PVC 用它）；
+#   - 命名空间 dsh、RWX StorageClass（沙箱工作区 PVC 用它）；
+#   - PostgreSQL 服务 dsh-pg —— 现役形态见同目录的 pg.yaml（用托管库就改配置里的 connectionString）；
 #   - 服务账号 dsh-host 及其 Role —— k8s 沙箱后端要按 (租户,用户) 建 Pod 与 PVC；
 #   - 沙箱镜像 dsh-tool-exec:latest 已在节点上（k8s 回退到 Docker Hub，而部署网络通常拉不到）；
 #   - 宿主目录 /opt/dsh（config 里的四条路径、systemRoot、pythonRoot 都在它下面）。
