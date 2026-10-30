@@ -27,7 +27,6 @@ import z from '@deepseek-ai/schemastery'
 import type Schema from '@deepseek-ai/schemastery'
 import { Unzip, UnzipInflate, UnzipPassThrough } from 'fflate'
 import {
-  isSkillName,
   readSkillDocument,
   type SkillDocument,
   type SkillDocumentIssue,
@@ -132,7 +131,11 @@ export interface SkillInstallResult {
 export interface SkillRemoveRequest {
   /** Ambient tier holding the skill; a tier absent from the current scope is refused. */
   readonly tier: SkillTierKind
-  /** Skill name, or the directory name holding it. */
+  /**
+   * Entry name inside the tier directory, being a skill directory or a flat
+   * Markdown document as the listing reports them, or else the skill name one
+   * directory document registers. An entry name wins over a registered name.
+   */
   readonly name: string
   /** Cancels the removal before the directory is deleted. */
   readonly signal?: AbortSignal | undefined
@@ -144,7 +147,7 @@ export interface SkillRemoveResult {
   readonly tier: SkillTierKind
   /** Skill name the removed directory registered under. */
   readonly name: string
-  /** Absolute directory that was removed. */
+  /** Absolute path that was removed: a skill directory or a flat Markdown document. */
   readonly directory: string
   /** Whether the refreshed catalog still lists this skill name. */
   readonly visible: boolean
@@ -188,9 +191,11 @@ interface BundleFile {
   readonly bytes: Uint8Array
 }
 
-/** One installed skill as the tier directory holds it. */
+/** One tier entry a removal deletes. */
 interface HeldSkill {
-  readonly directory: string
+  /** Absolute path removed: a skill directory or a flat Markdown document. */
+  readonly path: string
+  /** Name the entry registers under, which is its own name when the document does not load. */
   readonly name: string
 }
 
@@ -231,20 +236,20 @@ export class SkillInstallService extends Service {
   }
 
   /**
-   * Remove one skill from an ambient tier, accepting either its frontmatter
-   * name or the directory name holding it, and refresh every cached catalog.
+   * Remove one skill from an ambient tier, accepting either the name of the
+   * entry holding it or its frontmatter name, and refresh every cached catalog.
    * @param request - tier and the skill to remove.
-   * @returns the removed directory and whether the refreshed catalog still lists the name.
+   * @returns the removed path and whether the refreshed catalog still lists the name.
    * @throws SkillInstallError when the tier is unavailable, the skill is absent, or two directories claim the name.
    */
   async remove(request: SkillRemoveRequest): Promise<SkillRemoveResult> {
     request.signal?.throwIfAborted()
     const held = await this.resolveHeld(request.name, this.tierDirectory(request.tier), request.signal)
-    await rm(held.directory, { recursive: true, force: false })
+    await rm(held.path, { recursive: true, force: false })
     return {
       tier: request.tier,
       name: held.name,
-      directory: held.directory,
+      directory: held.path,
       visible: await this.refreshAndDetect(held.name),
     }
   }
@@ -262,10 +267,8 @@ export class SkillInstallService extends Service {
     const entries: SkillTierEntry[] = []
     for (const entry of await readTierEntries(directory)) {
       request.signal?.throwIfAborted()
-      const path = entry.isDirectory()
-        ? join(directory, entry.name, SKILL_ENTRY)
-        : entry.isFile() && entry.name.endsWith('.md') ? join(directory, entry.name) : undefined
-      if (path === undefined) continue
+      if (!isTierSkillEntry(entry)) continue
+      const path = entry.isDirectory() ? join(directory, entry.name, SKILL_ENTRY) : join(directory, entry.name)
       entries.push(await readTierEntry(entry.name, path))
     }
     return { tier: request.tier, directory, entries }
@@ -295,28 +298,35 @@ export class SkillInstallService extends Service {
   }
 
   /**
-   * Resolve the directory holding one skill, by directory name first and then by
-   * the frontmatter name each directory's document registers under.
-   * @param name - skill name or directory name.
+   * Resolve the tier entry holding one skill: the entry the tier directory names
+   * first, then the directories whose document registers the name. The first form
+   * addresses any entry the listing reports, which among hand-placed entries
+   * includes names no skill document could register, such as a backup copy
+   * suffixed with an underscore and a timestamp.
+   * @param name - tier entry name, or the skill name a document registers.
    * @param directory - tier directory to search.
    * @param signal - cancels the search.
-   * @returns the directory holding the skill and the name it registers under.
+   * @returns the entry to delete and the name it registers under.
    * @throws SkillInstallError when the skill is absent or two directories claim the name.
    */
   private async resolveHeld(name: string, directory: string, signal: AbortSignal | undefined): Promise<HeldSkill> {
-    const literal = join(directory, name)
-    if (isSkillName(name) && await holdsSkill(literal)) {
-      /* v8 ignore next -- holdsSkill read this file a moment ago; an empty document needs the file to vanish between reads. */
-      const document = readSkillDocument(await readText(join(literal, SKILL_ENTRY)) ?? '')
-      return { directory: literal, name: document.ok ? document.document.name : name }
+    const entries = await readTierEntries(directory)
+    // The requested name is caller input, so it is only ever accepted as a name
+    // the directory itself reports: a directory entry name is one path segment,
+    // which leaves no room for a separator or a parent reference to reach.
+    const literal = entries.find(entry => entry.name === name && isTierSkillEntry(entry))
+    if (literal !== undefined) {
+      const path = join(directory, literal.name)
+      const document = readSkillDocument(await readText(literal.isDirectory() ? join(path, SKILL_ENTRY) : path) ?? '')
+      return { path, name: document.ok ? document.document.name : name }
     }
     const candidates: HeldSkill[] = []
-    for (const entry of await readTierEntries(directory)) {
+    for (const entry of entries) {
       signal?.throwIfAborted()
       if (!entry.isDirectory()) continue
-      const candidate = join(directory, entry.name)
-      const document = readSkillDocument(await readText(join(candidate, SKILL_ENTRY)) ?? '')
-      if (document.ok && document.document.name === name) candidates.push({ directory: candidate, name })
+      const path = join(directory, entry.name)
+      const document = readSkillDocument(await readText(join(path, SKILL_ENTRY)) ?? '')
+      if (document.ok && document.document.name === name) candidates.push({ path, name })
     }
     if (candidates.length === 0) {
       throw new SkillInstallError('skill-absent', `no skill "${name}" is installed at ${directory}`, { name, directory })
@@ -325,7 +335,7 @@ export class SkillInstallService extends Service {
       throw new SkillInstallError(
         'skill-ambiguous',
         `${candidates.length} directories register the skill name "${name}"`,
-        { name, candidates: candidates.map(candidate => candidate.directory) },
+        { name, candidates: candidates.map(candidate => candidate.path) },
       )
     }
     return candidates[0] as HeldSkill
@@ -568,6 +578,17 @@ function safeEntryPath(name: string): string | undefined {
     throw new SkillInstallError('bundle-unsafe-entry', `the bundle entry "${name}" escapes the skill directory`, { entry: name })
   }
   return segments.join('/')
+}
+
+/**
+ * Whether one tier entry is a skill document the listing reports and a removal
+ * deletes: a directory, which holds its document under SKILL.md, or a flat
+ * Markdown file carrying the document itself.
+ * @param entry - directory entry inside a tier directory.
+ * @returns whether the entry is a skill document of its tier.
+ */
+function isTierSkillEntry(entry: Dirent): boolean {
+  return entry.isDirectory() || (entry.isFile() && entry.name.endsWith('.md'))
 }
 
 /**

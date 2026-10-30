@@ -301,6 +301,81 @@ describe('SkillInstallService', () => {
     expect(existsSync(join(stack.skills, 'broken-skill'))).toBe(false)
   })
 
+  it('removes a tier directory whose name no skill document could register, named by its directory', async () => {
+    const stack = await boot()
+    await mkdir(join(stack.skills, 'imported-skill_backup-20261015-0633'), { recursive: true })
+    await writeFile(join(stack.skills, 'imported-skill_backup-20261015-0633', 'SKILL.md'), VALID)
+
+    const result = await stack.ctx.skillInstall.remove({ tier: 'system', name: 'imported-skill_backup-20261015-0633' })
+
+    expect(result).toMatchObject({
+      name: 'imported-skill',
+      directory: join(stack.skills, 'imported-skill_backup-20261015-0633'),
+      visible: false,
+    })
+    expect(await tierEntries(stack)).toEqual([])
+  })
+
+  it('removes a flat Markdown skill document by its entry name', async () => {
+    const stack = await boot()
+    await mkdir(stack.skills, { recursive: true })
+    await writeFile(join(stack.skills, 'flat-skill.md'), VALID)
+
+    const result = await stack.ctx.skillInstall.remove({ tier: 'system', name: 'flat-skill.md' })
+
+    expect(result).toMatchObject({
+      name: 'imported-skill',
+      directory: join(stack.skills, 'flat-skill.md'),
+      visible: false,
+    })
+    expect(await tierEntries(stack)).toEqual([])
+  })
+
+  it('removes a directory holding no readable document, whatever its name', async () => {
+    const stack = await boot()
+    await mkdir(join(stack.skills, 'notes_backup-20261014'), { recursive: true })
+    await writeFile(join(stack.skills, 'notes_backup-20261014', 'notes.txt'), 'no document here')
+
+    const result = await stack.ctx.skillInstall.remove({ tier: 'system', name: 'notes_backup-20261014' })
+
+    expect(result).toMatchObject({
+      name: 'notes_backup-20261014',
+      directory: join(stack.skills, 'notes_backup-20261014'),
+      visible: false,
+    })
+    expect(await tierEntries(stack)).toEqual([])
+  })
+
+  it('deletes the entry the tier names before the directories registering that name', async () => {
+    const stack = await boot()
+    await mkdir(join(stack.skills, 'scan-target'), { recursive: true })
+    await writeFile(
+      join(stack.skills, 'scan-target', 'SKILL.md'),
+      VALID.replace('name: imported-skill', 'name: renamed-target'),
+    )
+    await mkdir(join(stack.skills, 'holder-dir'), { recursive: true })
+    await writeFile(
+      join(stack.skills, 'holder-dir', 'SKILL.md'),
+      VALID.replace('name: imported-skill', 'name: scan-target'),
+    )
+
+    const result = await stack.ctx.skillInstall.remove({ tier: 'system', name: 'scan-target' })
+
+    expect(result).toMatchObject({ name: 'renamed-target', directory: join(stack.skills, 'scan-target') })
+    expect(existsSync(join(stack.skills, 'holder-dir'))).toBe(true)
+  })
+
+  it('refuses a name that reaches outside the tier directory', async () => {
+    const stack = await boot()
+    await mkdir(join(stack.skills, 'kept-skill'), { recursive: true })
+    await writeFile(join(stack.skills, 'kept-skill', 'SKILL.md'), VALID)
+
+    const refused = await refusal(async () => await stack.ctx.skillInstall.remove({ tier: 'system', name: '../kept-skill' }))
+
+    expect(refused.code).toBe('skill-absent')
+    expect(existsSync(join(stack.skills, 'kept-skill', 'SKILL.md'))).toBe(true)
+  })
+
   it('finds a skill by frontmatter name in a directory named otherwise, skipping flat files and unreadable documents', async () => {
     const stack = await boot()
     await mkdir(join(stack.skills, 'other-dir'), { recursive: true })
@@ -407,7 +482,7 @@ describe('SkillInstallService', () => {
     expect(await tierEntries(stack)).toEqual([])
   })
 
-  it('addresses a skill placed by hand under a non-skill directory name by its frontmatter name', async () => {
+  it('addresses a skill placed by hand under a non-skill directory name by that directory name', async () => {
     const stack = await boot()
     await mkdir(join(stack.skills, '知识库'), { recursive: true })
     await writeFile(
@@ -415,11 +490,9 @@ describe('SkillInstallService', () => {
       VALID.replace('name: imported-skill', 'name: case-knowledge-base'),
     )
 
-    expect((await refusal(async () =>
-      await stack.ctx.skillInstall.remove({ tier: 'system', name: '知识库' }))).code)
-      .toBe('skill-absent')
-
-    const removed = await stack.ctx.skillInstall.remove({ tier: 'system', name: 'case-knowledge-base' })
+    // The listing reports this entry under a name no skill document could
+    // register, and a listing entry must stay addressable by its own name.
+    const removed = await stack.ctx.skillInstall.remove({ tier: 'system', name: '知识库' })
 
     expect(removed).toMatchObject({ name: 'case-knowledge-base', directory: join(stack.skills, '知识库'), visible: false })
   })

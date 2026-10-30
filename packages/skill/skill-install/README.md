@@ -11,10 +11,10 @@
 | 方法 | 请求 | 返回值 | 作用 |
 |---|---|---|---|
 | `install` | `{ tier, bundle, replace?, signal? }` | `{ tier, name, directory, replaced, files, visible }` | 校验整个包，暂存 + 一次 `rename` 换入；`replace: true` 才允许覆盖同名技能。 |
-| `remove` | `{ tier, name, signal? }` | `{ tier, name, directory, visible }` | 按目录名或 frontmatter 名定位并删除，随后刷新。 |
+| `remove` | `{ tier, name, signal? }` | `{ tier, name, directory, visible }` | 按技能层条目名（目录或扁平 `.md`，即 `list` 报出的 `entry`）定位并删除，落在目录名之后才退回 frontmatter 名；随后刷新。 |
 | `list` | `{ tier, signal? }` | `{ tier, directory, entries }` | 列出该层目录，逐条给出是否可加载与带码原因（含人工放进去的文件）。 |
 
-`tier` 是 `SkillTierKind`：`case`、`user-global`、`system`。安装目标是 `<层目录>/<frontmatter 名>/`，与技能发现规则一致：只有 frontmatter 的 `name` 决定注册名，目录名不参与。
+`tier` 是 `SkillTierKind`：`case`、`user-global`、`system`。安装目标是 `<层目录>/<frontmatter 名>/`，与技能发现规则一致：只有 frontmatter 的 `name` 决定注册名，目录名不参与。`remove` 的 `name` 因此有两条口径：先按 `<层目录>` 里的条目名精确命中（人工放进去的目录名可能不是合法技能名，例如带 `_backup-<时间戳>` 后缀的备份，`list` 照样会列出来，就必须能按它自己的名字删掉），没命中才退回按文档注册名扫描目录；条目名优先。`name` 只作为条目名与目录自身报出的名字比较，`../` 之类到不了一层目录之外。
 
 包内必须恰好有一个根 `SKILL.md`；`<某个目录>/SKILL.md` 这种整体打包的布局会先剥掉那一层包装目录。文档按 [`@deepseek-ai/dsh-skill` 的 `readSkillDocument`](../skill/README.md) 校验，与运行时跳过技能用的是同一套判据。
 
@@ -30,8 +30,8 @@
 | `bundle-too-large` | 包体超过 `maxBundleBytes`，条目数超过 2048，或解压总量超过 `maxExpandedBytes`。 |
 | `skill-invalid` | `SKILL.md` 无法成为可加载技能：`details.issues` 逐条给出 `code` 与 `line`。 |
 | `skill-exists` | 同名技能已存在且请求未允许覆盖（`details.directory`）。 |
-| `skill-absent` | 该层没有这个技能。 |
-| `skill-ambiguous` | 两个目录注册了同一个 frontmatter 名，无法判定删除哪一个。 |
+| `skill-absent` | 该层没有这个条目，也没有哪个目录的文档注册这个技能名。 |
+| `skill-ambiguous` | 没有同名条目，而两个目录注册了同一个 frontmatter 名，无法判定删除哪一个。 |
 
 拒绝都发生在技能层目录变化之前：包先整个解在内存里、校验通过后才写入。换入失败时被替换的旧目录会从旁边目录 `rename` 回来，暂存目录在 `finally` 里删除。
 
