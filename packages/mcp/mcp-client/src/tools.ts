@@ -28,6 +28,7 @@ import type { JsonSchemaNode, JsonValue } from '@deepseek-ai/dsh-tools'
 import { allowsAutomaticRetry, allowsConcurrentCalls, retryDelayMs, unknownListedTools, waitBeforeRetry } from './concurrency.ts'
 import type { ConcurrencyLimiter, ResolvedToolConcurrencyPolicy } from './concurrency.ts'
 import { isOverloadSignal } from './overload.ts'
+import { isSessionLostSignal } from './session.ts'
 
 /** Resolved options relevant to tool bridging. */
 export interface ToolBridgeOptions {
@@ -43,6 +44,11 @@ export interface ToolBridgeOptions {
    * a reconnect keeps the cap adaptive mode already learned.
    */
   limiter: ConcurrencyLimiter
+  /**
+   * Replace a generation whose MCP session the server has terminated; the
+   * supervisor closes it and reconnects. Called at most once per tool call.
+   */
+  recoverSession: (stale: Client) => Promise<Client | undefined>
 }
 
 /** State for one sync generation: the current set of disposers keyed by public name. */
@@ -65,6 +71,13 @@ const INVALID_NAME_CHARS = /[^A-Za-z0-9_-]/g
 
 /** Hex chars of the SHA-256 identity hash appended on lossy normalization. */
 const HASH_LENGTH = 12
+
+/**
+ * Fresh sessions one tool call may use. One is the server's own statement that
+ * this session is gone; a second would mean the replacement died too, which the
+ * reconnect policy and its outage budget decide about, not one waiting call.
+ */
+const SESSION_RECOVERIES = 1
 
 /** Raw result record: the bridge owns JSON-value validation after transport. */
 const RawCallToolResultSchema = z.record(z.string(), z.unknown())
@@ -445,11 +458,26 @@ async function callToolWithinCap(
   retries: number,
   meta: Readonly<Record<string, string>> | undefined,
 ): Promise<Record<string, unknown>> {
-  for (let attempt = 0; ; attempt += 1) {
-    const outcome = await attemptToolCall(client, rawName, args, exec, opts, meta)
+  let current = client
+  let refusals = 0
+  let recoveries = 0
+  for (;;) {
+    const outcome = await attemptToolCall(current, rawName, args, exec, opts, meta)
     if (outcome.kind === 'served') return outcome.result
-    if (!outcome.overload || attempt >= retries) throw outcome.error
-    const delayMs = retryDelayMs(opts.concurrency, attempt + 1, Math.random)
+    if (isSessionLostSignal(outcome.error)) {
+      // The server refused the session before it dispatched this call, so the
+      // retry is safe whatever the tool writes. A second refusal means the new
+      // session died as well, and the reconnect policy owns that outage.
+      if (recoveries >= SESSION_RECOVERIES) throw outcome.error
+      recoveries += 1
+      const recovered = await opts.recoverSession(current)
+      if (recovered === undefined) throw outcome.error
+      current = recovered
+      continue
+    }
+    if (!outcome.overload || refusals >= retries) throw outcome.error
+    const delayMs = retryDelayMs(opts.concurrency, refusals + 1, Math.random)
+    refusals += 1
     if (!await waitBeforeRetry(delayMs, exec.signal)) {
       throw new Error('the tool call was canceled while waiting to retry a refused call', { cause: exec.signal.reason })
     }

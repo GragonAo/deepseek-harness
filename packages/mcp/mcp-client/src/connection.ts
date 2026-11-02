@@ -106,6 +106,17 @@ export interface ConnectionHandle {
    */
   ready: Promise<ConnectionOutcome>
   /**
+   * Replace a generation whose MCP session the server has terminated (HTTP 404
+   * for the session id it sent). Closing the stale generation runs the ordinary
+   * reconnect path, so the plugin re-initializes and re-syncs its tools; the
+   * caller re-sends the call the server refused.
+   *
+   * @param stale - the generation whose session the server rejected.
+   * @returns the live generation to re-send on, or undefined when none came up
+   *   within the reconnect policy's longest delay.
+   */
+  recoverSession(stale: Client): Promise<Client | undefined>
+  /**
    * Stop reconnection, close the live client, wait for the in-flight attempt
    * and queued tool syncs to quiesce, then unregister every tool this server
    * still owns.
@@ -142,6 +153,7 @@ export function startConnection(
     toolCallTimeoutMs: config.toolCallTimeoutMs,
     concurrency,
     limiter,
+    recoverSession,
   }
   // The initial sync uses 'throw' when failOnStartupError is configured, so
   // a registration conflict propagates to the startup-await path. Re-syncs
@@ -164,9 +176,45 @@ export function startConnection(
   let connectedAt: number | undefined
   /** The real error from the first connection attempt, for startup-await diagnostics. */
   let firstAttemptError: unknown
+  /** Callers waiting for the next successfully connected generation. */
+  const liveWaiters = new Set<(generation: Client | undefined) => void>()
+  /** The in-flight session recovery, shared by every call that lost the same generation. */
+  let recovery: Promise<Client | undefined> | undefined
 
   /** A generation may act only while it is the current one on a live plugin. */
   const isCurrent = (generation: Client): boolean => !disposed && client === generation
+
+  /** Hand the new generation to every recovery waiter, or close them out with `undefined`. */
+  function settleWaiters(generation: Client | undefined): void {
+    const waiting = [...liveWaiters]
+    liveWaiters.clear()
+    for (const settle of waiting) settle(generation)
+  }
+
+  /**
+   * Resolve with the next successfully connected generation.
+   *
+   * Bounded by `maxDelayMs` — the longest spacing the reconnect policy inserts —
+   * so a recovery that never lands fails the call it was started for instead of
+   * hanging that turn.
+   *
+   * @returns the generation the next successful connect published, or undefined
+   *   when the wait expired first.
+   */
+  function waitForLiveGeneration(): Promise<Client | undefined> {
+    const { promise, resolve } = Promise.withResolvers<Client | undefined>()
+    const settle = (generation: Client | undefined): void => {
+      clearTimeout(timer)
+      resolve(generation)
+    }
+    const timer = setTimeout(() => {
+      liveWaiters.delete(settle)
+      resolve(undefined)
+    }, policy.maxDelayMs)
+    timer.unref()
+    liveWaiters.add(settle)
+    return promise
+  }
 
   /**
    * Serializes every syncTools call — initial syncs and notification re-syncs
@@ -227,6 +275,7 @@ export function startConnection(
         disposers = new Map()
       })
       ctx.logger.error(`${label}: giving up after ${policy.maxAttempts} consecutive failed reconnect attempts — tools unregistered; reload the plugin or restart the Host to reconnect`)
+      settleWaiters(undefined)
       return
     }
     const delayMs = Math.min(policy.maxDelayMs, policy.initialDelayMs * 2 ** (failedAttempts - 1))
@@ -238,6 +287,35 @@ export function startConnection(
     }, delayMs)
     // An armed reconnect timer must never hold the process open on its own.
     reconnectTimer.unref()
+  }
+
+  /**
+   * Replace a generation whose MCP session the server has terminated.
+   *
+   * Without this the supervisor would never notice: the transport stayed usable,
+   * so no close signal fires and the plugin would keep sending a session the
+   * server has already forgotten (see `session.ts`). Closing the stale generation
+   * turns that state into the ordinary disconnect path, which reconnects,
+   * re-initializes, and re-syncs tools; the caller then re-sends its one call.
+   *
+   * @param stale - the generation whose session the server rejected.
+   * @returns the generation to re-send on, or undefined when none became live.
+   */
+  async function recoverSession(stale: Client): Promise<Client | undefined> {
+    if (disposed) return undefined
+    // Another call may have replaced the generation that failed before this one asked.
+    if (client !== stale) return client
+    recovery ??= (async () => {
+      try {
+        const live = waitForLiveGeneration()
+        generationDown(stale)
+        await waitForClose(stale.close().catch(() => {}))
+        return await live
+      } finally {
+        recovery = undefined
+      }
+    })()
+    return recovery
   }
 
   /**
@@ -317,6 +395,7 @@ export function startConnection(
     }
     if (!isCurrent(generation)) return
     connectedAt = Date.now()
+    settleWaiters(generation)
     if (failedAttempts > 0) ctx.logger.info(`${label}: reconnected and re-synced tools (attempt ${failedAttempts}/${policy.maxAttempts})`)
   }
 
@@ -340,8 +419,11 @@ export function startConnection(
 
   return {
     ready,
+    recoverSession,
     async dispose(): Promise<void> {
       disposed = true
+      // A recovery still waiting for a generation has one coming that never will.
+      settleWaiters(undefined)
       // Reject queued calls before closing the client: they have not reached
       // the server, so waiting for a slot this generation will never hand over
       // would strand them. Granted slots are untouched — their requests are
