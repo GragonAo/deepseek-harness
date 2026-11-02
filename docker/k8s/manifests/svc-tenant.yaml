@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: dsh-tenant
+  namespace: __NS_DSH__
+spec:
+  type: __SVC_TENANT_TYPE__
+  selector:
+    app: dsh-tenant-host
+  ports:
+    # 业务面 POST /api/<method>，管理面 POST /admin/<method>，接口清单在 /openapi.json。
+    - name: api
+      port: 8788
+      nodePort: __NP_TENANT__
+      targetPort: api

@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: __PVC_DSH_WS__
+  namespace: __NS_DSH__
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: __SIZE_DSH_WS__
+  storageClassName: __SC_RWX__
