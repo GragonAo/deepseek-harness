@@ -474,6 +474,62 @@ describe('AgentHttp', () => {
     }
   })
 
+  it('parks the mux source when the subscriber stops reading', async () => {
+    const { ctx, gateway } = await boot()
+    try {
+      const acmeU1 = createScopedSession(ctx, 'acme', 'user-1')
+      const available = 200
+      let produced = 0
+      gateway.events.mux = () => (async function * (): AsyncIterable<unknown> {
+        for (let index = 0; index < available; index += 1) {
+          produced += 1
+          yield { rpcId: `rpc-${String(index)}`, payload: { type: 'session/subscribed', sessionId: acmeU1 } }
+        }
+      })()
+      const response = await ctx.agentHttp.fetch(muxRequest(await issueToken('acme', 'user-1')))
+      const reader = response.body!.getReader()
+      // 200 frames are available and nobody is reading: the gateway stage plus this
+      // scoping stage hold one unit each, so an idle subscriber cannot make the
+      // process buffer the whole fan-out.
+      await new Promise<void>((resolve) => { setTimeout(resolve, 20) })
+      expect(produced).toBeLessThanOrEqual(2)
+      await reader.read()
+      await reader.read()
+      expect(produced).toBeLessThanOrEqual(4)
+      await reader.cancel()
+      const stopped = produced
+      await new Promise<void>((resolve) => { setTimeout(resolve, 20) })
+      expect(produced).toBe(stopped)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('drops a unit whose subscriber left while a read was in flight', async () => {
+    const { ctx, gateway } = await boot()
+    try {
+      const acmeU1 = createScopedSession(ctx, 'acme', 'user-1')
+      let release: (() => void) | undefined
+      gateway.events.mux = () => (async function * (): AsyncIterable<unknown> {
+        yield { rpcId: 'rpc-0', payload: { type: 'session/subscribed', sessionId: acmeU1 } }
+        await new Promise<void>((resolve) => { release = resolve })
+        yield { rpcId: 'rpc-1', payload: { type: 'session/subscribed', sessionId: acmeU1 } }
+      })()
+      const response = await ctx.agentHttp.fetch(muxRequest(await issueToken('acme', 'user-1')))
+      const reader = response.body!.getReader()
+      await reader.read()
+      await reader.read()
+      const parked = reader.read()
+      await new Promise<void>((resolve) => { setTimeout(resolve, 0) })
+      await reader.cancel()
+      expect(typeof release).toBe('function')
+      release?.()
+      await expect(parked).resolves.toMatchObject({ done: true })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('serves the /api carrier route over HTTP when a webServer is present', async () => {
     const ctx = new Context()
     await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })

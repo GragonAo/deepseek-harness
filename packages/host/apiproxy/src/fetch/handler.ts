@@ -206,35 +206,58 @@ function fullFrame(narrow: RpcRequest<MuxFrame | HostFrame>): ServerRequest {
 /**
  * Wrap a frame stream as an SSE Response; stops when req.signal aborts. An
  * impl throw mid-stream emits one stream/error frame and then closes.
+ *
+ * The body is pull-driven: `pull` asks the impl for exactly one frame per free
+ * queue slot, so a subscriber that stops reading (a suspended browser tab, a
+ * stalled proxy) parks the source instead of letting this process buffer its
+ * output. A push-driven `start` loop cannot say that — `enqueue` never blocks,
+ * and an unbounded queue behind a slow socket is how a streaming host converts
+ * one stall into host-wide memory growth and GC pauses that stall every other
+ * request on the same event loop.
  */
 function sseResponse(frames: AsyncIterable<RpcRequest<MuxFrame | HostFrame>>): Response {
   const encoder = new TextEncoder()
+  const iterator = frames[Symbol.asyncIterator]()
+  let connected = false
+  /** Set once the consumer cancels: a frame still in flight must not be enqueued. */
+  let detached = false
   const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
+    async pull(controller) {
       try {
         // Send an SSE comment line on open so clients/proxies see a live channel (the host
         // stream has no baseline frames and would otherwise emit zero bytes while idle;
         // a comment line is not a frame, so client frame parsing skips it naturally).
-        controller.enqueue(encoder.encode(': connected\n\n'))
-        for await (const narrow of frames) {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(fullFrame(narrow))}\n\n`))
+        if (!connected) {
+          connected = true
+          controller.enqueue(encoder.encode(': connected\n\n'))
+          return
         }
+        const next = await iterator.next()
+        // The consumer can cancel while the impl is producing this frame; enqueue-after-cancel
+        // is the one thing this loop must not do.
+        if (detached) return
+        if (next.done) {
+          controller.close()
+          return
+        }
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(fullFrame(next.value))}\n\n`))
       } catch (error: unknown) {
+        // A source that dies after the consumer left has no one left to tell.
+        if (detached) return
         // Mid-stream impl failure → one stream/error frame, then close: the client must see
         // the failure instead of a silent end (which reads as a normal disconnect). A fresh
         // rpcId is minted — this is a server-initiated push like any other frame.
         const failure: MuxFrame | HostFrame = { type: 'stream/error', error: { code: 'internal', message: String(error), details: {} } }
-        try {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(fullFrame({ rpcId: RpcId(randomUUID()), payload: failure }))}\n\n`))
-        } catch {
-          // Consumer already cancelled the stream: enqueue-after-cancel is the
-          // only reachable error, and there is no one left to tell.
-        }
-      } finally {
-        try {
-          controller.close()
-        } catch { /* already cancelled by the consumer: a double close is the only reachable error */ }
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(fullFrame({ rpcId: RpcId(randomUUID()), payload: failure }))}\n\n`))
+        controller.close()
       }
+    },
+    cancel() {
+      detached = true
+      // Best effort, and deliberately not awaited: the source may be parked on a frame
+      // that never arrives, and a consumer's cancel must not wait for it. The request
+      // signal is what actually ends the impl's own iteration.
+      void iterator.return?.()
     },
   })
   return new Response(stream, {

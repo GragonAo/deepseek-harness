@@ -10,7 +10,7 @@
 - **写按归属 (租户, 用户) 绑定。** store 在物化时（首次 `appendBatch`）及任何成功读取时捕获 (租户, 用户)，之后重用该绑定处理可能活过请求 `runWithTenant`+`runWithUser` 作用域的迟到异步 flush。对本进程从未物化的会话做请求作用域修复时回退到环境作用域。删除同样按该绑定定位行：`delete(id)` 解析归属作用域后，在单个事务中以 `WHERE id = $1 AND user_id = $2` 删除 `session_event` 与 `session_meta` 行，然后释放该 id 的绑定。绑定存在时，未认证作用域的删除也会落在该 id 的归属 schema 与用户上，与 append 的规则一致；绑定不存在时则需要环境租户与用户。
 - **检查持久一致性。** `session_meta.tenant_id` 与每个 header 一并存储；加载时拒绝任何 `tenant_id` 与环境租户不一致的行。
 
-`appendBatch`/`commitRepair` 在单个事务中运行，因此不存在撕裂尾部，`tornMarker` 从不发出。删除也在单个事务中运行，因此一个会话的行集合要么全部消失、要么全部保留；删除后 PostgreSQL 不会把已释放的页面归还操作系统，回收空间需要带外 `VACUUM`。
+`appendBatch`/`commitRepair` 在单个事务中运行，因此不存在撕裂尾部，`tornMarker` 从不发出。一次 flush 的事件按多行 `INSERT` 写入（每语句 200 行，仍在该事务内），而不是每个事件一条语句：一个流式轮次每个 token 产生一个 `assistant/chunk` 事件，逐事件语句会把一轮繁忙对话变成数千次串行往返，与同一事件循环上的其他请求争抢。删除也在单个事务中运行，因此一个会话的行集合要么全部消失、要么全部保留；删除后 PostgreSQL 不会把已释放的页面归还操作系统，回收空间需要带外 `VACUUM`。
 
 ## 配置
 

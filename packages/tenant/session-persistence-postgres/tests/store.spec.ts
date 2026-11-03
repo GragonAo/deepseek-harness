@@ -81,9 +81,25 @@ describe('PostgresSessionStore', () => {
     await store.appendBatch(header('s1'), [ev(2)], true)
     expect(executor.calls.some(c => c.text.includes(`${schema}.session_meta`) && c.text.includes('INSERT'))).toBe(true)
     const eventInsert = executor.calls.filter(c => c.text.includes(`${schema}.session_event`) && c.text.includes('INSERT'))
-    expect(eventInsert.length).toBeGreaterThanOrEqual(3)
-    // Every event insert carries the bound user id.
-    expect(eventInsert.every(c => c.values?.[1] === 'user-1')).toBe(true)
+    // One statement per flush, not one per event.
+    expect(eventInsert).toHaveLength(2)
+    // Both flushes carry the bound user id, one parameter set per row.
+    expect(eventInsert.every(c => c.values?.includes('user-1'))).toBe(true)
+  })
+
+  it('appends one flush as multi-row statements, splitting only at the row cap', async () => {
+    const executor = new RecordingExecutor()
+    const store = new PostgresSessionStore(executor)
+    const schema = tenantPartitionName(TenantId('acme'))
+    const many = Array.from({ length: 450 }, (_, seq) => ev(seq))
+    await scoped(tenant('acme'), 'user-1', () => store.appendBatch(header('s1'), many, false))
+    const inserts = executor.calls.filter(c => c.text.includes(`${schema}.session_event`) && c.text.includes('INSERT'))
+    // 200 rows per statement: 450 events become 3 statements.
+    expect(inserts.map(c => (c.values?.length ?? 0) / 4)).toEqual([200, 200, 50])
+    expect(inserts[0]?.text).toContain('($1, $2, $3, $4::jsonb)')
+    expect(inserts[0]?.text).toContain('($797, $798, $799, $800::jsonb)')
+    // Every event lands exactly once, in seq order.
+    expect(inserts.flatMap(c => (c.values ?? []).filter((_, index) => index % 4 === 2))).toEqual(many.map(event => event.seq))
   })
 
   it('returns undefined for a tenant that does not own the id', async () => {

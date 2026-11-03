@@ -364,14 +364,43 @@ function presetFailure(request: RpcRequest<unknown>, error: unknown): RpcRespons
   return undefined
 }
 
-/** Simple async queue: core callbacks push, the AsyncIterable pulls; abort/return cleans up. */
-class FrameQueue<F> {
+/**
+ * Frames one subscription may queue before the host stops serving it.
+ *
+ * A client that stops reading leaves its socket open — a suspended tab, a sleeping
+ * laptop — while every event of every attached session keeps landing in its queue,
+ * so an unbounded queue is not a slow client but an unbounded per-subscription heap.
+ * Ending the subscription closes its SSE body; the client's recovery is the one it
+ * already implements for a dropped stream: reopen (fresh baseline frames, replayed
+ * approvals and questions) and refetch history, which is also the only recovery that
+ * can put the answerable frames it missed back in front of the user.
+ */
+export const MAX_BUFFERED_FRAMES = 20_000
+
+/**
+ * Simple async queue: core callbacks push, the AsyncIterable pulls; abort/return
+ * cleans up. Exported for the test that owns the overflow decision.
+ */
+export class FrameQueue<F> {
   private buffer: F[] = []
   private waiter: (() => void) | undefined
   private done = false
 
+  /**
+   * @param onOverflow - reports a subscription the host stopped serving; the queue
+   * has already released its backlog by the time this runs.
+   */
+  constructor(private readonly onOverflow: () => void) {}
+
   push(item: F): void {
     if (this.done) return
+    if (this.buffer.length >= MAX_BUFFERED_FRAMES) {
+      // Releasing the backlog is the point: a reader this far behind starts over.
+      this.buffer = []
+      this.onOverflow()
+      this.end()
+      return
+    }
     this.buffer.push(item)
     this.waiter?.()
   }
@@ -3589,7 +3618,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
     events: {
       mux(_request, signal) {
-        const queue = new FrameQueue<RpcRequest<MuxFrame>>()
+        const queue = new FrameQueue<RpcRequest<MuxFrame>>(() => {
+          ctx.logger.warn(new Error(`events.mux subscriber fell ${String(MAX_BUFFERED_FRAMES)} frames behind; closing its stream so it resubscribes from a fresh baseline`))
+        })
         muxQueues.add(queue)
         for (const session of ctx.sessions.list()) {
           subscribeSession(queue, session)
@@ -3693,7 +3724,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       host(_request, signal) {
-        const queue = new FrameQueue<RpcRequest<HostFrame>>()
+        const queue = new FrameQueue<RpcRequest<HostFrame>>(() => {
+          ctx.logger.warn(new Error(`events.host subscriber fell ${String(MAX_BUFFERED_FRAMES)} frames behind; closing its stream so it resubscribes from a fresh baseline`))
+        })
         const committedWorkspaces = ctx.workspaceRegistry.list()
         const committedWorkspaceIds = new Set(
           committedWorkspaces.map(workspace => String(workspace.id)),

@@ -451,38 +451,57 @@ function filteredSseUnit(unit: string, owns: (sessionId: unknown) => boolean): s
   }
 }
 
-/** Re-emit an SSE byte stream with cross-tenant session frames dropped. */
+/**
+ * Re-emit an SSE byte stream with cross-tenant session frames dropped.
+ *
+ * Like the gateway's own SSE body, this stage is pull-driven: one delivered unit
+ * per free queue slot, so a subscriber that stops reading parks the source
+ * stream instead of growing this process's heap. Two push-driven stages in a row
+ * would let a single stalled tab buffer the whole fan-out.
+ */
 function scopedSseBody(body: ReadableStream<Uint8Array>, owns: (sessionId: unknown) => boolean): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder()
   const encoder = new TextEncoder()
+  const reader = body.getReader()
   let buffer = ''
+  let ended = false
+  /** Set once the consumer cancels: a read still in flight must not be enqueued. */
+  let detached = false
   return new ReadableStream<Uint8Array>({
-    start(controller) {
-      const reader = body.getReader()
-      void (async () => {
-        try {
-          for (;;) {
-            const next = await reader.read()
-            if (next.done) break
-            buffer += decoder.decode(next.value, { stream: true })
-            let boundary: number
-            while ((boundary = buffer.indexOf('\n\n')) >= 0) {
-              const unit = buffer.slice(0, boundary + 2)
-              buffer = buffer.slice(boundary + 2)
-              const kept = filteredSseUnit(unit, owns)
-              if (kept !== null) controller.enqueue(encoder.encode(kept))
-            }
-          }
+    async pull(controller) {
+      let out = ''
+      // One source read per pull at most: the loop stops as soon as this pull has
+      // something to deliver, so the decoded backlog never outgrows the queue slot.
+      while (out === '' && !ended) {
+        const next = await reader.read()
+        if (detached) return
+        if (next.done) {
+          ended = true
           buffer += decoder.decode()
-          if (buffer.length > 0) controller.enqueue(encoder.encode(buffer))
-          controller.close()
-        } catch (error: unknown) {
-          controller.error(error)
+          if (buffer.length > 0) {
+            out = buffer
+            buffer = ''
+          }
+          break
         }
-      })()
+        buffer += decoder.decode(next.value, { stream: true })
+        let boundary: number
+        while ((boundary = buffer.indexOf('\n\n')) >= 0) {
+          const unit = buffer.slice(0, boundary + 2)
+          buffer = buffer.slice(boundary + 2)
+          const kept = filteredSseUnit(unit, owns)
+          if (kept !== null) out += kept
+        }
+      }
+      if (out === '') {
+        controller.close()
+        return
+      }
+      controller.enqueue(encoder.encode(out))
     },
     cancel(reason) {
-      void body.cancel(reason)
+      detached = true
+      void reader.cancel(reason)
     },
   })
 }

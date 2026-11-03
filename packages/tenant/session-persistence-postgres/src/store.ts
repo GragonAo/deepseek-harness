@@ -51,6 +51,15 @@ function headerFromRow(row: Record<string, unknown>): SessionHeader {
 const META_COLUMNS = 'id, user_id, tenant_id, version, created_at, cwd, parent_session, seed_length, origin, delegation_depth, agent_preset'
 
 /**
+ * Events per multi-row INSERT statement (4 parameters each, far inside the wire
+ * protocol's limit). A flush of live events is one round trip per chunk instead
+ * of one per event: a streaming turn emits a chunk event per token, so a
+ * per-event statement turns one busy turn into thousands of sequential round
+ * trips that compete with every other request on the same event loop.
+ */
+const EVENT_ROWS_PER_STATEMENT = 200
+
+/**
  * The PostgreSQL session store. Implements {@link PersistenceBackend} with
  * rows of full-JSON events; `appendBatch` and `commitRepair` run in a single
  * transaction, so no torn tail exists and {@link StoredPrefix.tornMarker} is
@@ -201,12 +210,7 @@ export class PostgresSessionStore implements PersistenceBackend<never> {
           ],
         )
       }
-      for (const event of events) {
-        await tx.query(
-          `INSERT INTO ${schema}.session_event (id, user_id, seq, event) VALUES ($1, $2, $3, $4::jsonb)`,
-          [meta.id, user, event.seq, encodeJson(event)],
-        )
-      }
+      await this.insertEvents(tx, schema, meta.id, user, events)
       await tx.query(`UPDATE ${schema}.session_meta SET revision = revision + 1 WHERE id = $1`, [meta.id])
     })
     if (!isMaterialized) this.bindings.set(meta.id, { tenant, user })
@@ -222,12 +226,7 @@ export class PostgresSessionStore implements PersistenceBackend<never> {
     const schema = tenantPartitionName(tenant)
     await this.ensureSchema(schema)
     await this.executor.transaction(async (tx) => {
-      for (const event of closers) {
-        await tx.query(
-          `INSERT INTO ${schema}.session_event (id, user_id, seq, event) VALUES ($1, $2, $3, $4::jsonb)`,
-          [meta.id, user, event.seq, encodeJson(event)],
-        )
-      }
+      await this.insertEvents(tx, schema, meta.id, user, closers)
       await tx.query(`UPDATE ${schema}.session_meta SET revision = revision + 1 WHERE id = $1`, [meta.id])
     })
   }
@@ -279,6 +278,37 @@ export class PostgresSessionStore implements PersistenceBackend<never> {
   private assertTenantAgreement(row: Record<string, unknown>, tenantId: TenantId): void {
     if (row.tenant_id !== tenantId) {
       throw new Error(`session tenant_id '${String(row.tenant_id)}' disagrees with the ambient tenant '${tenantId}'; refuse to load`)
+    }
+  }
+
+  /**
+   * Append events as multi-row INSERTs, splitting into statements of
+   * {@link EVENT_ROWS_PER_STATEMENT} rows. Runs on the caller's transaction, so a
+   * flush stays all-or-nothing across its chunks.
+   * @param tx - the flush's transaction-scoped executor.
+   * @param schema - the tenant partition schema.
+   * @param id - the session id every row is keyed by.
+   * @param user - the owning user id every row is keyed by.
+   * @param events - the events to append, in seq order.
+   */
+  private async insertEvents(
+    tx: SqlExecutor,
+    schema: string,
+    id: SessionId,
+    user: UserId,
+    events: readonly SessionEvent[],
+  ): Promise<void> {
+    for (let start = 0; start < events.length; start += EVENT_ROWS_PER_STATEMENT) {
+      const values: unknown[] = []
+      const rows = events.slice(start, start + EVENT_ROWS_PER_STATEMENT).map((event, index) => {
+        const base = index * 4
+        values.push(id, user, event.seq, encodeJson(event))
+        return `($${String(base + 1)}, $${String(base + 2)}, $${String(base + 3)}, $${String(base + 4)}::jsonb)`
+      })
+      await tx.query(
+        `INSERT INTO ${schema}.session_event (id, user_id, seq, event) VALUES ${rows.join(', ')}`,
+        values,
+      )
     }
   }
 

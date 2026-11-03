@@ -730,6 +730,73 @@ describe('SSE streams through the carrier', () => {
     expect(frames).toHaveLength(2)
     expect(frames[1]?.payload).toMatchObject({ type: 'stream/error', error: { code: 'internal' } })
   })
+
+  it('parks the source when the consumer stops reading instead of buffering its output', async () => {
+    const available = 200
+    let produced = 0
+    const api = fakeApi()
+    api.events.mux = (_request, _signal) => (async function * (): AsyncGenerator<RpcRequest<MuxFrame>> {
+      for (let index = 0; index < available; index += 1) {
+        produced += 1
+        yield { rpcId: RpcId(`f${String(index)}`), payload: { type: 'session/subscribed', sessionId: 's' as never, lastSeq: index } }
+      }
+    })()
+    const response = await toFetchHandler(api).fetch(new Request('http://x/api/events.mux'))
+    const reader = response.body!.getReader()
+    // 200 frames are available and nobody is reading: production stays inside one
+    // queue slot instead of draining the source into the host's heap.
+    await new Promise<void>((resolve) => { setTimeout(resolve, 20) })
+    expect(produced).toBeLessThanOrEqual(1)
+    await reader.read()
+    await reader.read()
+    await reader.read()
+    expect(produced).toBeLessThanOrEqual(3)
+    await reader.cancel()
+    const stopped = produced
+    await new Promise<void>((resolve) => { setTimeout(resolve, 20) })
+    expect(produced).toBe(stopped)
+  })
+
+  it('drops a frame the consumer left while it was in flight', async () => {
+    let release: (() => void) | undefined
+    const api = fakeApi()
+    api.events.mux = (_request, _signal) => (async function * (): AsyncGenerator<RpcRequest<MuxFrame>> {
+      yield { rpcId: RpcId('f0'), payload: { type: 'session/subscribed', sessionId: 's' as never, lastSeq: 0 } }
+      await new Promise<void>((resolve) => { release = resolve })
+      yield { rpcId: RpcId('f1'), payload: { type: 'session/subscribed', sessionId: 's' as never, lastSeq: 1 } }
+    })()
+    const response = await toFetchHandler(api).fetch(new Request('http://x/api/events.mux'))
+    const reader = response.body!.getReader()
+    await reader.read()
+    await reader.read()
+    const parked = reader.read()
+    await new Promise<void>((resolve) => { setTimeout(resolve, 0) })
+    await reader.cancel()
+    expect(typeof release).toBe('function')
+    release?.()
+    await expect(parked).resolves.toMatchObject({ done: true })
+  })
+
+  it('ignores a source failure that lands after the consumer left', async () => {
+    let fail: ((error: Error) => void) | undefined
+    const api = fakeApi()
+    api.events.mux = (_request, _signal) => (async function * (): AsyncGenerator<RpcRequest<MuxFrame>> {
+      yield { rpcId: RpcId('f0'), payload: { type: 'session/subscribed', sessionId: 's' as never, lastSeq: 0 } }
+      await new Promise<void>((_resolve, reject) => { fail = reject })
+      yield { rpcId: RpcId('f1'), payload: { type: 'session/subscribed', sessionId: 's' as never, lastSeq: 1 } }
+    })()
+    const response = await toFetchHandler(api).fetch(new Request('http://x/api/events.mux'))
+    const reader = response.body!.getReader()
+    await reader.read()
+    await reader.read()
+    const parked = reader.read()
+    await new Promise<void>((resolve) => { setTimeout(resolve, 0) })
+    await reader.cancel()
+    expect(typeof fail).toBe('function')
+    // The consumer is gone: this failure has nobody to reach, and must not resurrect the stream.
+    fail?.(new Error('late source failure'))
+    await expect(parked).resolves.toMatchObject({ done: true })
+  })
 })
 
 describe('client respond and transport failures', () => {
