@@ -310,12 +310,30 @@ export interface TenantAppConfig {
   readonly surfaces?: SurfacesConfig
   /** 工具呈现方式与工具并发上限。 */
   readonly tools?: ToolsConfig
+  /** 文件面（`/files`）的可写范围；不给则只写 `session` 与 `user`。 */
+  readonly files?: FilesConfig
   /** 逐行覆盖组合清单：停用某一行或追加它的配置。 */
   readonly plugins?: Readonly<Record<string, PluginOverride>>
   /** 要接入的 MCP 服务器。 */
   readonly mcpServers?: readonly McpServerConfig[]
   /** 每次 MCP 工具调用随 `params._meta` 上送的入站请求头。省略则一个都不送。 */
   readonly mcpMeta?: McpMetaConfig
+}
+
+/**
+ * `/files` 文件面里业务侧能写什么。
+ *
+ * 作用域根由 `tenants.usersRoot` 与 `sandbox.systemRoot` 给出，这里只说可写范围：报告模板这类
+ * 主体自己维护的跨案件资产落在 `global/<目录>/`，要把 `global` 列进 `writableScopes` 才写得进去。
+ * 沙箱侧的写权限由它的挂载决定，与这里无关。
+ */
+export interface FilesConfig {
+  /**
+   * 业务侧经文件面可以写（并删除）的作用域名：`session`、`user`、`case`、`global`、`system`。
+   *
+   * 不给时按 `session` 与 `user` 起步；写错的作用域名在启动时报错，而不是让这一项静默失效。
+   */
+  readonly writableScopes?: readonly string[]
 }
 
 /** 入站请求头到 MCP `_meta` 的映射。 */

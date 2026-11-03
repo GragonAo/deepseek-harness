@@ -30,6 +30,8 @@ The face also gained `DELETE /files/<scope>/<path>`:
 
 The existing write semantics are unchanged: temp file + rename, ETag as `"<size>-<mtimeNs>"`, `If-Match`/`If-None-Match`.
 
+The tenant host that mounts this face reads the same set from `files.writableScopes` in `tenant.config.yaml`, so a deployment states it once per layer it owns: the file face validates it at load, and the tenant app passes only what the deployment wrote.
+
 Write authority on this face is business-side only. Sandbox mount policy is a different setting (`caseReadOnly` / `usersReadOnly`, owned by the container providers): opening `global` here does **not** give the model inside the sandbox write access to `/global`.
 
 ## Alternatives considered

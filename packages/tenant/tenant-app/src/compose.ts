@@ -232,6 +232,7 @@ function staticMounts(config: TenantAppConfig): readonly StaticMount[] {
       mount: async ctx => ctx.plugin(TenantFsHttp, {
         usersRoot: config.tenants.usersRoot,
         ...(sandbox.systemRoot !== undefined ? { systemRoot: sandbox.systemRoot } : {}),
+        ...(config.files?.writableScopes !== undefined ? { writableScopes: [...config.files.writableScopes] } : {}),
       }),
     },
     {

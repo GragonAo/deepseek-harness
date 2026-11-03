@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-08-13-tenant-file-face-writable-scopes.md
-2026-08-13-tenant-file-face-writable-scopes.md: e1d50f6fc9fe2db418cd8cb2286ed80b41b37396
-2026-08-13-tenant-file-face-writable-scopes.zh.md: 1b21b3b193f3573cddd4a581742a078143b9ab23
+2026-08-13-tenant-file-face-writable-scopes.md: 616fb324edad3ddceed2faac088984d8d3ae37cd
+2026-08-13-tenant-file-face-writable-scopes.zh.md: 29f85d63c0f3b37e05b5e3cb0a3754e6ccb10738

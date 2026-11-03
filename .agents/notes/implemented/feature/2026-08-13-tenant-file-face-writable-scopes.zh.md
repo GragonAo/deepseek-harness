@@ -30,6 +30,8 @@ tenant-fs-http:
 
 既有的写语义不变：临时文件 + rename、ETag 形如 `"<size>-<mtimeNs>"`、`If-Match`/`If-None-Match`。
 
+挂载这个面的租户宿主从 `tenant.config.yaml` 的 `files.writableScopes` 读同一份清单：部署在每一层各说一次它自己拥有的那份口径——文件面在装配期校验，租户应用只传部署写下的值。
+
 这个面上的写权限只属于业务侧。沙箱的挂载策略是另一个设置（`caseReadOnly` / `usersReadOnly`，由容器provider 拥有）：在这里放开 `global`，**不会**让沙箱里的模型获得 `/global` 的写权限。
 
 ## 曾考虑的替代方案

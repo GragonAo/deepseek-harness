@@ -30,6 +30,7 @@ dsh-tenant --config /etc/dsh/tenant.config.yaml
 | `model` / `web` / `telemetry` | 默认模型、检索用的 API key 环境变量名、遥测端点。 |
 | `surfaces` | 业务面 openapi/console 与管理面 openapi 的开关。 |
 | `tools` | 工具呈现方式（`code`/`native`/`both`，默认 `both`）与 `run_code` 子调用的并发上限。 |
+| `files` | 文件面 `/files` 业务侧可写（并可删除）的作用域名，默认只有 `session` 与 `user`；用户全局目录里的跨案件资产（报告模板）要在 `writableScopes` 里点名 `global` 才写得进去。 |
 | `plugins` | 逐行覆盖组合清单：停用某一行，或追加它的配置。 |
 | `mcpServers` | 要接入的 MCP 服务器列表：`serverName`、`transport: streamable-http`、`url`、可选的 `headers`、每条自己的工具调用并发策略与上限、必须串行的工具名单与单次调用超时，以及初次连不上时是否让这一行启动失败。 |
 | `mcpMeta` | 每次 MCP 工具调用随 `params._meta` 上送的入站请求头：`fromHeaders` 是 `_meta` 键 → 请求头名（大小写不敏感）。省略则一个都不送。 |

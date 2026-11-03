@@ -56,6 +56,12 @@ surfaces:
   console: false
   adminOpenapi: true
 
+# 文件面 /files 里业务侧能写（并能删）哪些作用域。省略时只有 session 与 user。
+# 报告模板这类主体自己维护的跨案件资产放在 global/<目录>/，把它列进来才写得进去；
+# 沙箱那一侧的写权限由挂载决定，与这里无关。
+# files:
+#   writableScopes: [session, user, global]
+
 sandbox:
   # 本地开发用 docker；生产改成 k8s，并把 namespace 与 image 填上。
   backend: docker

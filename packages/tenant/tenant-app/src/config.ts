@@ -278,7 +278,7 @@ function validate(config: Record<string, unknown>): TenantAppConfig {
   const root = new Reader('配置', config)
   root.rejectUnknown([
     'http', 'database', 'auth', 'admin', 'tenants', 'sandbox',
-    'permissions', 'model', 'web', 'telemetry', 'surfaces', 'tools', 'plugins', 'mcpServers', 'mcpMeta',
+    'permissions', 'model', 'web', 'telemetry', 'surfaces', 'tools', 'files', 'plugins', 'mcpServers', 'mcpMeta',
   ])
 
   const http = readHttp(root.child('http'))
@@ -293,6 +293,7 @@ function validate(config: Record<string, unknown>): TenantAppConfig {
   const telemetry = readTelemetry(root.optionalChild('telemetry'))
   const surfaces = readSurfaces(root.optionalChild('surfaces'))
   const tools = readTools(root.optionalChild('tools'))
+  const files = readFiles(root.optionalChild('files'))
   const plugins = readPlugins(root.optionalChild('plugins'))
   const mcpServers = readMcpServers(root)
   const mcpMeta = readMcpMeta(root)
@@ -310,6 +311,7 @@ function validate(config: Record<string, unknown>): TenantAppConfig {
     ...(telemetry !== undefined ? { telemetry } : {}),
     ...(surfaces !== undefined ? { surfaces } : {}),
     ...(tools !== undefined ? { tools } : {}),
+    ...(files !== undefined ? { files } : {}),
     ...(plugins !== undefined ? { plugins } : {}),
     ...(mcpServers !== undefined ? { mcpServers } : {}),
     ...(mcpMeta !== undefined ? { mcpMeta } : {}),
@@ -515,6 +517,20 @@ function readTools(reader: Reader | undefined): TenantAppConfig['tools'] {
   return {
     ...present('mode', reader.optionalOneOf('mode', ['native', 'code', 'both'] as const)),
     ...present('maxParallelSubCalls', reader.optionalPositiveInteger('maxParallelSubCalls')),
+  }
+}
+
+/**
+ * 文件面的可写范围。唯一一项是可省的作用域名单：省下时不动文件面的默认（`session`、`user`），
+ * 让"某个部署把 `global` 交给业务侧"成为一次显式表态，而不是默认行为。
+ * @param reader - `files` 段；没写这一段时为 `undefined`。
+ * @returns 已校验的文件面配置；未配置时为 `undefined`。
+ */
+function readFiles(reader: Reader | undefined): TenantAppConfig['files'] {
+  if (reader === undefined) return undefined
+  reader.rejectUnknown(['writableScopes'])
+  return {
+    ...present('writableScopes', reader.optionalStringArray('writableScopes')),
   }
 }
 
