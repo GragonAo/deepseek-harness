@@ -9,12 +9,18 @@
  *
  * - `session/<sessionId>/<path>` — that session's working directory (writable)
  * - `user/<path>` — the subject's work directory in this case (writable)
- * - `case/<path>` — the case's work directory (read-only)
- * - `global/<path>` — the subject's cross-case work directory (read-only)
- * - `system/<path>` — the deployment's system tree (read-only)
+ * - `case/<path>` — the case's work directory (read-only by default)
+ * - `global/<path>` — the subject's cross-case work directory (read-only by default)
+ * - `system/<path>` — the deployment's system tree (read-only by default)
+ *
+ * A scope outside the two defaults accepts a write only when the deployment names
+ * it in `writableScopes`: an asset the subject maintains across cases (report
+ * templates) lives in `global`, and the business side is the only writer that
+ * exists for it — the sandbox mount stays read-only regardless of this setting.
  *
  * `GET` reads bytes, `HEAD` reads the headers (which carry the ETag), `PUT`
- * writes bytes, and `GET /{prefix}/{scope}?path=<dir>` lists a directory. The
+ * writes bytes, `DELETE` removes one file, and
+ * `GET /{prefix}/{scope}?path=<dir>` lists a directory. The
  * ETag is derived from the file's size and modification time, so it changes on
  * any write: a client reads, edits, and writes back with `If-Match`, and a
  * concurrent writer makes that write answer `412` instead of silently winning.
@@ -41,7 +47,7 @@ import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { TenantError, UserId } from '@deepseek-ai/dsh-tenant'
 import { TenantAuthError } from '@deepseek-ai/dsh-tenant-auth'
 import z from '@deepseek-ai/schemastery'
-import { decodeSegments, plainSegments, resolveTarget, scopeRoots } from './roots.ts'
+import { DEFAULT_WRITABLE_SCOPES, FILE_SCOPES, decodeSegments, plainSegments, resolveTarget, scopeRoots } from './roots.ts'
 import type { FileScope, ScopeRoot, Target } from './roots.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -92,6 +98,13 @@ export interface Config {
   systemRoot?: string
   /** Largest accepted `PUT` body in bytes. */
   maxBytes?: number
+  /**
+   * Scopes this deployment accepts a write or a delete into, as scope names.
+   * Defaults to `session` and `user`; naming another one (typically `global`,
+   * whose directories hold cross-case assets a subject maintains) is the only way
+   * to let the business side write it. An unknown name refuses to load.
+   */
+  writableScopes?: string[]
 }
 
 /** One entry of a directory listing. */
@@ -116,10 +129,15 @@ export class TenantFsHttp extends Service {
     usersRoot: z.string(),
     systemRoot: z.string(),
     maxBytes: z.natural().min(1).default(DEFAULT_MAX_BYTES),
+    writableScopes: z.array(z.string()).default([...DEFAULT_WRITABLE_SCOPES]),
   })
+
+  /** Scopes this deployment accepts a write or a delete into. */
+  private readonly writableScopes: ReadonlySet<FileScope>
 
   constructor(ctx: Context, readonly config: Config) {
     super(ctx, 'tenantFsHttp')
+    this.writableScopes = resolveWritableScopes(config.writableScopes ?? [...DEFAULT_WRITABLE_SCOPES])
     // The route is an optional-server contribution: a headless context still
     // serves `fetch` for in-process callers, and a context with a `webServer`
     // also answers HTTP on the same prefix.
@@ -167,6 +185,7 @@ export class TenantFsHttp extends Service {
         subject,
         usersRoot: this.config.usersRoot,
         systemRoot: this.config.systemRoot,
+        writableScopes: this.writableScopes,
       })
       return await this.serve(request, roots)
     } catch (error: unknown) {
@@ -192,8 +211,8 @@ export class TenantFsHttp extends Service {
       return jsonError(404, 'file-not-found', `不在 ${prefix} 之下：${url.pathname}`)
     }
     const method = request.method
-    if (method !== 'GET' && method !== 'HEAD' && method !== 'PUT') {
-      return jsonError(405, 'method-not-allowed', `${method} 不支持：文件面只有 GET、HEAD 与 PUT`, { allow: 'GET, HEAD, PUT' })
+    if (method !== 'GET' && method !== 'HEAD' && method !== 'PUT' && method !== 'DELETE') {
+      return jsonError(405, 'method-not-allowed', `${method} 不支持：文件面只有 GET、HEAD、PUT 与 DELETE`, { allow: 'GET, HEAD, PUT, DELETE' })
     }
     const raw = url.pathname.slice(prefix.length).split('/').filter(segment => segment.length > 0)
     const scope = raw[0]
@@ -203,12 +222,17 @@ export class TenantFsHttp extends Service {
     // A bare scope path lists a directory; any deeper path names an entry. The
     // listing carries its directory in `?path=`, which arrives already decoded.
     if (raw.length === 1) {
-      if (method === 'PUT') return jsonError(400, 'file-path-invalid', '要写的文件需要一个名字，不能写整个作用域')
+      // A whole scope is never the unit of a write or a delete: the caller names
+      // the one file it changes, and nothing else follows from it.
+      if (method === 'PUT' || method === 'DELETE') {
+        return jsonError(400, 'file-path-invalid', `要${method === 'PUT' ? '写' : '删'}的文件需要一个名字，不能整个作用域一起${method === 'PUT' ? '写' : '删'}`)
+      }
       const requested = plainSegments((url.searchParams.get('path') ?? '').split('/'))
       return await this.list(roots, scope, requested)
     }
     const segments = decodeSegments(raw.slice(1))
     if (method === 'PUT') return await this.put(request, roots, scope, segments)
+    if (method === 'DELETE') return await this.remove(roots, scope, segments)
     return await this.read(request, roots, scope, segments, method === 'HEAD')
   }
 
@@ -355,6 +379,41 @@ export class TenantFsHttp extends Service {
   }
 
   /**
+   * Remove one file inside a writable scope.
+   *
+   * A scope the deployment did not name in `writableScopes` answers `403`: the
+   * authority to write a directory is the authority to remove from it, and
+   * splitting the two would let a caller destroy what it may not replace.
+   * Directories are refused: whether a directory's contents go with it is a
+   * business decision this byte channel cannot make for itself.
+   * @param roots - the scope table for the request.
+   * @param scope - the scope name from the URL.
+   * @param segments - the file's segments, or `undefined` when one is unsafe.
+   * @returns the removal acknowledgement, or the failure for that path.
+   */
+  private async remove(
+    roots: ReadonlyMap<FileScope, ScopeRoot>,
+    scope: string,
+    segments: readonly string[] | undefined,
+  ): Promise<Response> {
+    const target = await resolveTarget(roots, scope, segments)
+    if (!target.ok) return failureResponse(target)
+    const root = target.root
+    if (!root.writable) {
+      return jsonError(403, 'file-readonly', `${root.scope} 作用域是只读的：${root.dir} 由业务侧或运维写入，沙箱与前端都只读`)
+    }
+    const info = await statOrUndefined(target.hostPath)
+    if (info === undefined) {
+      return jsonError(404, 'file-not-found', `${root.scope} 作用域里没有这个文件：${target.relative}`)
+    }
+    if (info.isDirectory()) {
+      return jsonError(409, 'file-is-directory', `${target.relative} 是目录；文件面只删文件，删目录由业务侧决定`)
+    }
+    await unlink(target.hostPath)
+    return json(200, { scope: root.scope, path: target.relative, removed: true })
+  }
+
+  /**
    * Read the request body under the byte cap.
    * @param request - the request to read.
    * @returns the body, or the `413` response to answer instead.
@@ -370,6 +429,22 @@ export class TenantFsHttp extends Service {
     }
     return buffer
   }
+}
+
+/**
+ * Resolve the writable-scope configuration, refusing a name no scope answers.
+ *
+ * A misspelled scope would otherwise read as "this deployment keeps that scope
+ * read-only" — a write silently refused for a reason nobody typed.
+ * @param configured - scope names from the deployment's configuration.
+ * @returns those names as a set the scope table can ask.
+ */
+function resolveWritableScopes(configured: readonly string[]): ReadonlySet<FileScope> {
+  const unknown = configured.filter(name => !(FILE_SCOPES as readonly string[]).includes(name))
+  if (unknown.length > 0) {
+    throw new Error(`writableScopes 里有不认识的作用域：${unknown.join('、')}；可用的是 ${FILE_SCOPES.join('、')}`)
+  }
+  return new Set(configured as FileScope[])
 }
 
 /**

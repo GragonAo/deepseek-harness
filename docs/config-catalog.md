@@ -2686,7 +2686,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/skill/skill-install/src/index.ts:57`](../packages/skill/skill-install/src/index.ts)
+Source: [`packages/skill/skill-install/src/index.ts:56`](../packages/skill/skill-install/src/index.ts)
 
 <a id="deepseek-aidsh-skill-tier"></a>
 
@@ -3236,10 +3236,17 @@ export interface Config {
   systemRoot?: string
   /** Largest accepted `PUT` body in bytes. */
   maxBytes?: number
+  /**
+   * Scopes this deployment accepts a write or a delete into, as scope names.
+   * Defaults to `session` and `user`; naming another one (typically `global`,
+   * whose directories hold cross-case assets a subject maintains) is the only way
+   * to let the business side write it. An unknown name refuses to load.
+   */
+  writableScopes?: string[]
 }
 ```
 
-Source: [`packages/tenant/fs-http/src/index.ts:86`](../packages/tenant/fs-http/src/index.ts)
+Source: [`packages/tenant/fs-http/src/index.ts:92`](../packages/tenant/fs-http/src/index.ts)
 
 <a id="deepseek-aidsh-tenant-questions"></a>
 

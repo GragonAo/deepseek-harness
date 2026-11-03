@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -188,6 +188,82 @@ describe('file surface', () => {
     }
   })
 
+  it('writes and deletes inside a scope the deployment opened, and only there', async () => {
+    const deployment = layout()
+    const opened = await boot(deployment, { config: { writableScopes: ['user', 'global'] } })
+    try {
+      const created = await opened.ctx.tenantFsHttp.fetch(
+        request(opened.token, '/files/global/报告模板/初核模板.docx', { method: 'PUT', body: Buffer.from('模板') }),
+      )
+      expect(created.status).toBe(200)
+      // The sandbox mount stays read-only: only this side gained the write.
+      expect(readFileSync(join(deployment.usersRoot, 'user-1', 'work', '报告模板', '初核模板.docx')).toString()).toBe('模板')
+
+      const listed = await opened.ctx.tenantFsHttp.fetch(
+        request(opened.token, `/files/global?path=${encodeURIComponent('报告模板')}`),
+      )
+      const listing = await listed.json() as { writable: boolean; entries: { name: string }[] }
+      expect(listing.writable).toBe(true)
+      expect(listing.entries.map(entry => entry.name)).toEqual(['初核模板.docx'])
+
+      const removed = await opened.ctx.tenantFsHttp.fetch(
+        request(opened.token, '/files/global/报告模板/初核模板.docx', { method: 'DELETE' }),
+      )
+      expect(removed.status).toBe(200)
+      expect(await removed.json()).toEqual({ scope: 'global', path: '报告模板/初核模板.docx', removed: true })
+      expect(existsSync(join(deployment.usersRoot, 'user-1', 'work', '报告模板', '初核模板.docx'))).toBe(false)
+    } finally {
+      await opened.ctx.fiber.dispose()
+    }
+
+    const closed = await boot(deployment)
+    try {
+      for (const path of ['/files/case/case-plan.md', '/files/global/global.md', '/files/system/skills/readme.md']) {
+        const response = await closed.ctx.tenantFsHttp.fetch(request(closed.token, path, { method: 'DELETE' }))
+        expect(response.status, path).toBe(403)
+        expect((await response.json() as { error: { code: string } }).error.code, path).toBe('file-readonly')
+      }
+      expect(existsSync(join(deployment.usersRoot, 'user-1', 'work', 'global.md'))).toBe(true)
+    } finally {
+      await closed.ctx.fiber.dispose()
+    }
+  })
+
+  it('refuses a delete that names no file, a missing file, or a directory', async () => {
+    const deployment = layout()
+    mkdirSync(join(deployment.workspaceRoot, 'users', 'user-1', 'work', 'dir'))
+    const { ctx, token } = await boot(deployment)
+    try {
+      const bare = await ctx.tenantFsHttp.fetch(request(token, '/files/user', { method: 'DELETE' }))
+      expect(bare.status).toBe(400)
+      const missing = await ctx.tenantFsHttp.fetch(request(token, '/files/user/none.md', { method: 'DELETE' }))
+      expect(missing.status).toBe(404)
+      expect((await missing.json() as { error: { code: string } }).error.code).toBe('file-not-found')
+      const directory = await ctx.tenantFsHttp.fetch(request(token, '/files/user/dir', { method: 'DELETE' }))
+      expect(directory.status).toBe(409)
+      expect((await directory.json() as { error: { code: string } }).error.code).toBe('file-is-directory')
+      expect(existsSync(join(deployment.workspaceRoot, 'users', 'user-1', 'work', 'dir'))).toBe(true)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('refuses to load when a configured writable scope is not a scope at all', async () => {
+    const deployment = layout()
+    const ctx = new Context()
+    try {
+      new FakeAuth(ctx)
+      await ctx.plugin(TenantRegistry)
+      await expect(ctx.plugin(TenantFsHttp, {
+        usersRoot: deployment.usersRoot,
+        systemRoot: deployment.systemRoot,
+        writableScopes: ['global', 'globel'],
+      })).rejects.toThrow(/globel/)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('refuses a write into every read-only scope', async () => {
     const deployment = layout()
     const { ctx, token } = await boot(deployment)
@@ -305,9 +381,9 @@ describe('file surface', () => {
       const missing = await ctx.tenantFsHttp.fetch(request(token, '/files/user/none.md'))
       expect(missing.status).toBe(404)
       expect((await missing.json() as { error: { code: string } }).error.code).toBe('file-not-found')
-      const refused = await ctx.tenantFsHttp.fetch(request(token, '/files/user/notes.md', { method: 'DELETE' }))
+      const refused = await ctx.tenantFsHttp.fetch(request(token, '/files/user/notes.md', { method: 'PATCH' }))
       expect(refused.status).toBe(405)
-      expect(refused.headers.get('allow')).toBe('GET, HEAD, PUT')
+      expect(refused.headers.get('allow')).toBe('GET, HEAD, PUT, DELETE')
     } finally {
       await ctx.fiber.dispose()
     }

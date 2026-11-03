@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 import { TenantId, UserId } from '@deepseek-ai/dsh-tenant'
 import type { Tenant } from '@deepseek-ai/dsh-tenant'
 import { decodeSegments, plainSegments, resolveTarget, scopeRoots } from '../src/roots.ts'
+import type { FileScope } from '../src/roots.ts'
 
 function tenant(): Tenant {
   return { id: TenantId('acme'), name: 'acme', dataRoot: '/data/acme', workspaceRoot: '/ws/acme' }
@@ -24,12 +25,18 @@ function layout(): { root: string; usersRoot: string; systemRoot: string; worksp
   return { root, usersRoot, systemRoot, workspaceRoot }
 }
 
-function scoped(workspaceRoot: string, usersRoot?: string, systemRoot?: string) {
+function scoped(
+  workspaceRoot: string,
+  usersRoot?: string,
+  systemRoot?: string,
+  writableScopes?: ReadonlySet<FileScope>,
+) {
   return scopeRoots({
     tenant: { ...tenant(), workspaceRoot },
     subject: UserId('user-1'),
     ...(usersRoot === undefined ? {} : { usersRoot }),
     ...(systemRoot === undefined ? {} : { systemRoot }),
+    ...(writableScopes === undefined ? {} : { writableScopes }),
   })
 }
 
@@ -41,6 +48,13 @@ describe('file scopes', () => {
     expect(roots.get('case')).toEqual({ scope: 'case', dir: join('/ws/acme', 'work'), writable: false })
     expect(roots.get('global')).toEqual({ scope: 'global', dir: join('/users', 'user-1', 'work'), writable: false })
     expect(roots.get('system')).toEqual({ scope: 'system', dir: '/sys', writable: false })
+  })
+
+  it('marks a scope writable only when the deployment names it, and otherwise keeps the two defaults', () => {
+    const opened = scoped('/ws/acme', '/users', '/sys', new Set<FileScope>(['global']))
+    expect(opened.get('global')?.writable).toBe(true)
+    expect(opened.get('user')?.writable).toBe(false)
+    expect(opened.get('session')?.writable).toBe(false)
   })
 
   it('leaves a scope out of the table when the deployment does not configure its root', () => {

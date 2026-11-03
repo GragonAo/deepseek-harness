@@ -33,12 +33,17 @@ export const FILE_SCOPES = ['session', 'user', 'case', 'global', 'system'] as co
 export type FileScope = (typeof FILE_SCOPES)[number]
 
 /**
- * Scopes that accept a write. The other three are the read side of a deployment:
- * the case and global work directories are written by the business layer, and the
- * system tree by the operator, so a browser acting for one subject must not
- * change them.
+ * Scopes that accept a write when a deployment does not say otherwise: the
+ * subject's own session and case work directories. The other three are the read
+ * side of a deployment — the case and global work directories are written by the
+ * business layer, and the system tree by the operator — so a browser acting for
+ * one subject must not change them.
+ *
+ * A deployment that keeps cross-case assets the subject maintains itself (report
+ * templates, for instance) names those scopes in `writableScopes` rather than
+ * forking the surface: see `scopeRoots`.
  */
-const WRITABLE_SCOPES: ReadonlySet<FileScope> = new Set<FileScope>(['session', 'user'])
+export const DEFAULT_WRITABLE_SCOPES: ReadonlySet<FileScope> = new Set<FileScope>(['session', 'user'])
 
 /** Inputs the scope table is derived from. */
 export interface ScopeRootsInput {
@@ -50,6 +55,12 @@ export interface ScopeRootsInput {
   usersRoot?: string | undefined
   /** Deployment root of the system tree; `system` is absent without it. */
   systemRoot?: string | undefined
+  /**
+   * Scopes this deployment accepts a write into; defaults to
+   * {@link DEFAULT_WRITABLE_SCOPES}. A name here only widens the *business*
+   * side of one scope — what the sandbox may write is decided by its mounts.
+   */
+  writableScopes?: ReadonlySet<FileScope> | undefined
 }
 
 /** One scope's host root. */
@@ -72,16 +83,17 @@ export interface ScopeRoot {
  */
 export function scopeRoots(input: ScopeRootsInput): ReadonlyMap<FileScope, ScopeRoot> {
   const { tenant, subject, usersRoot, systemRoot } = input
+  const writable = input.writableScopes ?? DEFAULT_WRITABLE_SCOPES
   const caseUser = join(tenant.workspaceRoot, TENANT_USERS_DIR_NAME, String(subject))
   const roots: ScopeRoot[] = [
-    { scope: 'session', dir: join(caseUser, TENANT_SESSIONS_DIR_NAME), writable: WRITABLE_SCOPES.has('session') },
-    { scope: 'user', dir: join(caseUser, TENANT_WORK_DIR_NAME), writable: WRITABLE_SCOPES.has('user') },
-    { scope: 'case', dir: join(tenant.workspaceRoot, TENANT_WORK_DIR_NAME), writable: WRITABLE_SCOPES.has('case') },
+    { scope: 'session', dir: join(caseUser, TENANT_SESSIONS_DIR_NAME), writable: writable.has('session') },
+    { scope: 'user', dir: join(caseUser, TENANT_WORK_DIR_NAME), writable: writable.has('user') },
+    { scope: 'case', dir: join(tenant.workspaceRoot, TENANT_WORK_DIR_NAME), writable: writable.has('case') },
   ]
   if (usersRoot !== undefined) {
-    roots.push({ scope: 'global', dir: join(usersRoot, String(subject), TENANT_WORK_DIR_NAME), writable: WRITABLE_SCOPES.has('global') })
+    roots.push({ scope: 'global', dir: join(usersRoot, String(subject), TENANT_WORK_DIR_NAME), writable: writable.has('global') })
   }
-  if (systemRoot !== undefined) roots.push({ scope: 'system', dir: systemRoot, writable: WRITABLE_SCOPES.has('system') })
+  if (systemRoot !== undefined) roots.push({ scope: 'system', dir: systemRoot, writable: writable.has('system') })
   return new Map(roots.map(root => [root.scope, root]))
 }
 

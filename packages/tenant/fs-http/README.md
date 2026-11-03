@@ -11,10 +11,12 @@
 | `session` | `<workspaceRoot>/users/<subject>/sessions/<sessionId>` | `/sessions/<sessionId>` | 是 |
 | `user` | `<workspaceRoot>/users/<subject>/work` | `/workspace` | 是 |
 | `case` | `<workspaceRoot>/work` | `/case` | 否 |
-| `global` | `<usersRoot>/<subject>/work` | `/global` | 否 |
-| `system` | `<systemRoot>` | `<systemRoot>`（同路径） | 否 |
+| `global` | `<usersRoot>/<subject>/work` | `/global` | 见 `writableScopes` |
+| `system` | `<systemRoot>` | `<systemRoot>`（同路径） | 见 `writableScopes` |
 
-请求形状是 `GET|HEAD|PUT /files/<scope>/<path>`，会话作用域把会话 id 写成第一段：`/files/session/<sessionId>/notes.md`。三个只读作用域是部署的读侧——案件与全局工作目录由业务侧写入、系统树由运维写入——所以任何写都答 `403 file-readonly`，而不是静默失败。表的可写列说的是**业务侧经本面**能不能写；沙箱侧能不能写 `/case` 与 `/global` 由 `caseReadOnly`/`usersReadOnly` 决定，是另一件事。
+请求形状是 `GET|HEAD|PUT|DELETE /files/<scope>/<path>`，会话作用域把会话 id 写成第一段：`/files/session/<sessionId>/notes.md`。默认只有 `session` 与 `user` 接受写：其余三个是部署的读侧——案件与全局工作目录由业务侧写入、系统树由运维写入——写它们答 `403 file-readonly`，而不是静默失败。
+
+一个部署若把某个跨案件资产交给主体自己维护（报告模板就在 `global/` 下），在 `writableScopes` 里列出那个作用域即可，不必另开一条通道：列出之后该作用域的 `PUT`/`DELETE` 与 `user` 同权，未列出的仍是 `403`。表的可写列说的是**业务侧经本面**能不能写；沙箱侧能不能写 `/case` 与 `/global` 由 `caseReadOnly`/`usersReadOnly` 决定，是另一件事——放开 `global` 不会让沙箱里的模型获得写权。
 
 `GET /files/<scope>?path=<dir>` 列目录，返回 `{ scope, path, writable, entries }`：每个文件条目带 `size`、`modifiedAt` 与它的 `etag`，因此前端点开一个文件就能直接读、改、带 `If-Match` 写回，不需要先发一次 `HEAD`。写入过程中的临时文件（`.<name>.dsh-tmp.<hex>`）不出现在清单里。
 
@@ -27,6 +29,7 @@
 | `GET` | 读一个文件的字节，或列一个目录 | `200` + 字节（`etag`、`last-modified`、`content-type`、`content-length`）；`304` 且无正文当 `If-None-Match` 命中当前版本 |
 | `HEAD` | 只取头部 | `200` + 同样的头部、无正文 |
 | `PUT` | 写一个文件的字节 | `200` + `{ scope, path, size, etag }` |
+| `DELETE` | 删一个文件（不删目录） | `200` + `{ scope, path, removed: true }`；文件不存在答 `404 file-not-found`，是目录答 `409 file-is-directory` |
 
 写入先落到同目录的临时文件、再 `rename` 就位：读者看到的要么是旧版本、要么是新版本，不会是写了一半的文件；中断的写不会在清单里留下残留条目。
 
@@ -62,7 +65,10 @@
     usersRoot: /opt/dsh/.dsh/users
     systemRoot: /opt/dsh/.dsh/system
     maxBytes: 67108864
+    writableScopes: [session, user]   # 要把 global 交给业务侧维护就写成 [session, user, global]
 ```
+
+`writableScopes` 默认 `[session, user]`，只认五个作用域名：写错一个名字会让插件在装配时抛错，而不是安静地读成「这个作用域仍然只读」。
 
 `path` 默认 `/files`。`usersRoot` 与 `systemRoot` 只决定 `global` 与 `system` 两个作用域：不配就没有那个作用域，请求答 `503 file-scope-unavailable`（`session`、`user`、`case` 三个作用域由租户记录的 `workspaceRoot` 决定，无需配置）。`maxBytes` 默认 64 MiB，同时是 `PUT` 正文与容器内桥接缓冲的上限：这份面面向报告与文档，不是磁盘镜像通道。
 
@@ -76,7 +82,8 @@ None, as the file surface moves bytes between an authenticated caller and the ho
 
 ## Known Limitations and Deferred Work
 
-- **没有 `DELETE`，也没有 `Range`。** 范围请求与大文件断点续传尚未提供，读一份超过 `maxBytes` 的文件仍然可以（限制只作用于写），但只能整份取。
+- **没有 `Range`。** 范围请求与大文件断点续传尚未提供，读一份超过 `maxBytes` 的文件仍然可以（限制只作用于写），但只能整份取。
+- **`DELETE` 只删文件，且与 `PUT` 同权。** 目录不递归删除——一份目录里的东西要不要一起没了是业务决定，字节通道不替它决定；写一个作用域的权限就是从中删东西的权限，拆成两套只会让调用方毁掉它不能替换的东西。
 - **`PUT` 会在可写作用域里建父目录。** 写 `user/a/b/c.md` 会建出 `a/b`；会话作用域反而更严——会话目录必须已由会话启动创建，否则答 `404 file-session-unknown`，因为写一个文件不该顺带造出一个会话。
 - **ETag 不是内容摘要。** 它按大小与纳秒级修改时间导出；文件系统不提供纳秒修改时间时（例如某些 FAT 挂载）精度下降，同一时间窗内的两次写可能得到同一个 ETag。要绝对的内容寻址需要每次读取多算一遍摘要。
 - **没有审计与配额。** 每次读写只进宿主日志；谁在什么时候改了哪个文件、一个主体能占多少空间，都不在本面记录。
