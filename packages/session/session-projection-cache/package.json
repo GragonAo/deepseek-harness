@@ -37,6 +37,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-invariants": "workspace:^",
+    "@deepseek-ai/dsh-partition-scope": "workspace:^",
     "@deepseek-ai/dsh-session": "workspace:^",
     "@deepseek-ai/dsh-session-persistence": "workspace:^",
     "@deepseek-ai/dsh-session-projection": "workspace:^",
@@ -45,6 +46,7 @@
   },
   "devDependencies": {
     "@deepseek-ai/dsh-invariants": "workspace:^",
+    "@deepseek-ai/dsh-partition-scope": "workspace:^",
     "@deepseek-ai/dsh-session": "workspace:^",
     "@deepseek-ai/dsh-session-persistence": "workspace:^",
     "@deepseek-ai/dsh-session-projection": "workspace:^",

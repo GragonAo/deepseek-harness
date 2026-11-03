@@ -18,6 +18,9 @@
       "path": "../../../vendor/schemastery"
     },
     {
+      "path": "../../core/partition-scope"
+    },
+    {
       "path": "../../core/session"
     },
     {

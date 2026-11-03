@@ -849,20 +849,37 @@ function projectionsFor(ctx: Context, session: Session): SessionProjectionsBlock
 }
 
 /**
- * The projection baseline of one session.list row, fail-soft: attached
- * sessions cut the registry's live watermark cache; cold sessions view the
- * persisted projection cache's identity-checked stored rows (zero log loads
- * either way — the listing use case the cache exists for). The block shape
- * (values + asOfSeq) matches the history tail's, so a client seeds its
- * value store under the same higher-seq-wins rule. Any failure — and an
- * empty value set — yields an absent block: a listing without projections
- * is degraded, never broken.
+ * The projection baseline of one attached session.list row: the registry's
+ * live watermark cut, read synchronously with the events the row already
+ * reflects. The block shape (values + asOfSeq) matches the history tail's, so
+ * a client seeds its value store under the same higher-seq-wins rule. Any
+ * failure — and an empty value set — yields an absent block: a listing without
+ * projections is degraded, never broken.
  */
-function listProjectionsFor(ctx: Context, meta: SessionHeader, session: Session | undefined): SessionProjectionsBlock | undefined {
+function listProjectionsFor(ctx: Context, session: Session): SessionProjectionsBlock | undefined {
   try {
-    const block = session !== undefined
-      ? ctx.get('sessionProjections')?.snapshot(session)
-      : ctx.get('sessionProjectionCache')?.cachedSnapshot(meta)
+    const block = ctx.get('sessionProjections')?.snapshot(session)
+    return block !== undefined && Object.keys(block.values).length > 0 ? block : undefined
+  } catch (error) {
+    ctx.logger.warn(`session.list: projection column for "${session.id}" failed (serving the row without it): ${String(error)}`)
+    return undefined
+  }
+}
+
+/**
+ * The projection baseline of one cold session.list row from the persisted
+ * projection cache's identity-checked stored rows — the listing use case the
+ * cache exists for, and the reason a cold row costs no log read. The cache
+ * loads the ambient partition's table on first use, so only the first listing
+ * of a partition touches the medium, and only with that partition's stored
+ * checkpoints.
+ * @param ctx - context carrying the optional projection cache and logger.
+ * @param meta - the cold session's stored header (identity witness).
+ * @returns the stored cut, or undefined when no usable row exists.
+ */
+async function cachedListProjections(ctx: Context, meta: SessionHeader): Promise<SessionProjectionsBlock | undefined> {
+  try {
+    const block = await ctx.get('sessionProjectionCache')?.cachedSnapshot(meta)
     return block !== undefined && Object.keys(block.values).length > 0 ? block : undefined
   } catch (error) {
     ctx.logger.warn(`session.list: projection column for "${meta.id}" failed (serving the row without it): ${String(error)}`)
@@ -872,15 +889,16 @@ function listProjectionsFor(ctx: Context, meta: SessionHeader, session: Session 
 
 /**
  * Projection baseline for one cold session.list row whose persisted checkpoint
- * is missing — a deployment without the projection cache (a tenant service,
- * whose storage domain is request-scoped and therefore cannot open at boot),
- * or one whose throttled write-behind had not fired when the process stopped.
- * The zero-I/O checkpoint read stays the fast path; the miss pays one log read
- * and re-derives the baseline through the registry, so a client still receives
+ * is missing — a session whose throttled write-behind had not fired before its
+ * host stopped, or one written before the cache was mounted. The stored-row
+ * read stays the fast path; a miss goes through the cache's own cold-read
+ * ladder, which pays the log read once and writes the checkpoint back, so the
+ * next listing of that session is a stored-row read — a client still receives
  * every projection the session log implies (the title included) instead of a
- * bare session id. Fail-soft on the same terms as {@link listProjectionsFor}:
- * a listing without projections is degraded, never broken.
- * @param ctx - context carrying the projection registry, persistence and logger.
+ * bare session id. A deployment that mounts no cache folds the log directly.
+ * Fail-soft on the same terms as {@link listProjectionsFor}: a listing without
+ * projections is degraded, never broken.
+ * @param ctx - context carrying the projection cache, registry, persistence and logger.
  * @param meta - the cold session's stored header.
  * @param signal - cancellation for the persistence read.
  * @returns the derived baseline, or undefined when nothing can serve one.
@@ -890,8 +908,19 @@ async function coldListProjections(
   meta: SessionHeader,
   signal?: AbortSignal,
 ): Promise<SessionProjectionsBlock | undefined> {
-  const cached = listProjectionsFor(ctx, meta, undefined)
+  const cached = await cachedListProjections(ctx, meta)
   if (cached !== undefined) return cached
+  const cache = ctx.get('sessionProjectionCache')
+  if (cache !== undefined) {
+    try {
+      const block = await cache.coldSnapshot(meta.id, signal)
+      return Object.keys(block.values).length > 0 ? block : undefined
+    } catch (error) {
+      signal?.throwIfAborted()
+      ctx.logger.warn(`session.list: cold projection read for "${meta.id}" failed (serving the row without it): ${String(error)}`)
+      return undefined
+    }
+  }
   const registry = ctx.get('sessionProjections')
   const persistence = ctx.get('sessionPersistence')
   if (registry === undefined || persistence === undefined) return undefined
@@ -1841,7 +1870,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     signal?.throwIfAborted()
     const summarizeAttached = (session: Session): SessionSummary => {
       const agent = ctx.agents.get(session.id)
-      const projections = listProjectionsFor(ctx, session.header, session)
+      const projections = listProjectionsFor(ctx, session)
       return {
         ...summarize(session, agent?.status === 'running'),
         ...projections === undefined ? {} : { projections },

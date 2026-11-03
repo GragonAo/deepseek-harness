@@ -23,11 +23,17 @@ Two mandatory points, throttled in between:
 | `writeEveryEvents` committed events | Config throttle (count). |
 | `writeIntervalMs` since the first dirty event | Config throttle (interval). |
 
-Both `Config` fields are required (no defaults): flush cadence is a deployment choice with no universally correct value, stated in cordis.yml.
+Both throttle `Config` fields are required (no defaults): flush cadence is a deployment choice with no universally correct value, stated in cordis.yml.
+
+## Request partitions
+
+The cache serves a partitioned deployment. It loads the `session_projcache` domain **lazily, per ambient request partition** (the `(tenant, user)` pair `ctx.partitionScope` reports), so a multi-tenant host keeps one stored checkpoint table per tenant and user and never serves one partition's rows to another; a deployment without a partition scope loads a single domain, exactly as a single-user host does. Each partition is loaded on its first use — a listing or a checkpoint write — not at plugin init, because init runs before any request scope exists.
+
+`maxLoadedPartitions` (required, no default) bounds how many partitions stay loaded: each loaded partition holds that tenant-and-user's whole stored checkpoint table in memory. Loading another partition past the budget closes the least recently used one; its checkpoints are durable, so a later use reloads it from the medium and nothing is lost. Concurrent first uses of one partition join the in-flight load instead of opening the domain twice (the domain facility refuses a double open).
 
 ## Listing read (`cachedSnapshot(meta)`)
 
-The zero-I/O rung: whole values viewed straight from the identity-matching stored record (version-matching keys only), returned as a `{asOfSeq, values}` cut — `asOfSeq` is the lowest served-row watermark, so a client seeding its per-session value store under higher-seq-wins can never let a stale list block overwrite a newer push frame. `undefined` when no usable record exists (unknown id, unrelated lifecycle, or no version-matching rows); the api-proxy list carrier turns that into an absent column.
+The no-log-read rung: whole values viewed straight from the identity-matching stored record (version-matching keys only), returned as a `{asOfSeq, values}` cut — `asOfSeq` is the lowest served-row watermark, so a client seeding its per-session value store under higher-seq-wins can never let a stale list block overwrite a newer push frame. `undefined` when no usable record exists (unknown id, unrelated lifecycle, or no version-matching rows); the api-proxy list carrier turns that into an absent column, and a miss there continues into `coldSnapshot` for that one session, so the row is written back and the next listing reads stored rows only. The call is asynchronous because the first one in a partition resolves that partition's table; every later one reads memory.
 
 ## Cold read (`coldSnapshot(id, signal?)`)
 
@@ -43,9 +49,10 @@ The read ladder, zero full-log load on the happy path: cached rows → `sessionP
   config:
     writeEveryEvents: 200
     writeIntervalMs: 5000
+    maxLoadedPartitions: 1
 ```
 
-Injects `storageDomain`, `sessionProjections`, `sessionPersistence`, `sessions`. Without this row the projection system runs live-only (watermark cache; cold reads fall back to full log loads wherever a carrier implements them).
+Injects `storageDomain`, `sessionProjections`, `sessionPersistence`, `sessions`; reads the optional `partitionScope`. `maxLoadedPartitions` is one for a single-user host, and as many as the host serves concurrently for a multi-tenant one (the tenant service composition states 8). Without this row the projection system runs live-only (watermark cache; cold reads fall back to full log loads wherever a carrier implements them).
 
 ## Model Experience
 

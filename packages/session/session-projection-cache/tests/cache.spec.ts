@@ -63,7 +63,7 @@ const headerOf = (id: SessionId, createdAt = 0, cwd?: string) =>
 
 interface HarnessOptions {
   pool?: MemoryMediaPool
-  config?: { writeEveryEvents: number; writeIntervalMs: number }
+  config?: { writeEveryEvents?: number; writeIntervalMs?: number; maxLoadedPartitions?: number }
   stateVersion?: number
   logs?: Map<string, SessionEvent[]>
 }
@@ -85,7 +85,12 @@ async function harness(options: HarnessOptions = {}) {
   ctx.sessionProjections.register(marksUnit(options.stateVersion))
   const persistence = fakePersistence(logs)
   ctx.provide('sessionPersistence', persistence as never)
-  const fiber = await ctx.plugin(SessionProjectionCache, options.config ?? { writeEveryEvents: 100, writeIntervalMs: 60_000 })
+  const fiber = await ctx.plugin(SessionProjectionCache, {
+    writeEveryEvents: 100,
+    writeIntervalMs: 60_000,
+    maxLoadedPartitions: 4,
+    ...options.config,
+  })
   return { ctx, pool, logs, fiber, persistence, cache: ctx.sessionProjectionCache }
 }
 
@@ -319,7 +324,7 @@ describe('SessionProjectionCache cold read', () => {
     const pool = new MemoryMediaPool()
     seedRow(pool, 'all-stale', { ver: 99, seq: 4, val: { marks: ['old'] } })
     const { cache } = await harness({ pool })
-    expect(cache.cachedSnapshot(headerOf(SessionId('all-stale')))).toBeUndefined()
+    await expect(cache.cachedSnapshot(headerOf(SessionId('all-stale')))).resolves.toBeUndefined()
   })
 
   it('binds identity on cwd too: a matching cwd serves, a moved session does not', async () => {
@@ -327,9 +332,9 @@ describe('SessionProjectionCache cold read', () => {
     seedRow(pool, 'homed', { ver: 1, seq: 2, val: { marks: ['w'] } }, { createdAt: 0, cwd: '/work' })
     const { cache } = await harness({ pool })
     const id = SessionId('homed')
-    expect(cache.cachedSnapshot(headerOf(id, 0, '/work'))?.values['cache-test/marks']).toEqual({ marks: ['w'] })
-    expect(cache.cachedSnapshot(headerOf(id, 0, '/elsewhere'))).toBeUndefined()
-    expect(cache.cachedSnapshot(headerOf(id, 0))).toBeUndefined()
+    expect((await cache.cachedSnapshot(headerOf(id, 0, '/work')))?.values['cache-test/marks']).toEqual({ marks: ['w'] })
+    await expect(cache.cachedSnapshot(headerOf(id, 0, '/elsewhere'))).resolves.toBeUndefined()
+    await expect(cache.cachedSnapshot(headerOf(id, 0))).resolves.toBeUndefined()
   })
 
   it('dates an empty stored log at -1 in the zero-units topology', async () => {
@@ -345,7 +350,7 @@ describe('SessionProjectionCache cold read', () => {
     await ctx.plugin(SessionStore)
     await ctx.plugin(SessionProjectionRegistry)
     ctx.provide('sessionPersistence', fakePersistence(logs) as never)
-    await ctx.plugin(SessionProjectionCache, { writeEveryEvents: 100, writeIntervalMs: 60_000 })
+    await ctx.plugin(SessionProjectionCache, { writeEveryEvents: 100, writeIntervalMs: 60_000, maxLoadedPartitions: 1 })
     await expect(ctx.sessionProjectionCache.coldSnapshot(SessionId('empty')))
       .resolves.toEqual({ asOfSeq: -1, values: {} })
   })
@@ -356,11 +361,11 @@ describe('SessionProjectionCache cold read', () => {
     const { cache } = await harness({ pool })
     const id = SessionId('listed')
     // Matching header: values plus the watermark the client seeds under.
-    expect(cache.cachedSnapshot(headerOf(id))).toEqual({ asOfSeq: 4, values: { 'cache-test/marks': { marks: ['t'] } } })
+    await expect(cache.cachedSnapshot(headerOf(id))).resolves.toEqual({ asOfSeq: 4, values: { 'cache-test/marks': { marks: ['t'] } } })
     // A recreated id (different createdAt): the record is unrelated — no block.
-    expect(cache.cachedSnapshot(headerOf(id, 777))).toBeUndefined()
+    await expect(cache.cachedSnapshot(headerOf(id, 777))).resolves.toBeUndefined()
     // Unknown id: no block.
-    expect(cache.cachedSnapshot(headerOf(SessionId('never-cached')))).toBeUndefined()
+    await expect(cache.cachedSnapshot(headerOf(SessionId('never-cached')))).resolves.toBeUndefined()
   })
 
   it('holds the not-found contract with zero registered units, and dates the empty cut for a present log', async () => {
@@ -379,9 +384,108 @@ describe('SessionProjectionCache cold read', () => {
     await ctx.plugin(SessionStore)
     await ctx.plugin(SessionProjectionRegistry)
     ctx.provide('sessionPersistence', fakePersistence(logs) as never)
-    await ctx.plugin(SessionProjectionCache, { writeEveryEvents: 100, writeIntervalMs: 60_000 })
+    await ctx.plugin(SessionProjectionCache, { writeEveryEvents: 100, writeIntervalMs: 60_000, maxLoadedPartitions: 1 })
     await expect(ctx.sessionProjectionCache.coldSnapshot(SessionId('absent'))).rejects.toThrow('not found')
     await expect(ctx.sessionProjectionCache.coldSnapshot(SessionId('bare')))
       .resolves.toEqual({ asOfSeq: 2, values: {} })
+  })
+})
+
+describe('SessionProjectionCache partitions', () => {
+  /** One opened partition's fake domain: a table whose stored rows belong to that partition only. */
+  interface FakePartition {
+    readonly key: string
+    readonly rows: Map<string, unknown>
+    closed: boolean
+  }
+
+  /**
+   * Compose the cache over a fake domain facility that records every open, so
+   * the tests observe the cache's partition policy (one domain per partition,
+   * reuse within it, eviction past the budget) without a storage backend.
+   * Partition `tenant-a` has one stored checkpoint row, `tenant-b` has none.
+   */
+  async function partitionHarness(limit: number) {
+    const ctx = new Context()
+    contexts.push(ctx)
+    const opened: FakePartition[] = []
+    let current = 'tenant-a'
+    const facility = {
+      open: async () => {
+        const partition: FakePartition = {
+          key: current,
+          rows: new Map(current === 'tenant-a'
+            ? [[SessionId('shared'), { identity: { createdAt: 0 }, rows: { 'cache-test/marks': { ver: 1, seq: 4, val: { marks: ['a'] } } } }]]
+            : []),
+          closed: false,
+        }
+        opened.push(partition)
+        return {
+          table: () => ({
+            get: (id: SessionId) => partition.rows.get(id),
+            put: async (id: SessionId, record: unknown) => { partition.rows.set(id, record) },
+            delete: async (id: SessionId) => { partition.rows.delete(id) },
+          }),
+          close: async () => { partition.closed = true },
+        }
+      },
+    }
+    ctx.provide('partitionScope', { current: () => ({ tenant: current, tenantName: current, user: 'u1', userName: 'u1', dataRoot: `/d/${current}` }) })
+    ctx.provide('storageDomain', facility as never)
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
+    ctx.sessionProjections.register(marksUnit())
+    ctx.provide('sessionPersistence', fakePersistence(new Map()) as never)
+    const fiber = await ctx.plugin(SessionProjectionCache, { writeEveryEvents: 100, writeIntervalMs: 60_000, maxLoadedPartitions: limit })
+    return {
+      ctx,
+      opened,
+      fiber,
+      cache: ctx.sessionProjectionCache,
+      enter: (partition: string) => { current = partition },
+    }
+  }
+
+  it('opens one domain per request partition and serves each from its own table', async () => {
+    const { opened, cache, enter } = await partitionHarness(4)
+    const id = SessionId('shared')
+    const header = headerOf(id)
+    await expect(cache.cachedSnapshot(header)).resolves.toEqual({ asOfSeq: 4, values: { 'cache-test/marks': { marks: ['a'] } } })
+    // Same partition: the loaded table serves the next read — no second open.
+    await expect(cache.cachedSnapshot(header)).resolves.toBeDefined()
+    expect(opened).toHaveLength(1)
+    // Another partition has its own stored rows: its read sees no block and
+    // opens its own domain instead of the first partition's.
+    enter('tenant-b')
+    await expect(cache.cachedSnapshot(header)).resolves.toBeUndefined()
+    expect(opened.map(partition => partition.key)).toEqual(['tenant-a', 'tenant-b'])
+  })
+
+  it('evicts the least recently used partition past the budget and reloads it on the next use', async () => {
+    const { opened, cache, enter } = await partitionHarness(1)
+    const header = headerOf(SessionId('shared'))
+    await cache.cachedSnapshot(header)
+    enter('tenant-b')
+    await cache.cachedSnapshot(header)
+    // The budget is one: loading tenant-b closed tenant-a's domain.
+    expect(opened).toHaveLength(2)
+    expect(opened[0]?.closed).toBe(true)
+    expect(opened[1]?.closed).toBe(false)
+    // Returning to an evicted partition reloads it from the medium.
+    enter('tenant-a')
+    await expect(cache.cachedSnapshot(header)).resolves.toBeDefined()
+    expect(opened).toHaveLength(3)
+    expect(opened[1]?.closed).toBe(true)
+  })
+
+  it('closes every loaded partition with the plugin', async () => {
+    const { opened, cache, fiber, enter } = await partitionHarness(4)
+    const header = headerOf(SessionId('shared'))
+    await cache.cachedSnapshot(header)
+    enter('tenant-b')
+    await cache.cachedSnapshot(header)
+    expect(opened).toHaveLength(2)
+    await fiber.dispose()
+    expect(opened.every(partition => partition.closed)).toBe(true)
   })
 })

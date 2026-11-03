@@ -13,6 +13,7 @@
  */
 
 import { Context, Service } from '@deepseek-ai/cordis'
+import { currentPartition } from '@deepseek-ai/dsh-partition-scope'
 import z from '@deepseek-ai/schemastery'
 import { snapshotJsonValue } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
@@ -44,11 +45,23 @@ export interface Config {
   writeEveryEvents: number
   /** Longest time (milliseconds) a dirty checkpoint may stay unwritten between mandatory points. */
   writeIntervalMs: number
+  /**
+   * How many request partitions keep their domain loaded at once. A
+   * partitioned deployment loads one table per (tenant, user) on first use —
+   * every stored checkpoint of that partition — so the count is a memory
+   * budget the deployment states: a single-partition deployment needs one, a
+   * multi-tenant host needs as many partitions as it serves concurrently.
+   * Loading another partition evicts the least recently used one and closes
+   * its domain; a later use of an evicted partition reloads it from the
+   * medium (its checkpoints are durable, so nothing is lost).
+   */
+  maxLoadedPartitions: number
 }
 
 export const Config: z<Config> = z.object({
   writeEveryEvents: z.natural().min(1).required(),
   writeIntervalMs: z.natural().min(1).required(),
+  maxLoadedPartitions: z.natural().min(1).required(),
 })
 
 /** Per-session write-behind bookkeeping (live sessions only; dropped at retire). */
@@ -59,33 +72,119 @@ interface DirtyState {
   timer: ReturnType<typeof setTimeout> | undefined
 }
 
+/** One loaded partition: its domain's typed table plus the handle that releases it. */
+interface LoadedPartition {
+  readonly table: KvTable<SessionId, CheckpointRecord>
+  readonly close: () => Promise<void>
+}
+
 /**
- * The persisted projection cache service. Opens the `session_projcache`
- * domain at init, checkpoints live sessions on a throttled write-behind
- * (count/interval triggers from {@link Config}) plus two mandatory points —
- * `turn/end` and session disposal (the live-to-cold moment) — and serves the
- * cold-read ladder: cached row, persistence `readFrom` tail, registry
- * `restore`, durable write-back. Every durable write is fail-soft: failures
- * log a warning and the cache self-heals on the next write or cold read.
+ * The persisted projection cache service. Loads the `session_projcache`
+ * domain of the ambient request partition on first use (a partitioned
+ * deployment keeps one domain per (tenant, user), bounded by
+ * {@link Config.maxLoadedPartitions}), checkpoints live sessions on a
+ * throttled write-behind (count/interval triggers from {@link Config}) plus
+ * two mandatory points — `turn/end` and session disposal (the live-to-cold
+ * moment) — and serves the cold-read ladder: cached row, persistence
+ * `readFrom` tail, registry `restore`, durable write-back. Every durable
+ * write is fail-soft: failures log a warning and the cache self-heals on the
+ * next write or cold read.
  */
 export class SessionProjectionCache extends Service {
   static inject = ['storageDomain', 'sessionProjections', 'sessionPersistence', 'sessions']
 
   static Config: z<Config> = Config
 
-  private table?: KvTable<SessionId, CheckpointRecord>
+  /** Loaded partitions by key, least recently used first (Map order is the eviction order). */
+  private readonly partitions = new Map<string, Promise<LoadedPartition>>()
   private readonly dirty = new Map<Session, DirtyState>()
 
   constructor(ctx: Context, public config: Config) {
     super(ctx, 'sessionProjectionCache')
   }
 
-  /** Open the domain and install the write-behind listeners. */
-  protected async [Service.init](): Promise<void> {
-    const domain = await this.ctx.storageDomain.open(projectionCacheDomainSpec)
-    this.ctx.effect(() => () => domain.close(), 'sessionProjectionCache.domainClose')
-    this.table = domain.table('sessions')
+  /** Install the write-behind listeners. The domain is loaded on first use, not here. */
+  protected [Service.init](): void {
     this.installWritePath()
+  }
+
+  /**
+   * The ambient request partition's loaded domain. A miss loads that
+   * partition's table (every stored checkpoint of that tenant and user) and
+   * evicts the least recently used partition past the configured budget; a
+   * concurrent second caller joins the in-flight load instead of opening the
+   * domain twice (the facility rejects a double open).
+   * @returns the partition's table and its release handle.
+   */
+  private async partition(): Promise<LoadedPartition> {
+    const key = this.partitionKey()
+    const held = this.partitions.get(key)
+    if (held !== undefined) {
+      // Re-insert: Map iteration order is the eviction order.
+      this.partitions.delete(key)
+      this.partitions.set(key, held)
+      return held
+    }
+    const opening = this.openPartition()
+    this.partitions.set(key, opening)
+    opening.catch(() => {
+      if (this.partitions.get(key) === opening) this.partitions.delete(key)
+    })
+    await this.evict(key)
+    return opening
+  }
+
+  /**
+   * The eviction key of the ambient partition: the same (tenant, user) pair
+   * the storage backends address a schema by, and the bare empty string when
+   * the deployment has no partition scope (single-partition deployments).
+   * @returns the partition key.
+   */
+  private partitionKey(): string {
+    const partition = currentPartition(this.ctx)
+    if (partition === undefined) return ''
+    const user = partition.userName
+    return user === undefined ? partition.tenantName : `${partition.tenantName}.${user}`
+  }
+
+  /** Open one partition's domain from the plain (untyped) spec and bind its table. */
+  private async openPartition(): Promise<LoadedPartition> {
+    const domain = await this.ctx.storageDomain.open(projectionCacheDomainSpec)
+    return { table: domain.table('sessions'), close: () => domain.close() }
+  }
+
+  /**
+   * Close the least recently used partitions until the budget holds, never
+   * the partition the caller is about to use.
+   * @param current - the partition key that must stay loaded.
+   */
+  private async evict(current: string): Promise<void> {
+    for (const key of [...this.partitions.keys()]) {
+      if (this.partitions.size <= this.config.maxLoadedPartitions) return
+      if (key === current) continue
+      const held = this.partitions.get(key)
+      this.partitions.delete(key)
+      if (held === undefined) continue
+      await held.then(partition => partition.close()).catch((error: unknown) => {
+        this.ctx.logger.warn(`session projection cache: closing an evicted partition's domain failed: ${String(error)}`)
+      })
+    }
+  }
+
+  /**
+   * Close every loaded partition and drop the write-behind state with the
+   * plugin (timers belong to sessions that outlive the cache).
+   */
+  private disposePartitions(): void {
+    const held = [...this.partitions.values()]
+    this.partitions.clear()
+    for (const pending of held) {
+      void pending
+        .then(partition => partition.close())
+        .catch((error: unknown) => {
+          this.ctx.logger.warn(`session projection cache: closing a partition's domain failed: ${String(error)}`)
+        })
+    }
   }
 
   /**
@@ -93,31 +192,32 @@ export class SessionProjectionCache extends Service {
    * identity matches `expected`. A session id names a slot, not a lifecycle:
    * a recreated id or a persistence store swapped under a surviving cache
    * must not let an old record seed state folded from an unrelated log.
-   * Synchronous from the domain's in-memory state.
    * @param id - the session whose record is read.
    * @param expected - the log identity the caller holds (live or stored header).
    * @returns the identity-matching record, or `undefined` (absent or unrelated).
    */
-  private recordFor(id: SessionId, expected: CheckpointIdentity): CheckpointRecord | undefined {
-    const record = this.requireTable().get(id)
+  private async recordFor(id: SessionId, expected: CheckpointIdentity): Promise<CheckpointRecord | undefined> {
+    const record = (await this.partition()).table.get(id)
     if (record === undefined) return undefined
     return identityMatches(record.identity, expected) ? record : undefined
   }
 
   /**
-   * The zero-I/O listing read: whole values viewed straight from the stored
-   * rows (version-matching keys only), each cut carried with its watermark
-   * so a client value store can seed under its higher-seq-wins rule — as
-   * stale as the last durable checkpoint but never wrong, and never from an
-   * unrelated log (the caller's header is the identity witness). Fresher
-   * paths (the history tail baseline, {@link coldSnapshot}) supersede these
-   * values whenever a session is actually opened.
+   * The listing read: whole values viewed straight from the stored rows
+   * (version-matching keys only), each cut carried with its watermark so a
+   * client value store can seed under its higher-seq-wins rule — as stale as
+   * the last durable checkpoint but never wrong, and never from an unrelated
+   * log (the caller's header is the identity witness). Costs no log read: the
+   * first call in a partition loads that partition's table from the medium,
+   * every later one reads the memory it holds. Fresher paths (the history
+   * tail baseline, {@link coldSnapshot}) supersede these values whenever a
+   * session is actually opened.
    * @param meta - the listed session's header (identity witness; no log read).
    * @returns the cut (`asOfSeq` = lowest served-row watermark), or
    *   `undefined` when no usable row exists for this lifecycle.
    */
-  cachedSnapshot(meta: SessionHeader): ProjectionSnapshot | undefined {
-    const record = this.recordFor(meta.id, identityOf(meta))
+  async cachedSnapshot(meta: SessionHeader): Promise<ProjectionSnapshot | undefined> {
+    const record = await this.recordFor(meta.id, identityOf(meta))
     if (record === undefined) return undefined
     const values = this.ctx.sessionProjections.viewCheckpoint(record.rows)
     const keys = Object.keys(values)
@@ -164,7 +264,7 @@ export class SessionProjectionCache extends Service {
    * @returns the snapshot cut at the stored log end.
    */
   async coldSnapshot(id: SessionId, signal?: AbortSignal): Promise<ProjectionSnapshot> {
-    const record = this.requireTable().get(id)
+    const record = (await this.partition()).table.get(id)
     const cached = record?.rows ?? {}
     const floor = this.ctx.sessionProjections.restoreFloor(cached)
     const persistence = this.ctx.sessionPersistence
@@ -229,12 +329,14 @@ export class SessionProjectionCache extends Service {
       this.dirty.delete(session)
     })
 
-    // Clear pending timers with the plugin (their sessions outlive the cache).
+    // Clear pending timers with the plugin (their sessions outlive the cache)
+    // and release every loaded partition's domain.
     this.ctx.effect(() => () => {
       for (const state of this.dirty.values()) {
         if (state.timer !== undefined) clearTimeout(state.timer)
       }
       this.dirty.clear()
+      this.disposePartitions()
     }, 'sessionProjectionCache.timers')
   }
 
@@ -268,7 +370,7 @@ export class SessionProjectionCache extends Service {
     if (detached === undefined) {
       throw new TypeError('projection checkpoint is not losslessly JSON-serializable (a unit state violates the plain-JSON contract)')
     }
-    await this.requireTable().put(id, { identity, rows: detached as CheckpointRecord['rows'] })
+    await (await this.partition()).table.put(id, { identity, rows: detached as CheckpointRecord['rows'] })
   }
 
   /** Fail-soft {@link put}: cache writes must never fail their caller's read or event path. */
@@ -280,11 +382,7 @@ export class SessionProjectionCache extends Service {
     }
   }
 
-  private requireTable(): KvTable<SessionId, CheckpointRecord> {
-    /* v8 ignore next -- Service.init assigns the table before the service becomes injectable */
-    if (this.table === undefined) throw new Error('session projection cache is not initialized')
-    return this.table
-  }
+
 }
 
 /** Project a header onto the identity fields a record is bound to. */

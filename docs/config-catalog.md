@@ -2401,10 +2401,21 @@ export interface Config {
   writeEveryEvents: number
   /** Longest time (milliseconds) a dirty checkpoint may stay unwritten between mandatory points. */
   writeIntervalMs: number
+  /**
+   * How many request partitions keep their domain loaded at once. A
+   * partitioned deployment loads one table per (tenant, user) on first use —
+   * every stored checkpoint of that partition — so the count is a memory
+   * budget the deployment states: a single-partition deployment needs one, a
+   * multi-tenant host needs as many partitions as it serves concurrently.
+   * Loading another partition evicts the least recently used one and closes
+   * its domain; a later use of an evicted partition reloads it from the
+   * medium (its checkpoints are durable, so nothing is lost).
+   */
+  maxLoadedPartitions: number
 }
 ```
 
-Source: [`packages/session/session-projection-cache/src/index.ts:42`](../packages/session/session-projection-cache/src/index.ts)
+Source: [`packages/session/session-projection-cache/src/index.ts:43`](../packages/session/session-projection-cache/src/index.ts)
 
 <a id="deepseek-aidsh-session-query-sqlite"></a>
 

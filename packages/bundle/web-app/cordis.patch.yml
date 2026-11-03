@@ -78,6 +78,8 @@
       config:
         writeEveryEvents: 200
         writeIntervalMs: 5000
+        # 浏览器形态只有一个分区（没有租户/用户作用域），一张表就够。
+        maxLoadedPartitions: 1
 
     - id: session-reference
       name: '@deepseek-ai/dsh-session-reference'

@@ -61,7 +61,7 @@ dsh-tenant --config /etc/dsh/tenant.config.yaml
 
 `src/spine.ts` 是这份组合的全部内容：每行给出 `id`、模块名、由租户配置推导的默认配置，或者不挂载的中文原因。行的 `id` 就是配置里 `plugins.<id>` 的键。
 
-清单里保留了几类停用的行，是为了让“租户栈为什么没有这一块”有据可查：本地沙箱（`sandbox`/`fs-sandbox`/`bash-sandbox`/`pwsh-sandbox`）、单机文件存储（`session-persistence-jsonl`/`storage-json`/`settings`/`credentials`）、worker 线程形态的代码执行（`code-runtime`）、自适应目录选择器（`directory-picker-auto`，服务端固定挂 `directory-picker-browse`）、以及浏览器形态的行（`message-feedback`/`session-projection-cache`/`connection`）。它们在租户服务里分别由容器世界、PostgreSQL 分区与浏览式后端取代。
+清单里保留了几类停用的行，是为了让“租户栈为什么没有这一块”有据可查：本地沙箱（`sandbox`/`fs-sandbox`/`bash-sandbox`/`pwsh-sandbox`）、单机文件存储（`session-persistence-jsonl`/`storage-json`/`settings`/`credentials`）、worker 线程形态的代码执行（`code-runtime`）、自适应目录选择器（`directory-picker-auto`，服务端固定挂 `directory-picker-browse`）、以及浏览器界面的行（`message-feedback`/`connection`）。它们在租户服务里分别由容器世界、PostgreSQL 分区与浏览式后端取代。投影缓存不在停用之列：它按请求分区惰性加载，冷列表的投影列与冷读都读它存下的检查点，而不是每次列表把整篇日志重读一遍。
 
 需要静态类型的几块——HTTP 服务、会话存储、租户注册表、认证、租户管理服务、三个 HTTP 载体（管理面、业务面 `/api`、文件面 `/files`）、PostgreSQL 会话持久化、容器子进程与文件系统、以及按后端选择的容器运行时——在 `src/compose.ts` 里直接挂载；其余按清单动态导入。这两处**不许出现同一模块**：同一插件挂两次会让它注册的服务重复，启动直接失败。
 

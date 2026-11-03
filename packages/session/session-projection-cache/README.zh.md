@@ -23,11 +23,17 @@
 | 累计 `writeEveryEvents` 个已提交事件 | 配置节流（条数）。 |
 | 距首个脏事件 `writeIntervalMs` 毫秒 | 配置节流（间隔）。 |
 
-两个 `Config` 字段均必填（无默认值）：写入节奏是部署选择，没有普适正确值，由 cordis.yml 明示。
+两个节流 `Config` 字段均必填（无默认值）：写入节奏是部署选择，没有普适正确值，由 cordis.yml 明示。
+
+## 请求分区
+
+缓存服务于分区化部署：它按环境请求分区（`ctx.partitionScope` 报告的 `(租户, 用户)` 对）**惰性加载** `session_projcache` 域，因此多租户宿主为每个租户与用户各持有一张检查点表，绝不把一个分区的行服务给另一个；未挂分区作用域的部署只加载一个域，行为与单用户宿主完全一致。每个分区在首次使用时加载（一次列表或一次检查点写入），而不是在插件 init 时加载——init 运行时还不存在任何请求作用域。
+
+`maxLoadedPartitions`（必填，无默认值）限定同时驻留的分区数：每个驻留分区把该租户与用户的整张检查点表放在内存里。超出预算再加载另一个分区时，淘汰最近最少使用的那个并关闭其域；检查点是持久的，所以之后再用到它只会从介质重新加载，不丢任何数据。同一分区的并发首次使用会并入同一次加载，而不是重复开域（域设施拒绝重复打开）。
 
 ## 列表读（`cachedSnapshot(meta)`）
 
-零 I/O 一档：从身份匹配的存储记录直接 view 全量值（仅版本匹配的 key），以 `{asOfSeq, values}` 切面返回——`asOfSeq` 取所服务行的最低水位，客户端在 higher-seq-wins 规则下播种值存储时，陈旧列表块永远压不过更新的推送帧。无可用记录（未知 id、无关生命周期、无版本匹配行）时返回 `undefined`；api-proxy 列表载体将其转为列缺席。
+不读日志的一档：从身份匹配的存储记录直接 view 全量值（仅版本匹配的 key），以 `{asOfSeq, values}` 切面返回——`asOfSeq` 取所服务行的最低水位，客户端在 higher-seq-wins 规则下播种值存储时，陈旧列表块永远压不过更新的推送帧。无可用记录（未知 id、无关生命周期、无版本匹配行）时返回 `undefined`；api-proxy 列表载体将其转为列缺席，并在未命中时对那一个会话继续走 `coldSnapshot`，把行写回存储，于是下一次列表只读存储行。该调用是异步的：一个分区里的第一次调用要解析该分区的表，之后的调用只读内存。
 
 ## 冷读（`coldSnapshot(id, signal?)`）
 
@@ -43,9 +49,10 @@
   config:
     writeEveryEvents: 200
     writeIntervalMs: 5000
+    maxLoadedPartitions: 1
 ```
 
-注入 `storageDomain`、`sessionProjections`、`sessionPersistence`、`sessions`。没有这一行时，投影系统只跑 live（水位缓存；冷读在实现了它的载体处退回全量日志加载）。
+注入 `storageDomain`、`sessionProjections`、`sessionPersistence`、`sessions`，并读取可选的 `partitionScope`。`maxLoadedPartitions` 在单用户宿主取 1；多租户宿主取它并发服务的分区数（租户服务组合写 8）。没有这一行时，投影系统只跑 live（水位缓存；冷读在实现了它的载体处退回全量日志加载）。
 
 ## 模型体验
 

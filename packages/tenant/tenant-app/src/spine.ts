@@ -166,7 +166,17 @@ export const SPINE: readonly SpineRow[] = [
   { id: 'attachment-local', module: '@deepseek-ai/dsh-attachment-local' },
   { id: 'session-query-sqlite', module: '@deepseek-ai/dsh-session-query-sqlite', config: () => ({ path: ':memory:', openAt: 'never' }) },
   { id: 'session-projection', module: '@deepseek-ai/dsh-session-projection' },
-  { id: 'session-projection-cache', module: '@deepseek-ai/dsh-session-projection-cache', disabled: '缓存服务于浏览器订阅，租户服务没有浏览器订阅' },
+  // 冷列表的投影列只读这层存好的检查点（每个会话一条），没有它就只能在每次列表里
+  // 把整篇日志读一遍再折叠——171 上 452 万条事件的那个案件因此要 33 秒，桥的 30 秒
+  // 读超时把它变成 502。缓存自己按请求分区惰性加载（每个 (租户, 用户) 一张表），
+  // 所以它能挂在租户形态下；maxLoadedPartitions 是同时驻留的分区数，超出的按最近最少
+  // 使用淘汰并关闭域，分区检查点本身是持久的，淘汰只影响下次要重新加载。
+  // 写节流取浏览器形态那两个值（200 条 / 5 秒）：租户宿主的会话吞吐与浏览器形态同级。
+  {
+    id: 'session-projection-cache',
+    module: '@deepseek-ai/dsh-session-projection-cache',
+    config: () => ({ writeEveryEvents: 200, writeIntervalMs: 5000, maxLoadedPartitions: 8 }),
+  },
   { id: 'session-log-download', module: '@deepseek-ai/dsh-session-log-export' },
   { id: 'session-reference', module: '@deepseek-ai/dsh-session-reference' },
   { id: 'file-reference-local', module: '@deepseek-ai/dsh-file-reference-local' },
