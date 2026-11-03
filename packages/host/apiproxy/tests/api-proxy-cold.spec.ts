@@ -149,7 +149,9 @@ describe('sessions.list cold merge', () => {
       snapshot: { asOfSeq: 2, values: { title: 'Derived title' } },
       checkpoint: {},
     }))
-    ctx.provide('sessionProjections', { restore } as never)
+    // The proxy registers its own units on whatever registry is composed; these cases only
+    // exercise the cache-supplied `restore`, so the registry stays inert rather than mounted.
+    ctx.provide('sessionProjections', { restore, register: () => () => {}, onChanged: () => () => {} } as never)
     const api = createApiProxy(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
 
     const response = await api.sessions.list(request({}))
@@ -178,6 +180,8 @@ describe('sessions.list cold merge', () => {
     } as never)
     ctx.provide('sessionProjections', {
       restore: () => { throw new Error('corrupt payload') },
+      register: () => () => {},
+      onChanged: () => () => {},
     } as never)
     const api = createApiProxy(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
 
