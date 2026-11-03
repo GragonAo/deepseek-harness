@@ -12,6 +12,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { CallId } from '@deepseek-ai/dsh-llm'
 import { StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
+import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import type { Config } from '@deepseek-ai/dsh-mcp-client'
 
 const { mockConnect, mockClose, mockListTools, mockCallTool, MockClient, instances } = vi.hoisted(() => {
@@ -37,9 +38,11 @@ const { mockConnect, mockClose, mockListTools, mockCallTool, MockClient, instanc
     close = mockClose
     request = mockRequest
     setNotificationHandler = mockSetNotificationHandler
-    constructor() { instances.push(this) }
+    // The SDK is mocked, so this stands in for a real client: the recovery calls below
+    // only ever compare identity, and nothing reads a protocol member off it.
+    constructor() { instances.push(this as unknown as Client) }
   }
-  const instances: MockClient[] = []
+  const instances: Client[] = []
   return { mockConnect, mockClose, mockListTools, mockCallTool, mockSetNotificationHandler, MockClient, instances }
 })
 

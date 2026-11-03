@@ -125,6 +125,7 @@ async function startFixture(concurrency?: ToolConcurrencyConfig, serverName = 's
     toolCallTimeoutMs: 60_000,
     concurrency: policy,
     limiter: createToolCallLimiter(policy),
+    recoverSession: async () => undefined,
   } satisfies ToolBridgeOptions, new Map())
 
   return {

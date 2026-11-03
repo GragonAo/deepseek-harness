@@ -152,6 +152,7 @@ const defaultOpts: ToolBridgeOptions = {
   toolCallTimeoutMs: 60_000,
   concurrency: defaultConcurrency,
   limiter: createToolCallLimiter(defaultConcurrency),
+  recoverSession: async () => undefined,
 }
 
 // ---- Tests ----

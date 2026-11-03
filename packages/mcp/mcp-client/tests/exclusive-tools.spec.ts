@@ -135,6 +135,7 @@ async function startServer(
     toolCallTimeoutMs: 60_000,
     concurrency: policy,
     limiter: createToolCallLimiter(policy),
+    recoverSession: async () => undefined,
   } satisfies ToolBridgeOptions, new Map())
 
   return {
