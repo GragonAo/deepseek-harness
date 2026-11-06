@@ -380,7 +380,7 @@ describe('agentPreset.select', () => {
     // The host-stream opener reads the committed-workspace baseline; this
     // spec owns preset identity, so the stub suffices (api-proxy-commands
     // precedent).
-    ctx.provide('workspaceRegistry', { list: () => [] } as never)
+    ctx.provide('workspaceRegistry', { list: () => [], ensureLoaded: async () => {} } as never)
     const abort = new AbortController()
     const frames: HostFrame[] = []
     const stream = api.events.host(request({}), abort.signal)

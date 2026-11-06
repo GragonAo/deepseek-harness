@@ -4,6 +4,8 @@ Status: implemented
 
 [English](2026-07-24-web-session-model-selector.md) | 中文
 
+> 部分被取代：现在一条提问可以自带 `model`，对已在运行的会话生成一轮切换——见 [模型厂商注册表是部署级的，模型按轮次生效](../architecture/2026-11-07-deployment-provider-registry.zh.md)。
+
 ## 问题
 
 Web 对话需要一项由 Host 提供、可见且可更改的会话模型选择。如果照搬 TUI 的呈现方式，或在浏览器中硬编码 DeepSeek 模型，就会让模型发现逻辑和步骤边界语义分散到不同前端中。响应运行期间发生的切换还需要一个原子边界：提示词变量与请求路由不能观测到不同的选择。

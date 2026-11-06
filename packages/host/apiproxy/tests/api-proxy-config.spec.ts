@@ -192,7 +192,7 @@ async function harness(options?: {
   }
   // Host-stream opener reads the committed-workspace baseline; the stub
   // suffices — the real workspace composition is api-proxy-workspace.spec's.
-  ctx.provide('workspaceRegistry', { list: () => [] } as never)
+  ctx.provide('workspaceRegistry', { list: () => [], ensureLoaded: async () => {} } as never)
   return ctx
 }
 

@@ -4,6 +4,8 @@ Status: implemented
 
 English | [中文](2026-07-24-web-session-model-selector.zh.md)
 
+> Partially superseded: a prompt may now carry its own `model`, which applies a switch to one turn of a session that is already running — see [The deployment's provider registry, and a model per turn](../architecture/2026-11-07-deployment-provider-registry.md).
+
 ## Problem
 
 The Web conversation needs a visible, mutable session model selection sourced from the Host. Copying TUI presentation or hardcoding DeepSeek models in the browser would split model discovery and step-boundary semantics across front ends. A switch made while a response is running also needs one atomic boundary: prompt variables and request routing cannot observe different selections.

@@ -343,12 +343,16 @@ export interface SessionsApi {
    * the Host validates, canonicalizes, and records it on that exact user message. Omission remains
    * valid for non-browser callers. Session-backed subagents reject with `agent-busy` and use
    * `subagent.prompt`.
+   * `model` overrides the session's model for this turn only: it is applied before the message is
+   * enqueued, so a caller can switch models on a session that is already under way, and the
+   * session's stored default stays as it was.
    */
   prompt(request: RpcRequest<{
     sessionId: SessionId
     mode: 'queue' | 'steer'
     content: PromptContentPart[]
     clientTimeZone?: string
+    model?: { provider: string; model: string; reasoningEffort?: string }
   }>):
   Promise<RpcResponse<{ accepted: true; command?: { kind: 'success'; text?: string } }>>
 

@@ -11,8 +11,17 @@
 import { StorageError, UNIT_NAME_RE } from '@deepseek-ai/dsh-storage'
 import type { KvFacet, KvUnit, KvUnitDescriptor, StorageBackend } from '@deepseek-ai/dsh-storage'
 import { currentTenant, currentUser, requireTenant, requireUser, tenantPartitionName, userPartitionName } from '@deepseek-ai/dsh-tenant'
-import type { TenantId, UserId } from '@deepseek-ai/dsh-tenant'
+import type { UserId } from '@deepseek-ai/dsh-tenant'
 import type { SqlExecutor } from './executor.ts'
+
+/**
+ * Schema hosting units opened outside any tenant scope. This is the
+ * deployment-wide layer: the rows there belong to the host, not to a case, so
+ * every tenant reads the same records. It holds the same base tables as a
+ * tenant schema, and a unit's version stamp lives in it exactly as it does per
+ * tenant, so an incompatible on-disk format still rejects loudly.
+ */
+const SYSTEM_SCHEMA = 'dsh_system'
 
 /** JSON-encode an opaque value for a `::jsonb` column. */
 function encodeJson(value: unknown): string {
@@ -61,7 +70,7 @@ export class PostgresStorageBackend implements StorageBackend {
    */
   private unitKey(name: string, shared: boolean): string {
     const tenant = currentTenant()
-    if (tenant === undefined) return name
+    if (tenant === undefined) return `${SYSTEM_SCHEMA}.${name}`
     // Case-shared units open once per tenant; per-user units once per user.
     if (shared) return `${tenantPartitionName(tenant.id)}.${name}`
     const user = currentUser()
@@ -99,11 +108,11 @@ export class PostgresStorageBackend implements StorageBackend {
    * Materialize one tenant's schema and stamp the unit's version exactly once.
    * Memoized so every operation on a (tenant, unit) shares one DDL/version
    * pass; a version mismatch rejects every dependent operation.
-   * @param tenantId - the ambient tenant captured at operation entry.
+   * @param schema - the partition the unit lives in: a tenant's schema, or
+   * {@link SYSTEM_SCHEMA} for a unit opened outside any tenant scope.
    * @param descriptor - the unit whose version to stamp.
    */
-  ensureUnit(tenantId: TenantId, descriptor: KvUnitDescriptor): Promise<void> {
-    const schema = tenantPartitionName(tenantId)
+  ensureUnit(schema: string, descriptor: KvUnitDescriptor): Promise<void> {
     const key = `${schema}.${descriptor.name}`
     const existing = this.ensured.get(key)
     if (existing !== undefined) return existing
@@ -149,27 +158,46 @@ export class PostgresStorageBackend implements StorageBackend {
 class PostgresKvUnit implements KvUnit {
   private closed = false
 
+  /**
+   * Whether this handle was opened outside any tenant scope and therefore
+   * addresses {@link SYSTEM_SCHEMA} for its whole lifetime. Captured at open
+   * time: a deployment-wide unit must not change partitions when a request
+   * happens to run inside a tenant scope.
+   */
+  private readonly systemScope: boolean
+
   constructor(
     private readonly backend: PostgresStorageBackend,
     private readonly descriptor: KvUnitDescriptor,
     private readonly unitKey: string,
-  ) {}
+  ) {
+    // Only a shared unit can be deployment-wide: a per-user unit opened outside a
+    // tenant stays tenant-bound and still fails closed when used without one.
+    this.systemScope = currentTenant() === undefined && descriptor.shared === true
+  }
 
-  private guard(): { tenant: TenantId; user: UserId | undefined } {
+  /**
+   * Resolve the partition this operation targets, synchronously at call entry
+   * and before any await, so the whole operation stays bound to one scope.
+   * A handle opened outside a tenant scope addresses {@link SYSTEM_SCHEMA} for
+   * its lifetime; otherwise the ambient tenant (and, for a per-user unit, the
+   * ambient user) decides, and a case-shared unit needs no user because its
+   * rows live under the tenant alone.
+   * @returns the schema to address and the user column value when per-user.
+   */
+  private scope(): { schema: string; user: UserId | undefined } {
     if (this.closed) {
       throw new StorageError('closed', `kv unit '${this.descriptor.name}' is closed`)
     }
-    // Resolves the tenant (always) and, for per-user units, the user
-    // synchronously at call entry, before any await, so the whole operation
-    // stays bound to the scope that was ambient here. A case-shared unit needs
-    // no user: its rows live under the tenant alone.
+    if (this.systemScope) {
+      if (this.descriptor.shared !== true) {
+        throw new StorageError('closed', `kv unit '${this.descriptor.name}' is per-user and cannot open outside a tenant scope`)
+      }
+      return { schema: SYSTEM_SCHEMA, user: undefined }
+    }
     const tenant = requireTenant().id
     const user = this.descriptor.shared === true ? undefined : requireUser()
-    return { tenant, user }
-  }
-
-  private schemaOf(tenantId: TenantId): string {
-    return tenantPartitionName(tenantId)
+    return { schema: tenantPartitionName(tenant), user }
   }
 
   private get shared(): boolean {
@@ -177,9 +205,8 @@ class PostgresKvUnit implements KvUnit {
   }
 
   async loadAll(): Promise<{ tables: Record<string, Record<string, unknown>>; global: unknown }> {
-    const { tenant, user } = this.guard()
-    const schema = this.schemaOf(tenant)
-    await this.backend.ensureUnit(tenant, this.descriptor)
+    const { schema, user } = this.scope()
+    await this.backend.ensureUnit(schema, this.descriptor)
     const recordTable = this.shared ? 'kv_case_record' : 'kv_record'
     const recordQuery = this.shared
       ? `SELECT table_name, key, value FROM ${schema}.${recordTable} WHERE unit = $1 ORDER BY table_name, key`
@@ -207,9 +234,8 @@ class PostgresKvUnit implements KvUnit {
   }
 
   async putRecord(table: string, key: string, value: unknown): Promise<void> {
-    const { tenant, user } = this.guard()
-    const schema = this.schemaOf(tenant)
-    await this.backend.ensureUnit(tenant, this.descriptor)
+    const { schema, user } = this.scope()
+    await this.backend.ensureUnit(schema, this.descriptor)
     if (this.shared) {
       await this.backend.executor.query(
         `INSERT INTO ${schema}.kv_case_record (unit, table_name, key, value) VALUES ($1, $2, $3, $4::jsonb) ON CONFLICT (unit, table_name, key) DO UPDATE SET value = EXCLUDED.value`,
@@ -224,9 +250,8 @@ class PostgresKvUnit implements KvUnit {
   }
 
   async deleteRecord(table: string, key: string): Promise<void> {
-    const { tenant, user } = this.guard()
-    const schema = this.schemaOf(tenant)
-    await this.backend.ensureUnit(tenant, this.descriptor)
+    const { schema, user } = this.scope()
+    await this.backend.ensureUnit(schema, this.descriptor)
     if (this.shared) {
       await this.backend.executor.query(
         `DELETE FROM ${schema}.kv_case_record WHERE unit = $1 AND table_name = $2 AND key = $3`,
@@ -241,12 +266,11 @@ class PostgresKvUnit implements KvUnit {
   }
 
   async setGlobal(value: unknown): Promise<void> {
-    const { tenant, user } = this.guard()
+    const { schema, user } = this.scope()
     if (!this.descriptor.hasGlobal) {
       throw new Error(`kv unit '${this.descriptor.name}' has no global slot`)
     }
-    const schema = this.schemaOf(tenant)
-    await this.backend.ensureUnit(tenant, this.descriptor)
+    await this.backend.ensureUnit(schema, this.descriptor)
     if (this.shared) {
       await this.backend.executor.query(
         `INSERT INTO ${schema}.kv_case_global (unit, value) VALUES ($1, $2::jsonb) ON CONFLICT (unit) DO UPDATE SET value = EXCLUDED.value`,

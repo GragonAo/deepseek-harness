@@ -590,4 +590,14 @@ describe('Host Workspace increments', () => {
     })
     abort.abort()
   })
+
+  it('loads the ambient partition before answering the workspace baseline', async () => {
+    const { api, ctx } = await harness()
+    const ensureLoaded = vi.spyOn(ctx.workspaceRegistry, 'ensureLoaded')
+    // A partitioned deployment answers this baseline from a partition that only
+    // a load opens, so a restarted process that skipped the load would report an
+    // empty registry and an empty archive set.
+    expect(expectOk(await api.workspace.list(request({})))).toEqual({ items: [], archivedSessionIds: [] })
+    expect(ensureLoaded).toHaveBeenCalledTimes(1)
+  })
 })

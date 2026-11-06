@@ -100,7 +100,7 @@ async function harness(options: {
     } as never)
   }
   if (options.mountWorkspaceRegistry !== false) {
-    ctx.provide('workspaceRegistry', { forgetSession, archivedSessionIds: [] } as never)
+    ctx.provide('workspaceRegistry', { forgetSession, archivedSessionIds: [], ensureLoaded: async () => {} } as never)
   }
   const api = createApiProxy(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
   return { ctx, api, order, persistenceDelete, forgetSession }

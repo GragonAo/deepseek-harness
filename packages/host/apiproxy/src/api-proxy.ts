@@ -15,7 +15,7 @@ import { AttachmentError, admitEncodedImages } from '@deepseek-ai/dsh-attachment
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { assertProviderRecord, contentHasImage, createUserMessage, freezeMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { errorChain } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, LlmProviderRecord, MessageSource } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, LlmCallConfig, LlmProviderRecord, MessageSource } from '@deepseek-ai/dsh-llm'
 import { isAppendSurfaceEvent, isJsonValue } from '@deepseek-ai/dsh-session'
 import type { JsonValue, Session, SessionEvent, SessionEventMap, SessionHeader, SessionId, UserMessage } from '@deepseek-ai/dsh-session'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
@@ -1299,6 +1299,69 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     return selection
   }
 
+  /** Why a turn's or a session's requested model could not be applied. */
+  interface TurnModelRefusal {
+    /** Wire error code callers already handle for an unusable route. */
+    readonly code: 'model-unavailable'
+    /** Human-readable reason, forwarded verbatim. */
+    readonly message: string
+    /** The requested route, so the client can point at it. */
+    readonly details: { provider: string; model: string }
+  }
+
+  /**
+   * Apply one turn's model override to a live Agent.
+   *
+   * Shared by `session.prompt` (a caller-supplied turn model) and
+   * `session.selectModel` (a durable session default), so both refuse a route the
+   * LLM service cannot resolve and both keep an image-bearing session on an
+   * image-capable model. Only the caller decides whether the choice is persisted.
+   *
+   * @param agent - the Agent that will run the turn.
+   * @param choice - provider, model, and optional reasoning effort.
+   * @returns the resolved selection, or the error payload to answer with.
+   */
+  async function resolveSelection(
+    agent: Agent,
+    choice: { provider: string; model: string; reasoningEffort?: string },
+  ): Promise<ModelSelection | TurnModelRefusal> {
+    let resolved: LlmCallConfig
+    try {
+      resolved = await ctx.llm.resolveCallConfig({
+        provider: choice.provider,
+        model: choice.model,
+        ...choice.reasoningEffort === undefined
+          ? {}
+          : { reasoningEffort: ReasoningEffortId(choice.reasoningEffort) },
+      })
+    } catch (error: unknown) {
+      return {
+        code: 'model-unavailable',
+        message: error instanceof Error ? error.message : String(error),
+        details: { provider: choice.provider, model: choice.model },
+      }
+    }
+    const pendingImage = [...agent.inbox.nextTurn, ...agent.inbox.nextStep]
+      .some(message => contentHasImage(message.content))
+    if (pendingImage || messagesHaveImage(agent.session.deriveMessages())) {
+      const info = await ctx.llm.resolveModelInfo(resolved.provider, resolved.model)
+      if (info.inputModalities !== undefined && !info.inputModalities.includes('image')) {
+        return {
+          code: 'model-unavailable',
+          message: `Model "${resolved.model}" does not accept image input, but this session already contains images; select an image-capable model.`,
+          details: { provider: choice.provider, model: choice.model },
+        }
+      }
+    }
+    return {
+      provider: resolved.provider,
+      model: resolved.model,
+      ...resolved.reasoningEffort === undefined
+        ? {}
+        : { reasoningEffort: resolved.reasoningEffort },
+    }
+  }
+
   /** Pre-publication setup used by both fresh and resumed Web agents. */
   function installSelection(agentCtx: Context): void {
     const agent = agentCtx.agent
@@ -2455,32 +2518,13 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         if ('error' in found) return err(request, found.error)
         return serializeImageAdmission(found.agent, async () => {
           try {
-            const resolved = await ctx.llm.resolveCallConfig({
+            const chosen = await resolveSelection(found.agent, {
               provider,
               model,
-              ...reasoningEffort === undefined
-                ? {}
-                : { reasoningEffort: ReasoningEffortId(reasoningEffort) },
+              ...reasoningEffort === undefined ? {} : { reasoningEffort },
             })
-            const pendingImage = [...found.agent.inbox.nextTurn, ...found.agent.inbox.nextStep]
-              .some(message => contentHasImage(message.content))
-            if (pendingImage || messagesHaveImage(found.agent.session.deriveMessages())) {
-              const info = await ctx.llm.resolveModelInfo(resolved.provider, resolved.model)
-              if (info.inputModalities !== undefined && !info.inputModalities.includes('image')) {
-                return err(request, {
-                  code: 'model-unavailable',
-                  message: `Model "${resolved.model}" does not accept image input, but this session already contains images; select an image-capable model.`,
-                  details: { provider, model },
-                })
-              }
-            }
-            const selected: ModelSelection = {
-              provider: resolved.provider,
-              model: resolved.model,
-              ...resolved.reasoningEffort === undefined
-                ? {}
-                : { reasoningEffort: resolved.reasoningEffort },
-            }
+            if ('code' in chosen) return err(request, chosen)
+            const selected: ModelSelection = chosen
             selectionFor(found.agent).current = selected
             try {
               await defaults.saveDefaultModelSelection?.(selected)
@@ -2629,7 +2673,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async prompt(request) {
-        const { sessionId, mode, content, clientTimeZone } = request.payload
+        const { sessionId, mode, content, clientTimeZone, model: turnModel } = request.payload
         const canonicalTimeZone = clientTimeZone === undefined
           ? undefined
           : canonicalClientTimeZone(clientTimeZone)
@@ -2640,9 +2684,22 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             details: { value: clientTimeZone },
           })
         }
-        const resolved = await turnAgentFor<{ accepted: true }>(request, sessionId)
-        if ('refused' in resolved) return resolved.refused
-        const agent = resolved.agent
+        const found = await turnAgentFor<{ accepted: true }>(request, sessionId)
+        if ('refused' in found) return found.refused
+        const agent = found.agent
+        // A turn may carry its own model. Resolving it here (before the message is
+        // enqueued) is what lets a running session switch: prompt assembly snapshots
+        // the selection at the next step, so the very turn being admitted is the one
+        // that rides the new route, and the session default is left untouched.
+        const selection = selectionFor(agent)
+        const previousSelection = selection.current
+        let turnSelection: LlmCallConfig | undefined
+        if (turnModel !== undefined) {
+          const chosen = await resolveSelection(agent, turnModel)
+          if ('code' in chosen) return err(request, chosen)
+          turnSelection = chosen
+          selection.current = chosen
+        }
         // Request identity and optional browser zone ride the exact durable user message.
         const source: MessageSource = {
           kind: 'user',
@@ -2683,7 +2740,11 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           }
           return ok(request, { accepted: true as const })
         }
-        return hasImage ? serializeImageAdmission(agent, admit) : admit()
+        const admitted = await (hasImage ? serializeImageAdmission(agent, admit) : admit())
+        // A refused prompt must not leave the session on a model it never ran:
+        // admission already saw the turn selection, so restore the old one.
+        if (turnSelection !== undefined && !('value' in admitted)) selection.current = previousSelection
+        return admitted
       },
 
       async attachment(request) {

@@ -205,6 +205,23 @@ export class WorkspaceRegistry extends Service {
   }
 
   /**
+   * Open the ambient request partition's durable state so the synchronous
+   * projections ({@link get}, {@link list}, {@link archivedSessionIds}) describe
+   * it instead of the pre-load empty state.
+   *
+   * Only writes open a partition on their own. A partitioned deployment boots
+   * lazily initialized (see `[Service.init]`), so until something writes, every
+   * read answers empty — including one that restarts a process whose partition
+   * state is already durable in PostgreSQL. A read that must describe durable
+   * state awaits this first; the open memoizes, so repeats are cheap.
+   * @returns resolution after the ambient partition is open and initialized.
+   */
+  async ensureLoaded(): Promise<void> {
+    this.assertStarted()
+    await this.ensurePartitionState()
+  }
+
+  /**
    * Delete one workspace registration while retaining its directory and every
    * session log. The durable order is updated before the table deletion; a
    * failed table write restores the prior order and keeps the entity

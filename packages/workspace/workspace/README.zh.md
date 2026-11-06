@@ -10,18 +10,19 @@ DeepSeek Harness 的 Workspace 实体注册表（`ctx.workspaceRegistry`）：�
 
 - `ctx.workspaceRegistry.create(path, title?)`：规范化 `path` 时使用 `fs.realpath`，拒绝不存在或非目录的路径，每个规范路径最多创建一条记录，并将新记录前置到持久 workspace 顺序。对同一路径重复调用会返回现有 workspace，且不改变其标题；不同路径可以共用显示标题。
 - `ctx.workspaceRegistry.get(id)`/`list()`/`resolveByPath(path)`：由缓存提供的查找。`list()` 为同步操作，并遵循持久注册表顺序；`resolveByPath` 为异步操作，因为它采用相同的 `realpath` 规范化方式，并会拒绝缺失路径，而不是创建路径。
+- `ctx.workspaceRegistry.ensureLoaded()`：打开环境请求分区的持久状态，使同步投影（`get`、`list`、`archivedSessionIds`）描述该状态。分区化部署在首次写入时才打开分区，在此之前投影为空，因此必须描述持久状态的读操作先等待它；打开是记忆化的。
 - `ctx.workspaceRegistry.insertBefore(id, before?)`：在持久注册表顺序内移动一个已注册 Workspace，语义类似 DOM 的 insertBefore：插到锚点之前，省略锚点则追加到末尾。来源或锚点不在注册表中时拒绝且不写入；以自身为锚点或移动到当前位置时直接完成且不写入。返回的 id 列表是完整的已提交顺序。
 - `ctx.workspaceRegistry.delete(id)`：只移除 Workspace 注册记录、对应的持久顺序条目及会话归属记录。未知 id 返回 `false`，成功移除记录则返回 `true`。目录、用户文件、活跃会话和持久化会话日志绝不受影响，因此相关会话会进入 Ungrouped。表写入失败时会恢复原顺序和此前发布的实体。
 - `Workspace.attachSession(id)`：对照 workspace 路径验证实时或已持久化的会话头 cwd，并将新 id 前置。未知会话、缺失／无法解析／非目录的 cwd 值和不匹配情况都会在不写入的前提下被拒绝。`detachSession` 只移除候选索引条目。
 - `Workspace.insertSessionBefore(id, before?)`：在手动顺序内移动一个已记账的会话，语义类似 DOM 的 insertBefore：插到锚点之前，省略锚点则追加到末尾。会话或锚点不在记账中时拒绝且不写入；移动到当前位置时直接完成且不写入。注册表中的 Workspace 顺序绝不改变。
-- `ctx.workspaceRegistry.archiveSession(id)`/`archivedSessionIds`：覆盖在 workspace 记账之上的注册表级全局归档集合：被归档的会话从各分组视图中消失，但其会话日志和 `sessionIds` 席位保持不变，未来取消归档时可恢复原位置。归档接受任何实时或已持久化的会话（无论已记账还是 Ungrouped），对已归档的 id 直接完成而不写入，并拒绝未知 id。在该字段出现之前写入的状态解析为一个空集合。
+- `ctx.workspaceRegistry.archiveSession(id)`/`archivedSessionIds`：覆盖在 workspace 记账之上的注册表级全局归档集合：被归档的会话从各分组视图中消失，但其会话日志和 `sessionIds` 席位保持不变，未来取消归档时可恢复原位置。归档接受任何实时或已持久化的会话（无论已记账还是 Ungrouped），对已归档的 id 直接完成而不写入，并拒绝未知 id。在该字段出现之前写入的状态解析为一个空集合。该集合属于单个请求分区，因此网关的 `workspace.list` 基线在投影它之前等待 `ensureLoaded()`，而租户载体在网关应答任何请求之前就打开了该请求的分区。
 - `ctx.workspaceRegistry.forgetSession(id)`：硬删除会话在注册表一侧的操作：在一次操作中把该 id（连同其 `sessionIds` 席位）从当前分区的所有 workspace 记账以及 `archivedSessionIds` 中移除。与归档不同——归档保留席位，取消归档即可恢复原位置——遗忘没有恢复路径。记账写入先于归档写入提交，因此发布出去的归档快照绝不会携带仍被记账持有的 id。幂等且绝不拒绝：未被任何记账持有且不在归档集合中的 id（包括该分区从未见过的 id）直接完成而不写入。
 - `Workspace.sessionIds`：按持久候选顺序提供同步 id 加规范 cwd 成员投影。缺失头部、无效 cwd 值和不匹配情况都被过滤；下一次 workspace 变更会剪除它们。如果同一存储介质将一个会话索引到两个 workspace 下、用两条记录声明同一路径，或偏离持久 workspace 顺序，启动会被拒绝。
 - `Workspace.status()`：未缓存的目录检查，返回 `'ok' | 'missing-dir'`；目录缺失绝不会改动记录。
 
 `storageDomain` 和 `sessionPersistence` 是启动必需依赖。任一依赖服务不可用时，插件保持待处理，且不能提交空的已初始化标记。首次成功启动时，注册表调用 `SessionPersistence.list()`，仅使用头部 `id`、`cwd` 和 `createdAt` 对有效历史目录分组并持久化初始顺序；它绝不读取事件正文。已初始化标记最后写入，因此重启后可安全复用引导初始化期间的部分写入。后续仅能通过 cwd 识别的会话仍属于 Ungrouped。
 
-在租户服务部署（`dsh-tenant`）中，注册表按请求分区键控状态，并惰性打开该分区的 KV 领域。环境分区之外，它以空的、不抛错的投影启动，不打开该分区的 Postgres 领域，也不写入已初始化标记。携带租户与用户的分区内的首次访问会打开该分区的领域（分区的 `tenantName` schema 加主键内嵌的 `user_id`），从 `SessionPersistence.list()` 引导初始化，并重建该分区的实体缓存；打开的领域、头部索引、实体缓存、待处理变更状态以及每个实体的宿主绑定都按该分区键控。单分区部署保持既有的急切行为。分区经 [`@deepseek-ai/dsh-partition-scope`](../../core/partition-scope/README.md) 读取，因此本包不依赖任何多租户实现。
+在租户服务部署（`dsh-tenant`）中，注册表按请求分区键控状态，并惰性打开该分区的 KV 领域。环境分区之外，它以空的、不抛错的投影启动，不打开该分区的 Postgres 领域，也不写入已初始化标记。携带租户与用户的分区内的首次访问会打开该分区的领域（分区的 `tenantName` schema 加主键内嵌的 `user_id`），从 `SessionPersistence.list()` 引导初始化，并重建该分区的实体缓存；打开的领域、头部索引、实体缓存、待处理变更状态以及每个实体的宿主绑定都按该分区键控。单分区部署保持既有的急切行为。分区经 [`@deepseek-ai/dsh-partition-scope`](../../core/partition-scope/README.md) 读取，因此本包不依赖任何多租户实现。由于分区在首次写入时才打开，必须描述持久状态的读操作会自己要求这次打开：网关的 `workspace.list` 基线等待 `ensureLoaded()`，租户载体也在应答任何请求之前等待它，因此刚重启的进程不会把注册表投影成空。
 
 创建和删除操作会在记录和顺序可能分叉之前，先持久化明确的待处理变更标记。启动时只补全该标记所指明的变更，随后清除标记；没有标记的顺序／表不一致仍属于来源不明的损坏，并会明确报错。删除后重新注册同一路径会生成新的 Workspace id，且不会自动重新接纳保留下来的会话。
 
@@ -45,4 +46,4 @@ DeepSeek Harness 的 Workspace 实体注册表（`ctx.workspaceRegistry`）：�
 
 - 本包不删除会话、不删除已存储的会话日志、也不删除目录：`delete(id)` 只移除一条 Workspace 注册记录，`forgetSession(id)` 只清除会话在本包的记账，而删除会话是 `@deepseek-ai/dsh-host-apiproxy` 的 `session.delete`，它把持久化移除与本包的 `forgetSession` 组合起来。本包也没有任何操作会删除目录，而删除 Workspace 注册记录绝不能替代那种破坏性的文件夹移除（参见[决策记录](../../../.agents/notes/implemented/feature/2026-07-27-workspace-registration-deletion.md)）。
 - 头部索引会在启动时刷新，也会在 attach 必须解析未缓存持久 id 时刷新；另一进程执行的删除或造成的 cwd 损坏会在下次刷新或重启后被发现。
-- 同步的 `list()`/`get()`/`archivedSessionIds` 投影无法等待某个分区的惰性领域打开，因此 (租户, 用户) 作用域内的首次访问投影为空，直到某个异步方法（`create`、`delete`、`insertBefore`、`archiveSession`、`forgetSession` 或 `resolveByPath`）打开该分区。API 的 `workspace.list` 处理器完全同步，此处不做改动。
+- 同步的 `list()`/`get()`/`archivedSessionIds` 投影无法等待某个分区的惰性领域打开。必须描述持久状态的读操作先等待 `ensureLoaded()`；跳过它的调用方看到的是打开前的空投影，直到某个异步方法（`create`、`delete`、`insertBefore`、`archiveSession`、`forgetSession`、`ensureLoaded` 或 `resolveByPath`）打开该分区。

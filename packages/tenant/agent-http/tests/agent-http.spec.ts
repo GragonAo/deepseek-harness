@@ -393,12 +393,24 @@ describe('AgentHttp', () => {
       gateway.listItems = [
         { sessionId: archived }, { sessionId: live }, { sessionId: otherUser }, { sessionId: globex },
       ]
-      // The archive set the ambient tenant's workspace registry reports.
-      ctx.provide('workspaceRegistry', { archivedSessionIds: [archived] } as never)
+      // A registry that projects the archive set only once its partition has
+      // been loaded — what a restarted process answers until something opens it.
+      let loaded = false
+      let loads = 0
+      ctx.provide('workspaceRegistry', {
+        ensureLoaded: async () => {
+          loads += 1
+          loaded = true
+        },
+        get archivedSessionIds(): readonly string[] {
+          return loaded ? [archived] : []
+        },
+      } as never)
 
       const listed = await ctx.agentHttp.fetch(sessionListRequest(await issueToken('acme', 'user-1')))
       const listedBody = await listed.json() as { result?: { value?: { items?: Array<{ sessionId: string }> } } }
       expect(listedBody.result?.value?.items?.map(i => i.sessionId)).toEqual([live])
+      expect(loads).toBeGreaterThan(0)
 
       const searched = await ctx.agentHttp.fetch(sessionSearchRequest(await issueToken('acme', 'user-1'), 's'))
       const searchedBody = await searched.json() as { result?: { value?: { items?: Array<{ sessionId: string }> } } }
@@ -409,6 +421,33 @@ describe('AgentHttp', () => {
       const globexListed = await ctx.agentHttp.fetch(sessionListRequest(await issueToken('globex', 'user-1')))
       const globexBody = await globexListed.json() as { result?: { value?: { items?: Array<{ sessionId: string }> } } }
       expect(globexBody.result?.value?.items?.map(i => i.sessionId)).toEqual([globex])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps the listing when the archive set cannot be loaded', async () => {
+    const { ctx, gateway } = await boot()
+    try {
+      const archived = createScopedSession(ctx, 'acme', 'user-1')
+      const live = createScopedSession(ctx, 'acme', 'user-1')
+      gateway.listItems = [{ sessionId: archived }, { sessionId: live }]
+      // A workspace-storage fault must not cost the tenant its session list: the
+      // archive filter is decoration, so the items are served unfiltered.
+      let loaded = false
+      ctx.provide('workspaceRegistry', {
+        ensureLoaded: async () => {
+          throw new Error('workspace storage down')
+        },
+        get archivedSessionIds(): readonly string[] {
+          return loaded ? [archived] : []
+        },
+      } as never)
+
+      const listed = await ctx.agentHttp.fetch(sessionListRequest(await issueToken('acme', 'user-1')))
+      expect(listed.status).toBe(200)
+      const body = await listed.json() as { result?: { value?: { items?: Array<{ sessionId: string }> } } }
+      expect(body.result?.value?.items?.map(i => i.sessionId)).toEqual([archived, live])
     } finally {
       await ctx.fiber.dispose()
     }

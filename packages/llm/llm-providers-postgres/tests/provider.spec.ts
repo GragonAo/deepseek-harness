@@ -1,13 +1,14 @@
-// The tenant provider registry: one case-shared llm_providers unit per tenant
-// schema, written through the postgres backend and read back by every user of
-// that tenant. Reads outside any tenant scope fail safe to the empty list.
+// The deployment-wide provider registry: one llm_providers unit opened outside
+// any tenant scope, so its rows live in the backend's system schema and every
+// tenant reads the same routes. Writes issued from inside a request's tenant
+// scope must still reach that one registry.
 
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Storage, { storageBackendServiceKey } from '@deepseek-ai/dsh-storage'
 import { PostgresStorageBackend } from '@deepseek-ai/dsh-storage-postgres'
 import type { SqlExecutor } from '@deepseek-ai/dsh-storage-postgres'
-import { TenantId, TenantPartitionScope, UserId, runWithTenant, runWithUser, tenantPartitionName } from '@deepseek-ai/dsh-tenant'
+import { TenantId, TenantPartitionScope, UserId, runWithTenant, runWithUser } from '@deepseek-ai/dsh-tenant'
 import type { Tenant } from '@deepseek-ai/dsh-tenant'
 import type { LlmProviderRecord } from '@deepseek-ai/dsh-llm'
 import PostgresLlmProviderStore from '../src/index.ts'
@@ -21,7 +22,7 @@ function scoped<T>(scope: Tenant, user: string, fn: () => T): T {
   return runWithTenant(scope, () => runWithUser(UserId(user), fn))
 }
 
-/** A record an administrator would add for one tenant. */
+/** A record an administrator would add for the whole harness. */
 function record(overrides: Partial<LlmProviderRecord> = {}): LlmProviderRecord {
   return {
     id: 'acme-gateway',
@@ -36,9 +37,9 @@ function record(overrides: Partial<LlmProviderRecord> = {}): LlmProviderRecord {
 }
 
 /**
- * In-memory stand-in for the tenant schema's kv_case_record table: it keeps
- * rows keyed by (schema, unit, table, key) so a test can prove which table a
- * write reached and whether tenants stay isolated.
+ * In-memory stand-in for the kv_case_record table: it keeps rows keyed by
+ * (schema, unit, table, key) so a test can prove which schema a write reached
+ * and that the system schema is the only one the registry ever addresses.
  */
 class SharedExecutor implements SqlExecutor {
   readonly calls: Array<{ text: string; values?: readonly unknown[] }> = []
@@ -99,21 +100,19 @@ async function boot(executor: SqlExecutor = new SharedExecutor()): Promise<{ ctx
 }
 
 describe('PostgresLlmProviderStore', () => {
-  it('lists nothing outside any tenant scope and never touches Postgres', async () => {
+  it('starts empty without reading a tenant', async () => {
     const { ctx, executor } = await boot()
     await expect(ctx.llmProviders.list()).resolves.toEqual([])
-    expect((executor as SharedExecutor).calls).toEqual([])
+    expect((executor as SharedExecutor).calls.some(call => /kv_case_record/.test(call.text))).toBe(true)
   })
 
-  it('stores a record in the tenant-shared table without a user partition', async () => {
+  it('writes a record into the system schema without a user partition', async () => {
     const executor = new SharedExecutor()
     const { ctx } = await boot(executor)
-    await scoped(tenant('acme'), 'user-1', () => ctx.llmProviders.upsert(record()))
+    await ctx.llmProviders.upsert(record())
 
-    const schema = tenantPartitionName(TenantId('acme'))
-    const insert = executor.calls.find(call => call.text.startsWith('INSERT') && call.text.includes(schema + '.kv_case_record'))
-    expect(insert, 'routes the write to the tenant schema').toBeDefined()
-    expect(insert!.text).toContain('INSERT')
+    const insert = executor.calls.find(call => call.text.startsWith('INSERT') && call.text.includes('dsh_system.kv_case_record'))
+    expect(insert, 'routes the write to the system schema').toBeDefined()
     expect(insert!.text).not.toContain('user_id')
     expect(insert!.values?.[0]).toBe('llm_providers')
     expect(insert!.values?.[1]).toBe('provider')
@@ -121,17 +120,32 @@ describe('PostgresLlmProviderStore', () => {
     expect(JSON.parse(String(insert!.values?.[3]))).toEqual(record())
   })
 
-  it('serves one registry to every user of a tenant and nothing to another tenant', async () => {
+  it('serves one registry to every tenant, whichever scope reads it', async () => {
     const executor = new SharedExecutor()
     const { ctx } = await boot(executor)
-    await scoped(tenant('acme'), 'user-1', () => ctx.llmProviders.upsert(record()))
+    await ctx.llmProviders.upsert(record())
 
-    const readByColleague = await scoped(tenant('acme'), 'user-2', () => ctx.llmProviders.list())
-    expect(readByColleague.map(entry => entry.id)).toEqual(['acme-gateway'])
-    expect(readByColleague[0]!.baseURL).toBe('https://gateway.acme.example/v1')
+    for (const reader of ['acme', 'globex']) {
+      const listed = await scoped(tenant(reader), 'user-1', () => ctx.llmProviders.list())
+      expect(listed.map(entry => entry.id), reader + ' reads the deployment registry').toEqual(['acme-gateway'])
+      expect(listed[0]!.baseURL).toBe('https://gateway.acme.example/v1')
+    }
+    // Every read addressed the system schema; no tenant schema was ever touched.
+    const schemas = new Set(executor.calls
+      .map(call => /\b(?:FROM|INTO) (\S+)\.kv_case_record/.exec(call.text)?.[1])
+      .filter((schema): schema is string => schema !== undefined))
+    expect([...schemas]).toEqual(['dsh_system'])
+  })
 
-    const otherTenant = await scoped(tenant('globex'), 'user-1', () => ctx.llmProviders.list())
-    expect(otherTenant).toEqual([])
+  it('keeps writing to the system schema when the write arrives inside a tenant scope', async () => {
+    const executor = new SharedExecutor()
+    const { ctx } = await boot(executor)
+    await scoped(tenant('acme'), 'user-1', () => ctx.llmProviders.upsert(record({ displayName: 'Written in scope' })))
+
+    const insert = executor.calls.find(call => call.text.startsWith('INSERT') && call.text.includes('kv_case_record'))
+    expect(insert!.text).toContain('dsh_system.kv_case_record')
+    const readBack = await ctx.llmProviders.list()
+    expect(readBack.map(entry => entry.displayName)).toEqual(['Written in scope'])
   })
 
   it('replaces a record on upsert and notifies listeners after each write', async () => {
@@ -140,27 +154,25 @@ describe('PostgresLlmProviderStore', () => {
     const changes: string[] = []
     cleanups.push(ctx.effect(() => ctx.llmProviders.onChange(() => changes.push('changed')), 'test: change listener'))
 
-    await scoped(tenant('acme'), 'user-1', () => ctx.llmProviders.upsert(record()))
-    await scoped(tenant('acme'), 'user-1', () => ctx.llmProviders.upsert(record({ displayName: 'Acme Gateway 2' })))
-    await scoped(tenant('acme'), 'user-1', () => ctx.llmProviders.remove('acme-gateway'))
+    await ctx.llmProviders.upsert(record())
+    await ctx.llmProviders.upsert(record({ displayName: 'Acme Gateway 2' }))
+    await ctx.llmProviders.remove('acme-gateway')
 
     expect(changes).toEqual(['changed', 'changed', 'changed'])
-    const stored = await scoped(tenant('acme'), 'user-1', () => ctx.llmProviders.list())
+    const stored = await ctx.llmProviders.list()
     expect(stored).toEqual([])
   })
 
   it('caches the loaded set for synchronous snapshot reads', async () => {
     const executor = new SharedExecutor()
     const { ctx } = await boot(executor)
-    await scoped(tenant('acme'), 'user-1', async () => {
-      expect(ctx.llmProviders.snapshot()).toEqual([])
-      await ctx.llmProviders.refresh()
-      expect(ctx.llmProviders.snapshot()).toEqual([])
-      await ctx.llmProviders.upsert(record())
-      expect(ctx.llmProviders.snapshot().map(entry => entry.id)).toEqual(['acme-gateway'])
-    })
-    // Outside the scope the synchronous read answers nothing rather than leaking.
     expect(ctx.llmProviders.snapshot()).toEqual([])
+    await ctx.llmProviders.refresh()
+    await ctx.llmProviders.upsert(record())
+    expect(ctx.llmProviders.snapshot().map(entry => entry.id)).toEqual(['acme-gateway'])
+    // The snapshot is the deployment registry, not a scope-conditional view.
+    expect(scoped(tenant('globex'), 'user-9', () => ctx.llmProviders.snapshot()).map(entry => entry.id))
+      .toEqual(['acme-gateway'])
   })
 
   it('notifies on a write but not on a refresh that observes no change', async () => {
@@ -168,8 +180,8 @@ describe('PostgresLlmProviderStore', () => {
     const { ctx } = await boot(executor)
     const changes: string[] = []
     cleanups.push(ctx.effect(() => ctx.llmProviders.onChange(() => changes.push('changed')), 'test: change listener'))
-    await scoped(tenant('acme'), 'user-1', () => ctx.llmProviders.upsert(record()))
-    await scoped(tenant('acme'), 'user-1', () => ctx.llmProviders.refresh())
+    await ctx.llmProviders.upsert(record())
+    await ctx.llmProviders.refresh()
     expect(changes).toEqual(['changed'])
   })
 
@@ -177,13 +189,7 @@ describe('PostgresLlmProviderStore', () => {
     const executor = new SharedExecutor()
     const { ctx } = await boot(executor)
     const unusable = { ...record(), baseURL: '' }
-    await expect(scoped(tenant('acme'), 'user-1', () => ctx.llmProviders.upsert(unusable as LlmProviderRecord)))
-      .rejects.toThrow(/baseURL/)
-    expect(executor.calls.filter(call => call.text.includes('INSERT'))).toEqual([])
-  })
-
-  it('refuses a write outside any tenant scope', async () => {
-    const { ctx } = await boot()
-    await expect(ctx.llmProviders.upsert(record())).rejects.toMatchObject({ code: 'NO_TENANT_IN_SCOPE' })
+    await expect(ctx.llmProviders.upsert(unusable as LlmProviderRecord)).rejects.toThrow(/baseURL/)
+    expect(executor.calls.filter(call => call.text.includes('kv_case_record') && call.text.startsWith('INSERT'))).toEqual([])
   })
 })

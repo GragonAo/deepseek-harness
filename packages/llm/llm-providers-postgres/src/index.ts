@@ -1,32 +1,38 @@
 /**
- * PostgreSQL-backed provider registry for the multi-tenant carrier. One
- * case-shared storage unit named llm_providers keeps the administrator-managed
- * provider routes (endpoint, wire API, model list, credential) under the ambient
- * tenant alone — no per-user partition — so every subject of a tenant reads one
- * registry and no host-side config file is involved. A write notifies the
- * seam's listeners, which is what lets a consumer re-resolve its routing in the
- * same process instead of needing a restart.
+ * PostgreSQL-backed provider registry: one deployment-wide storage unit named
+ * `llm_providers` keeps the administrator-managed provider routes (endpoint,
+ * wire API, model list, credential) for the whole harness, not per case. The
+ * unit is opened outside any tenant scope, so its rows live in the backend's
+ * system schema and every tenant reads the same routes; no host-side config
+ * file is involved. A write notifies the seam's listeners, which is what lets a
+ * consumer re-resolve its routing in the same process instead of needing a
+ * restart.
  * @module @deepseek-ai/dsh-llm-providers-postgres
  */
 
 import { Service } from '@deepseek-ai/cordis'
 import { assertProviderRecord, LlmProviderStore } from '@deepseek-ai/dsh-llm'
 import type { LlmProviderRecord } from '@deepseek-ai/dsh-llm'
-import { currentTenant, requireTenant, type Tenant } from '@deepseek-ai/dsh-tenant'
 import { storageBackendServiceKey, type KvFacet, type KvUnit } from '@deepseek-ai/dsh-storage'
 
 /** KV unit name hosting the provider registry; unique across the storage hub. */
 const UNIT_NAME = 'llm_providers'
 /** Single table whose keys are provider ids and values are provider records. */
 const RECORD_TABLE = 'provider'
-/** The unit is case-shared: records live under the tenant, not per user. */
+/**
+ * Case-shared, because the unit carries no user dimension. Opening it outside a
+ * tenant scope is what makes it deployment-wide; the backend requires a shared
+ * unit for that, and rejects a per-user one with no tenant.
+ */
 const UNIT_DESCRIPTOR = { name: UNIT_NAME, version: 1, tables: [RECORD_TABLE], hasGlobal: false, shared: true } as const
 
 /**
- * PostgreSQL provider registry: the durable store lives in the postgres
- * backend's per-tenant schema, shared by every user of the tenant. Outside any
- * tenant scope list() serves nothing and never touches Postgres (fails safe),
- * which leaves the configuration tier as the only provider source.
+ * The deployment-wide provider registry. The durable store lives in the
+ * storage backend's system schema, which every tenant reads, so an
+ * administrator configures a provider once for the whole harness. The unit is
+ * opened once at activation, outside any tenant scope, and its handle is reused
+ * for every later read and write — opening it lazily inside a request would
+ * bind it to that request's tenant instead.
  */
 export class PostgresLlmProviderStore extends LlmProviderStore {
   // The hub (storage) resolves the postgres backend through ctx.storage.backend;
@@ -34,11 +40,11 @@ export class PostgresLlmProviderStore extends LlmProviderStore {
   // the backend registers, exactly as settings-postgres wires it.
   static inject = ['storage', storageBackendServiceKey('postgres')]
 
-  /** Open unit handles, keyed by tenant id — a shared unit opens once per tenant. */
-  private readonly units = new Map<string, KvUnit>()
+  /** The one open unit handle, captured at activation. */
+  private unitHandle: KvUnit | undefined
 
-  /** Last loaded records per tenant id: what the synchronous snapshot answers with. */
-  private readonly cache = new Map<string, readonly LlmProviderRecord[]>()
+  /** Last loaded records: what the synchronous snapshot answers with. */
+  private cached: readonly LlmProviderRecord[] = []
 
   /** Re-entrancy guard: a listener may resolve profiles, which must not re-enter. */
   private notifying = false
@@ -58,34 +64,26 @@ export class PostgresLlmProviderStore extends LlmProviderStore {
   }
 
   /**
-   * Open (or reuse) the tenant's shared provider unit.
-   * @param tenant - the ambient tenant captured at operation entry.
+   * The open deployment-wide unit.
    * @returns the open unit handle.
    */
-  private async unit(tenant: Tenant): Promise<KvUnit> {
-    const key = String(tenant.id)
-    const existing = this.units.get(key)
-    if (existing !== undefined) return existing
-    const unit = await this.backendKv().open(UNIT_DESCRIPTOR)
-    this.units.set(key, unit)
-    return unit
+  private unit(): KvUnit {
+    const handle = this.unitHandle
+    if (handle === undefined) {
+      throw new Error('llm-providers-postgres: provider unit is not open yet')
+    }
+    return handle
   }
 
   override snapshot(): readonly LlmProviderRecord[] {
-    const tenant = currentTenant()
-    if (tenant === undefined) return []
-    return this.cache.get(String(tenant.id)) ?? []
+    return this.cached
   }
 
   override async refresh(): Promise<readonly LlmProviderRecord[]> {
     const records = await this.load()
-    const tenant = currentTenant()
-    if (tenant !== undefined) {
-      const key = String(tenant.id)
-      const previous = this.cache.get(key)
-      this.cache.set(key, records)
-      if (JSON.stringify(previous) !== JSON.stringify(records)) this.notify()
-    }
+    const previous = this.cached
+    this.cached = records
+    if (JSON.stringify(previous) !== JSON.stringify(records)) this.notify()
     return records
   }
 
@@ -105,12 +103,9 @@ export class PostgresLlmProviderStore extends LlmProviderStore {
     }
   }
 
-  /** Load and validate the ambient tenant's records from the medium. */
+  /** Load and validate the stored records from the medium. */
   private async load(): Promise<readonly LlmProviderRecord[]> {
-    const tenant = currentTenant()
-    if (tenant === undefined) return []
-    const unit = await this.unit(tenant)
-    const snapshot = await unit.loadAll()
+    const snapshot = await this.unit().loadAll()
     const table = snapshot.tables[RECORD_TABLE] ?? {}
     const records: LlmProviderRecord[] = []
     for (const [key, raw] of Object.entries(table)) {
@@ -135,30 +130,30 @@ export class PostgresLlmProviderStore extends LlmProviderStore {
 
   override async upsert(record: LlmProviderRecord): Promise<void> {
     const checked = assertProviderRecord(record)
-    const unit = await this.unit(requireTenant())
-    await unit.putRecord(RECORD_TABLE, checked.id, checked)
-    const cached = this.snapshot()
-    const next = [...cached.filter(entry => entry.id !== checked.id), checked]
+    await this.unit().putRecord(RECORD_TABLE, checked.id, checked)
+    this.cached = [...this.cached.filter(entry => entry.id !== checked.id), checked]
       .sort((left, right) => left.id.localeCompare(right.id))
-    this.cache.set(String(requireTenant().id), next)
     this.notify()
   }
 
   override async remove(id: string): Promise<void> {
     const key = id.trim()
     if (key === '') throw new TypeError('llm-providers-postgres: remove needs a provider id')
-    const unit = await this.unit(requireTenant())
-    await unit.deleteRecord(RECORD_TABLE, key)
-    const tenant = requireTenant()
-    this.cache.set(String(tenant.id), this.snapshot().filter(entry => entry.id !== key))
+    await this.unit().deleteRecord(RECORD_TABLE, key)
+    this.cached = this.cached.filter(entry => entry.id !== key)
     this.notify()
   }
 
   async* [Service.init](): AsyncGenerator<() => Promise<void>, void, void> {
+    // Opening here (plugin activation, never inside a request) is what binds the
+    // unit to the deployment-wide schema instead of a request's tenant.
+    this.unitHandle = await this.backendKv().open(UNIT_DESCRIPTOR)
+    this.cached = await this.load()
+    const handle = this.unitHandle
     yield async () => {
-      const handles = [...this.units.values()]
-      this.units.clear()
-      await Promise.allSettled(handles.map(unit => unit.close()))
+      this.unitHandle = undefined
+      this.cached = []
+      await handle.close()
     }
   }
 }

@@ -201,6 +201,12 @@ export class AgentHttp extends Service {
   private async delegate(request: Request, tenant: Tenant, user: UserId): Promise<Response> {
     const { pathname } = new URL(request.url)
     const channelMethod = pathname.startsWith(`${API_PATH}/`) ? pathname.slice(API_PATH.length + 1) : ''
+    // Open this request's registry partition before the gateway answers. The
+    // gateway's workspace projections are synchronous, and a partition that no
+    // write has opened projects empty — the state a freshly restarted process is
+    // in — so without this its listings, its archive set, and its workspace
+    // lookups would all describe nothing.
+    await this.loadRegistryPartition()
     const operation = request.method === 'POST' ? TENANT_QUESTION_METHODS.get(channelMethod) : undefined
     // The question channel's own methods answer here, in place of the gateway's
     // closed method map; every other request — including a non-POST on these
@@ -224,6 +230,25 @@ export class AgentHttp extends Service {
       return await this.scopeSessionChannel(response, tenant.id, user)
     }
     return response
+  }
+
+  /**
+   * Open the ambient (tenant, user) partition of the workspace registry, so the
+   * gateway's synchronous projections below describe durable state.
+   *
+   * The open memoizes, so only the first request in a partition reads the
+   * medium. A workspace-storage fault is recorded and swallowed: the registry is
+   * one of many services behind this carrier, and a request that does not touch
+   * it must still be answered.
+   */
+  private async loadRegistryPartition(): Promise<void> {
+    const registry = this.ctx.get('workspaceRegistry')
+    if (registry === undefined) return
+    try {
+      await registry.ensureLoaded()
+    } catch (error: unknown) {
+      this.ctx.logger.warn(error instanceof Error ? error : new Error(String(error)))
+    }
   }
 
   /**
@@ -322,10 +347,10 @@ export class AgentHttp extends Service {
    */
   private async scopeSessionChannel(response: Response, tenantId: TenantId, user: UserId): Promise<Response> {
     // Read the archive set before consuming the body: the snapshot has to come
-    // from the ambient partition while this call still holds it.
-    const archived = new Set<string>(
-      (this.ctx.get('workspaceRegistry')?.archivedSessionIds ?? []).map(String),
-    )
+    // from the ambient partition while this call still holds it. The partition
+    // itself was opened by {@link loadRegistryPartition}, so this projection
+    // describes the durable set rather than the pre-load empty one.
+    const archived = new Set<string>((this.ctx.get('workspaceRegistry')?.archivedSessionIds ?? []).map(String))
     const body = await response.json() as {
       result?: { ok?: boolean; value?: { items?: Array<{ sessionId?: unknown }> } }
     }

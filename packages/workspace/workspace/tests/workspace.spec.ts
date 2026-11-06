@@ -177,6 +177,13 @@ function requireTestPartition(ctx: Context): { tenant: string; user: string } {
 }
 
 /**
+ * Durable medium of one partition-keyed backend: what survives a process
+ * restart. Handed between harnesses to boot a second registry over the same
+ * stored state.
+ */
+type PartitionMedia = Map<string, { tables: Map<string, Map<string, unknown>>; global: unknown }>
+
+/**
  * Request-partition-keyed in-memory backend mirroring `storage-postgres`: one
  * medium per (partition, unit) and an open that fails closed outside any
  * partition, so a partitionless boot presents the same `NO_TENANT_IN_SCOPE` the
@@ -185,9 +192,10 @@ function requireTestPartition(ctx: Context): { tenant: string; user: string } {
 class PartitionMemoryBackend implements StorageBackend {
   readonly kv: { open(descriptor: KvUnitDescriptor): Promise<KvUnit> }
   private readonly openKeys = new Set<string>()
-  private readonly media = new Map<string, { tables: Map<string, Map<string, unknown>>; global: unknown }>()
+  private readonly media: PartitionMedia
 
-  constructor(private readonly ctx: Context) {
+  constructor(private readonly ctx: Context, media: PartitionMedia = new Map()) {
+    this.media = media
     this.kv = {
       open: async (descriptor) => {
         const active = requireTestPartition(this.ctx)
@@ -240,26 +248,33 @@ class PartitionMemoryBackend implements StorageBackend {
   }
 
   async close(): Promise<void> {
+    // Only the open handles are per-process; the medium is what a restart keeps.
     this.openKeys.clear()
-    this.media.clear()
   }
 }
 
 /** Boot the registry over the partition-keyed backend, with no partition in scope. */
-async function partitionHarness() {
+async function partitionHarness(media?: PartitionMedia) {
   const ctx = new Context()
   const scope = new TestPartitionScope(ctx, undefined)
   await ctx.plugin(Storage)
-  ctx.storage.backend.register('memory', new PartitionMemoryBackend(ctx))
+  ctx.storage.backend.register('memory', new PartitionMemoryBackend(ctx, media))
   const facility = new DomainFacility(ctx, { backend: 'memory', routes: {} })
   ctx.storage.mount('domain', facility)
   ctx.provide('storageDomain', facility)
-  const list = vi.fn(async () => [] as SessionHeader[])
+  let listed: SessionHeader[] = []
+  const list = vi.fn(async () => listed)
   const load = vi.fn(() => { throw new Error('event bodies must not be loaded') })
   const inspect = vi.fn(() => { throw new Error('event bodies must not be inspected') })
   ctx.provide('sessionPersistence', { isDeleted: () => false, list, load, inspect } as never)
-  await ctx.plugin(WorkspaceRegistry)
-  return { ctx, scope, registry: ctx.workspaceRegistry }
+  const fiber = await ctx.plugin(WorkspaceRegistry)
+  return {
+    ctx,
+    scope,
+    fiber,
+    registry: ctx.workspaceRegistry,
+    setSessions: (headers: SessionHeader[]) => { listed = headers },
+  }
 }
 
 function record(path: string, sessionIds: string[], createdAt = '2026-07-24T00:00:00.000Z'): WorkspaceRecord {
@@ -1232,5 +1247,52 @@ describe('partition-scoped registry', () => {
     // user-1 still sees exactly its own workspace.
     expect((await scoped(scope, 'acme', 'user-1', () => registry.list())).map(workspace => workspace.path))
       .toEqual([await realpath(dirA)])
+  })
+
+  it('projects the durable state on a read that loads the partition first', async () => {
+    // One medium shared by two registries: the second boot stands for a
+    // restarted process, whose partition is durable but not yet opened.
+    const media: PartitionMedia = new Map()
+    const dir = await makeDir('archive-restart')
+    const archived = SessionId('s1')
+    const first = await partitionHarness(media)
+    first.setSessions([header('s1', dir, 100)])
+    await scoped(first.scope, 'acme', 'user-1', () => first.registry.create(dir))
+    await scoped(first.scope, 'acme', 'user-1', () => first.registry.archiveSession(archived))
+    await first.fiber.dispose()
+
+    const restarted = await partitionHarness(media)
+    restarted.setSessions([header('s1', dir, 100)])
+    // No write has opened this partition in this process, so every projection is
+    // still empty — the state reads saw before the load gate existed.
+    expect(restarted.registry.list()).toEqual([])
+    expect(restarted.registry.archivedSessionIds).toEqual([])
+
+    // Loading first makes the same reads describe the durable state.
+    const loaded = await scoped(restarted.scope, 'acme', 'user-1', async () => {
+      await restarted.registry.ensureLoaded()
+      return {
+        paths: restarted.registry.list().map(workspace => workspace.path),
+        archived: restarted.registry.archivedSessionIds.map(String),
+      }
+    })
+    expect(loaded.paths).toEqual([await realpath(dir)])
+    expect(loaded.archived).toEqual(['s1'])
+
+    // The gate opens the ambient partition only: a neighbour that never wrote
+    // keeps its own empty state instead of inheriting this one. Its bootstrap
+    // groups whatever persistence lists, so it starts from an empty listing.
+    restarted.setSessions([])
+    const userNeighbour = await scoped(restarted.scope, 'acme', 'user-2', async () => {
+      await restarted.registry.ensureLoaded()
+      return { list: restarted.registry.list(), archived: restarted.registry.archivedSessionIds }
+    })
+    expect(userNeighbour).toEqual({ list: [], archived: [] })
+    const tenantNeighbour = await scoped(restarted.scope, 'globex', 'user-1', async () => {
+      await restarted.registry.ensureLoaded()
+      return { list: restarted.registry.list(), archived: restarted.registry.archivedSessionIds }
+    })
+    expect(tenantNeighbour).toEqual({ list: [], archived: [] })
+    await restarted.fiber.dispose()
   })
 })
