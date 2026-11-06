@@ -15,10 +15,11 @@ export const name = 'llm-providers-postgres-invariant'
 export const inject = ['invariants']
 
 /**
- * No runtime invariant: the store owns per-tenant KV unit handles over the shared
- * postgres backend, and the authoritative relation (each tenant's provider
- * records) lives in Postgres, so asserting it here would require side-effectful
- * reads against a connection pool this companion does not own.
+ * No runtime invariant: the store owns one deployment-wide KV unit handle over
+ * the shared postgres backend, and the authoritative relation (the catalog in
+ * that unit's global singleton) lives in Postgres, so asserting it here would
+ * require side-effectful reads against a connection pool this companion does not
+ * own.
  */
 const install: InvariantInstaller = () => {}
 

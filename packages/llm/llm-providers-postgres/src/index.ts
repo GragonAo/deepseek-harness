@@ -2,11 +2,12 @@
  * PostgreSQL-backed provider registry: one deployment-wide storage unit named
  * `llm_providers` keeps the administrator-managed provider routes (endpoint,
  * wire API, model list, credential) for the whole harness, not per case. The
- * unit is opened outside any tenant scope, so its rows live in the backend's
- * system schema and every tenant reads the same routes; no host-side config
- * file is involved. A write notifies the seam's listeners, which is what lets a
- * consumer re-resolve its routing in the same process instead of needing a
- * restart.
+ * catalog is the unit's global singleton — one value, not one record per
+ * provider — and the unit is opened outside any tenant scope, so that value
+ * lives in the backend's system schema and every tenant reads the same routes;
+ * no host-side config file is involved. A write notifies the seam's listeners,
+ * which is what lets a consumer re-resolve its routing in the same process
+ * instead of needing a restart.
  * @module @deepseek-ai/dsh-llm-providers-postgres
  */
 
@@ -17,14 +18,26 @@ import { storageBackendServiceKey, type KvFacet, type KvUnit } from '@deepseek-a
 
 /** KV unit name hosting the provider registry; unique across the storage hub. */
 const UNIT_NAME = 'llm_providers'
-/** Single table whose keys are provider ids and values are provider records. */
-const RECORD_TABLE = 'provider'
 /**
  * Case-shared, because the unit carries no user dimension. Opening it outside a
  * tenant scope is what makes it deployment-wide; the backend requires a shared
  * unit for that, and rejects a per-user one with no tenant.
+ *
+ * `hasGlobal` is the whole catalog: the registry is one document an
+ * administrator edits as a whole, so it rides the unit's global singleton
+ * rather than a table of independently versioned rows.
  */
-const UNIT_DESCRIPTOR = { name: UNIT_NAME, version: 1, tables: [RECORD_TABLE], hasGlobal: false, shared: true } as const
+const UNIT_DESCRIPTOR = { name: UNIT_NAME, version: 1, tables: [], hasGlobal: true, shared: true } as const
+
+/**
+ * One stable order for the catalog, so a stored list and the cached list are
+ * comparable and a re-read reports no change when nothing changed.
+ * @param records - records to order.
+ * @returns the same records sorted by provider id.
+ */
+function sortRecords(records: readonly LlmProviderRecord[]): LlmProviderRecord[] {
+  return [...records].sort((left, right) => left.id.localeCompare(right.id))
+}
 
 /**
  * The deployment-wide provider registry. The durable store lives in the
@@ -103,44 +116,58 @@ export class PostgresLlmProviderStore extends LlmProviderStore {
     }
   }
 
-  /** Load and validate the stored records from the medium. */
+  /** Load and validate the stored catalog from the medium. */
   private async load(): Promise<readonly LlmProviderRecord[]> {
-    const snapshot = await this.unit().loadAll()
-    const table = snapshot.tables[RECORD_TABLE] ?? {}
+    const { global } = await this.unit().loadAll()
+    if (global === null || global === undefined) return []
+    const providers = (global as { providers?: unknown }).providers
+    if (!Array.isArray(providers)) {
+      // A stored catalog that is not a provider list is a write this version
+      // cannot read; saying so beats serving a silent empty registry.
+      this.ctx.logger.warn('llm-providers-postgres: stored catalog has no provider list; serving no managed routes')
+      return []
+    }
     const records: LlmProviderRecord[] = []
-    for (const [key, raw] of Object.entries(table)) {
+    for (const raw of providers) {
       try {
-        const record = assertProviderRecord(raw)
-        if (record.id !== key) {
-          throw new TypeError('stored record id "' + record.id + '" does not match its key "' + key + '"')
-        }
-        records.push(record)
+        records.push(assertProviderRecord(raw))
       }
       catch (error: unknown) {
-        // One unusable row must not hide the healthy ones: the registry keeps
+        // One unusable entry must not hide the healthy ones: the registry keeps
         // serving every route that still validates, which is what keeps a bad
         // administrator write from taking the whole selector down.
-        this.ctx.logger.warn('llm-providers-postgres: skipping unusable stored provider "' + key
-          + '": ' + (error instanceof Error ? error.message : String(error)))
+        this.ctx.logger.warn('llm-providers-postgres: skipping unusable stored provider: '
+          + (error instanceof Error ? error.message : String(error)))
       }
     }
-    records.sort((left, right) => left.id.localeCompare(right.id))
-    return records
+    return sortRecords(records)
+  }
+
+  /**
+   * Write the whole catalog: the global singleton is one document, so every
+   * write replaces it. The cached list is the reader's source, which keeps the
+   * read-modify-write of one edit local to this process.
+   * @param records - complete catalog to store.
+   */
+  private async store(records: readonly LlmProviderRecord[]): Promise<void> {
+    const ordered = sortRecords(records)
+    await this.unit().setGlobal({ providers: ordered })
+    this.cached = ordered
   }
 
   override async upsert(record: LlmProviderRecord): Promise<void> {
     const checked = assertProviderRecord(record)
-    await this.unit().putRecord(RECORD_TABLE, checked.id, checked)
-    this.cached = [...this.cached.filter(entry => entry.id !== checked.id), checked]
-      .sort((left, right) => left.id.localeCompare(right.id))
+    await this.store([...this.cached.filter(entry => entry.id !== checked.id), checked])
     this.notify()
   }
 
   override async remove(id: string): Promise<void> {
     const key = id.trim()
     if (key === '') throw new TypeError('llm-providers-postgres: remove needs a provider id')
-    await this.unit().deleteRecord(RECORD_TABLE, key)
-    this.cached = this.cached.filter(entry => entry.id !== key)
+    const remaining = this.cached.filter(entry => entry.id !== key)
+    // Removing an absent route changes nothing on the medium, so it is not a change.
+    if (remaining.length === this.cached.length) return
+    await this.store(remaining)
     this.notify()
   }
 

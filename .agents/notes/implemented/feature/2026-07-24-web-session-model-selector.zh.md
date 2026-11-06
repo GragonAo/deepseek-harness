@@ -4,7 +4,7 @@ Status: implemented
 
 [English](2026-07-24-web-session-model-selector.md) | 中文
 
-> 部分被取代：现在一条提问可以自带 `model`，对已在运行的会话生成一轮切换——见 [模型厂商注册表是部署级的，模型按轮次生效](../architecture/2026-11-07-deployment-provider-registry.zh.md)。
+> 部分被取代：现在一条提问可以自带 `model`，对已在运行的会话生成一轮切换——见 [模型厂商注册表是部署级的，模型按轮次生效](../architecture/2026-11-07-deployment-provider-registry.md)。
 
 ## 问题
 

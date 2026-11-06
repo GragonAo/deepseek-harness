@@ -1,5 +1,5 @@
 // The deployment-wide provider registry: one llm_providers unit opened outside
-// any tenant scope, so its rows live in the backend's system schema and every
+// any tenant scope, holding the whole catalog in its global singleton, so every
 // tenant reads the same routes. Writes issued from inside a request's tenant
 // scope must still reach that one registry.
 
@@ -37,39 +37,36 @@ function record(overrides: Partial<LlmProviderRecord> = {}): LlmProviderRecord {
 }
 
 /**
- * In-memory stand-in for the kv_case_record table: it keeps rows keyed by
- * (schema, unit, table, key) so a test can prove which schema a write reached
- * and that the system schema is the only one the registry ever addresses.
+ * In-memory stand-in for the kv_case_global table: it keeps one value per
+ * (schema, unit) so a test can prove which schema a write reached, that the
+ * system schema is the only one the registry ever addresses, and that the whole
+ * catalog rides a single global value.
  */
 class SharedExecutor implements SqlExecutor {
   readonly calls: Array<{ text: string; values?: readonly unknown[] }> = []
-  private readonly rows = new Map<string, unknown>()
+  private readonly globals = new Map<string, unknown>()
 
   async query(text: string, values?: readonly unknown[]): Promise<readonly Record<string, unknown>[]> {
     this.calls.push(values === undefined ? { text } : { text, values })
-    const schema = /\b(?:FROM|INTO) (\S+)\.kv_case_record/.exec(text)?.[1]
+    const schema = /\b(?:FROM|INTO) (\S+)\.kv_case_global/.exec(text)?.[1]
     if (schema === undefined) return []
     const unit = String(values?.[0])
-    if (text.startsWith('SELECT table_name, key, value')) {
-      const prefix = [schema, unit].join('|') + '|'
-      return [...this.rows.entries()]
-        .filter(([key]) => key.startsWith(prefix))
-        .map(([key, value]) => {
-          const [, , table, entry] = key.split('|')
-          return { table_name: table, key: entry, value }
-        })
+    if (text.startsWith('SELECT value')) {
+      const stored = this.globals.get(schema + '|' + unit)
+      return stored === undefined ? [] : [{ value: stored }]
     }
     if (text.startsWith('INSERT')) {
-      const [, table, entry, payload] = values as [string, string, string, string]
-      this.rows.set([schema, unit, table, entry].join('|'), JSON.parse(payload))
-      return []
-    }
-    if (text.startsWith('DELETE')) {
-      const [, table, entry] = values as [string, string, string]
-      this.rows.delete([schema, unit, table, entry].join('|'))
+      this.globals.set(schema + '|' + unit, JSON.parse(String(values?.[1])))
       return []
     }
     return []
+  }
+
+  /** Every schema the global singleton was addressed in. */
+  schemas(): string[] {
+    return [...new Set(this.calls
+      .map(call => /\b(?:FROM|INTO) (\S+)\.kv_case_global/.exec(call.text)?.[1])
+      .filter((schema): schema is string => schema !== undefined))]
   }
 
   async close(): Promise<void> {}
@@ -103,21 +100,32 @@ describe('PostgresLlmProviderStore', () => {
   it('starts empty without reading a tenant', async () => {
     const { ctx, executor } = await boot()
     await expect(ctx.llmProviders.list()).resolves.toEqual([])
-    expect((executor as SharedExecutor).calls.some(call => /kv_case_record/.test(call.text))).toBe(true)
+    expect((executor as SharedExecutor).schemas()).toEqual(['dsh_system'])
   })
 
-  it('writes a record into the system schema without a user partition', async () => {
+  it('writes the whole catalog into the system schema global singleton', async () => {
     const executor = new SharedExecutor()
     const { ctx } = await boot(executor)
     await ctx.llmProviders.upsert(record())
 
-    const insert = executor.calls.find(call => call.text.startsWith('INSERT') && call.text.includes('dsh_system.kv_case_record'))
+    const insert = executor.calls.find(call => call.text.startsWith('INSERT') && call.text.includes('dsh_system.kv_case_global'))
     expect(insert, 'routes the write to the system schema').toBeDefined()
     expect(insert!.text).not.toContain('user_id')
     expect(insert!.values?.[0]).toBe('llm_providers')
-    expect(insert!.values?.[1]).toBe('provider')
-    expect(insert!.values?.[2]).toBe('acme-gateway')
-    expect(JSON.parse(String(insert!.values?.[3]))).toEqual(record())
+    expect(JSON.parse(String(insert!.values?.[1]))).toEqual({ providers: [record()] })
+  })
+
+  it('keeps the catalog in one value rather than one row per provider', async () => {
+    const executor = new SharedExecutor()
+    const { ctx } = await boot(executor)
+    await ctx.llmProviders.upsert(record())
+    await ctx.llmProviders.upsert(record({ id: 'globex-gateway', displayName: 'Globex Gateway' }))
+
+    const writes = executor.calls.filter(call => call.text.startsWith('INSERT') && call.text.includes('kv_case_global'))
+    expect(writes).toHaveLength(2)
+    expect(executor.schemas()).toEqual(['dsh_system'])
+    const stored = await ctx.llmProviders.list()
+    expect(stored.map(entry => entry.id)).toEqual(['acme-gateway', 'globex-gateway'])
   })
 
   it('serves one registry to every tenant, whichever scope reads it', async () => {
@@ -131,10 +139,7 @@ describe('PostgresLlmProviderStore', () => {
       expect(listed[0]!.baseURL).toBe('https://gateway.acme.example/v1')
     }
     // Every read addressed the system schema; no tenant schema was ever touched.
-    const schemas = new Set(executor.calls
-      .map(call => /\b(?:FROM|INTO) (\S+)\.kv_case_record/.exec(call.text)?.[1])
-      .filter((schema): schema is string => schema !== undefined))
-    expect([...schemas]).toEqual(['dsh_system'])
+    expect(executor.schemas()).toEqual(['dsh_system'])
   })
 
   it('keeps writing to the system schema when the write arrives inside a tenant scope', async () => {
@@ -142,8 +147,7 @@ describe('PostgresLlmProviderStore', () => {
     const { ctx } = await boot(executor)
     await scoped(tenant('acme'), 'user-1', () => ctx.llmProviders.upsert(record({ displayName: 'Written in scope' })))
 
-    const insert = executor.calls.find(call => call.text.startsWith('INSERT') && call.text.includes('kv_case_record'))
-    expect(insert!.text).toContain('dsh_system.kv_case_record')
+    expect(executor.schemas()).toEqual(['dsh_system'])
     const readBack = await ctx.llmProviders.list()
     expect(readBack.map(entry => entry.displayName)).toEqual(['Written in scope'])
   })
@@ -161,6 +165,16 @@ describe('PostgresLlmProviderStore', () => {
     expect(changes).toEqual(['changed', 'changed', 'changed'])
     const stored = await ctx.llmProviders.list()
     expect(stored).toEqual([])
+  })
+
+  it('does not report a removal that changed nothing', async () => {
+    const { ctx } = await boot()
+    const changes: string[] = []
+    cleanups.push(ctx.effect(() => ctx.llmProviders.onChange(() => changes.push('changed')), 'test: change listener'))
+
+    await ctx.llmProviders.remove('never-stored')
+
+    expect(changes).toEqual([])
   })
 
   it('caches the loaded set for synchronous snapshot reads', async () => {
@@ -190,6 +204,6 @@ describe('PostgresLlmProviderStore', () => {
     const { ctx } = await boot(executor)
     const unusable = { ...record(), baseURL: '' }
     await expect(ctx.llmProviders.upsert(unusable as LlmProviderRecord)).rejects.toThrow(/baseURL/)
-    expect(executor.calls.filter(call => call.text.includes('kv_case_record') && call.text.startsWith('INSERT'))).toEqual([])
+    expect(executor.calls.filter(call => call.text.includes('kv_case_global') && call.text.startsWith('INSERT'))).toEqual([])
   })
 })
