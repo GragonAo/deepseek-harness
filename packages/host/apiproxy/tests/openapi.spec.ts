@@ -26,9 +26,10 @@ describe('generateOpenApiDocument', () => {
     expect(doc.openapi).toBe('3.1.0')
     const routes = Object.keys(doc.paths)
     // session.* + subagent.* + host.* + workspace.* + skill.* + agentPreset.* +
-    // goal.* + settings.* + credentials.* + llm.* = 56 routes (session.delete and
-    // the three skill tier methods included).
-    expect(routes).toHaveLength(56)
+    // goal.* + settings.* + credentials.* + llm.* = 59 routes (session.delete,
+    // the three skill tier methods, and the three managed-provider writes
+    // included).
+    expect(routes).toHaveLength(59)
     // Named so a route that stops being projected fails on its own name, not
     // only on the group count above.
     expect(routes).toContain('/api/session.delete')

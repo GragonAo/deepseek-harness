@@ -13,9 +13,9 @@ import type { Agent, ModelSelection, ModelSelectionRef, AgentOptions, AgentStatu
 import type {} from '@deepseek-ai/dsh-agent-presets/types'
 import { AttachmentError, admitEncodedImages } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
-import { contentHasImage, createUserMessage, freezeMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { assertProviderRecord, contentHasImage, createUserMessage, freezeMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { errorChain } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, MessageSource } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, LlmProviderRecord, MessageSource } from '@deepseek-ai/dsh-llm'
 import { isAppendSurfaceEvent, isJsonValue } from '@deepseek-ai/dsh-session'
 import type { JsonValue, Session, SessionEvent, SessionEventMap, SessionHeader, SessionId, UserMessage } from '@deepseek-ai/dsh-session'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
@@ -38,6 +38,7 @@ import type { PresetBearingSession } from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {
   ApiProxy, ConfigurableProviderView, CredentialView, GoalRef, HistoryEntry, HostFrame,
+  ManagedProviderModelView, ManagedProviderView,
   ModelCatalogFailure, ModelProviderGroup,
   ModelReasoning, MuxFrame, PromptContentPart, QuestionResponsePayload, SessionListMetadata, SessionProjectionsBlock, SessionSearchItem,
   QueuedInboxItem, SessionSummary, SettingsNamespaceView, SubagentAddress, JobView, ToolEventView,
@@ -1979,6 +1980,44 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
    * A composition with no llm registry at all cannot judge and says yes —
    * the dispatch it would have refused fails on its own terms.
    */
+  /**
+ * Wire view of one stored provider route.
+ *
+ * The credential is write-only: the reply reports whether one is stored and
+ * never repeats it, because the same view reaches every configuration surface.
+ *
+ * @param record - the route as the tenant registry holds it.
+ * @returns the route with its key reduced to `apiKeyConfigured`.
+ */
+  function managedProviderView(record: LlmProviderRecord): ManagedProviderView {
+    const models: ManagedProviderModelView[] = record.models.map((model) => {
+      const view: ManagedProviderModelView = { id: model.id }
+      if (model.name !== undefined) view.name = model.name
+      if (model.contextWindow !== undefined) view.contextWindow = model.contextWindow
+      if (model.maxTokens !== undefined) view.maxTokens = model.maxTokens
+      return view
+    })
+    return {
+      provider: record.id,
+      displayName: record.displayName,
+      api: record.api,
+      baseURL: record.baseURL,
+      models,
+      enabled: record.enabled,
+      apiKeyConfigured: record.apiKey !== undefined,
+      updatedAt: record.updatedAt,
+    }
+  }
+
+  /** The refusal every write method answers with when no registry is mounted. */
+  function noProviderRegistryError(): RpcError {
+    return {
+      code: 'provider-registry-unavailable',
+      message: 'this deployment mounts no tenant provider registry; provider routes come from the configuration tiers only',
+      details: {},
+    }
+  }
+
   function routeServed(provider: string): boolean {
     const llm = ctx.get('llm')
     return llm === undefined || llm.listProviders().some(entry => entry.id === provider)
@@ -2961,11 +3000,17 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     },
 
     workspace: {
-      list(request) {
-        return Promise.resolve(ok(request, {
+      async list(request) {
+        // Opening the ambient partition first is what makes this baseline
+        // describe durable state: a partitioned deployment starts lazily
+        // initialized, so without it a restarted process would answer with an
+        // empty registry and an empty archive set until some later write happened
+        // to open the partition.
+        await ctx.workspaceRegistry.ensureLoaded()
+        return ok(request, {
           items: ctx.workspaceRegistry.list().map(workspaceView),
           archivedSessionIds: [...ctx.workspaceRegistry.archivedSessionIds],
-        }))
+        })
       },
 
       async create(request) {
@@ -3587,11 +3632,26 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     },
 
     llm: {
-      providers(request) {
+      async providers(request) {
+        const store = ctx.get('llmProviders')
+        // A record another replica wrote becomes visible on the next listing
+        // instead of at the next restart.
+        await store?.refresh()
+        const stored = new Map((store?.snapshot() ?? []).map(record => [record.id, record]))
         const registered = ctx.llm.listProviders()
         const active = new Set(registered.map(provider => provider.id))
         const directory = ctx.llm.listConfigurableProviders()
         const declared = new Set(directory.map(entry => entry.provider))
+        // Where a route is defined is half of what an administrator needs: a
+        // stored record overrides the configuration tier of the same id, so a
+        // surface that shows only names cannot say which one is in force.
+        const provenance = (provider: string): { source?: 'registry' | 'config'; apiKeyConfigured?: boolean } => {
+          const record = stored.get(provider)
+          return {
+            ...store === undefined ? {} : { source: record === undefined ? 'config' as const : 'registry' as const },
+            ...record?.apiKey === undefined ? {} : { apiKeyConfigured: true },
+          }
+        }
         const views: ConfigurableProviderView[] = directory.map(entry => ({
           provider: entry.provider,
           displayName: entry.displayName,
@@ -3599,6 +3659,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           settingsPath: [...entry.settingsPath],
           active: active.has(entry.provider),
           ...entry.declared === undefined ? {} : { declared: entry.declared },
+          ...provenance(entry.provider),
         }))
         // Routes registered without a directory declaration still appear —
         // they exist and serve models — just with no settings address. No
@@ -3611,9 +3672,10 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             settingsNs: '',
             settingsPath: [],
             active: true,
+            ...provenance(provider.id),
           })
         }
-        return Promise.resolve(ok(request, { providers: views }))
+        return ok(request, { providers: views })
       },
 
       async models(request) {
@@ -3642,6 +3704,86 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             details: { settingsNs, ...baseURL === undefined ? {} : { baseURL } },
           })
         }
+      },
+
+      async addProvider(request) {
+        const store = ctx.get('llmProviders')
+        if (store === undefined) return err(request, noProviderRegistryError())
+        try {
+          // Validated before it can reach the storage medium: a mistyped route
+          // is refused here rather than stored and then silently unroutable. The
+          // routing consumer re-resolves its route set on the write, so the next
+          // request reaches the new endpoint without a restart.
+          const record = assertProviderRecord({
+            id: request.payload.provider,
+            displayName: request.payload.displayName,
+            api: request.payload.api,
+            baseURL: request.payload.baseURL,
+            models: request.payload.models,
+            enabled: request.payload.enabled ?? true,
+            updatedAt: new Date().toISOString(),
+            ...request.payload.apiKey === undefined ? {} : { apiKey: request.payload.apiKey },
+          })
+          await store.upsert(record)
+          return ok(request, { provider: managedProviderView(record) })
+        }
+        catch (error: unknown) {
+          return err(request, {
+            code: 'provider-record-invalid',
+            message: error instanceof Error ? error.message : String(error),
+            details: { provider: request.payload.provider },
+          })
+        }
+      },
+
+      async updateProvider(request) {
+        const store = ctx.get('llmProviders')
+        if (store === undefined) return err(request, noProviderRegistryError())
+        const { provider } = request.payload
+        const existing = store.snapshot().find(record => record.id === provider)
+        if (existing === undefined) {
+          return err(request, {
+            code: 'provider-not-found',
+            message: 'provider "' + provider + '" is not stored for this tenant',
+            details: { provider },
+          })
+        }
+        // Omitted fields keep their stored value; a null key clears the credential.
+        const apiKey = request.payload.apiKey === null
+          ? undefined
+          : request.payload.apiKey ?? existing.apiKey
+        try {
+          const record = assertProviderRecord({
+            id: existing.id,
+            displayName: request.payload.displayName ?? existing.displayName,
+            api: request.payload.api ?? existing.api,
+            baseURL: request.payload.baseURL ?? existing.baseURL,
+            models: request.payload.models ?? existing.models,
+            enabled: request.payload.enabled ?? existing.enabled,
+            updatedAt: new Date().toISOString(),
+            ...apiKey === undefined ? {} : { apiKey },
+            ...existing.updatedBy === undefined ? {} : { updatedBy: existing.updatedBy },
+          })
+          await store.upsert(record)
+          return ok(request, { provider: managedProviderView(record) })
+        }
+        catch (error: unknown) {
+          return err(request, {
+            code: 'provider-record-invalid',
+            message: error instanceof Error ? error.message : String(error),
+            details: { provider },
+          })
+        }
+      },
+
+      async removeProvider(request) {
+        const store = ctx.get('llmProviders')
+        if (store === undefined) return err(request, noProviderRegistryError())
+        // Removing a route the registry never held is not an error: the caller
+        // asked for it to be gone, and it is. The configuration tier below is
+        // untouched, so a configured route of the same id starts serving again.
+        await store.remove(request.payload.provider)
+        return ok(request, {})
       },
     },
 

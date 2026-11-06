@@ -66,7 +66,7 @@ import {
 import {
   credentialsDescribeRequestSchema, credentialsSetRequestSchema, credentialsUnsetRequestSchema,
 } from '../api/credentials.schema.ts'
-import { llmDiscoverModelsRequestSchema, llmModelsRequestSchema, llmProvidersRequestSchema } from '../api/llm.schema.ts'
+import { llmAddProviderRequestSchema, llmDiscoverModelsRequestSchema, llmModelsRequestSchema, llmProvidersRequestSchema, llmRemoveProviderRequestSchema, llmUpdateProviderRequestSchema } from '../api/llm.schema.ts'
 import {
   subagentHistoryRequestSchema,
   subagentInterruptRequestSchema,
@@ -148,6 +148,9 @@ export const UNARY_ROUTES: UnaryRoutes = {
   'llm.providers': { schema: llmProvidersRequestSchema, invoke: (api, r) => api.llm.providers(r) },
   'llm.models': { schema: llmModelsRequestSchema, invoke: (api, r) => api.llm.models(r) },
   'llm.discoverModels': { schema: llmDiscoverModelsRequestSchema, invoke: (api, r, signal) => api.llm.discoverModels(r, signal) },
+  'llm.addProvider': { schema: llmAddProviderRequestSchema, invoke: (api, r) => api.llm.addProvider(r) },
+  'llm.updateProvider': { schema: llmUpdateProviderRequestSchema, invoke: (api, r) => api.llm.updateProvider(r) },
+  'llm.removeProvider': { schema: llmRemoveProviderRequestSchema, invoke: (api, r) => api.llm.removeProvider(r) },
 }
 
 /** Route lookup that narrows an arbitrary path segment to a map key (single cast point for the string→key refinement). */

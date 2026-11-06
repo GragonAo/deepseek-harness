@@ -299,6 +299,15 @@ function fakeApi(overrides: Partial<{ muxFrames: MuxFrame[]; hostFrames: HostFra
       async discoverModels(request) {
         return { rpcId: request.rpcId, result: { ok: true, value: { models: [] } } }
       },
+      async addProvider(request) {
+        return { rpcId: request.rpcId, result: { ok: true, value: { provider: { provider: 'acme', displayName: 'Acme', api: 'openai-completions', baseURL: 'https://acme.example/v1', models: [], enabled: true, apiKeyConfigured: false, updatedAt: '2026-11-06T00:00:00.000Z' } } } }
+      },
+      async updateProvider(request) {
+        return { rpcId: request.rpcId, result: { ok: true, value: { provider: { provider: 'acme', displayName: 'Acme', api: 'openai-completions', baseURL: 'https://acme.example/v1', models: [], enabled: true, apiKeyConfigured: false, updatedAt: '2026-11-06T00:00:00.000Z' } } } }
+      },
+      async removeProvider(request) {
+        return { rpcId: request.rpcId, result: { ok: true, value: {} } }
+      },
     },
     events: {
       mux: (_request, signal) => stream(muxFrames, signal),

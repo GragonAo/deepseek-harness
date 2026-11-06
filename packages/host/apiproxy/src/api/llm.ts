@@ -29,6 +29,74 @@ export interface ConfigurableProviderView {
    * surface must treat absence as "unknown", not as "shipped".
    */
   declared?: boolean
+  /**
+   * Where this route's definition comes from: a record an administrator stored
+   * for the tenant, or the configuration tiers below it. Absent when the
+   * deployment mounts no tenant registry, so a surface reads absence as
+   * "unknown", never as "configuration".
+   */
+  source?: 'registry' | 'config'
+  /** Whether a credential is stored for this route. The key itself is never returned. */
+  apiKeyConfigured?: boolean
+}
+
+/** Wire view of one model an administrator-managed route serves. */
+export interface ManagedProviderModelView {
+  /** Model id the route accepts. */
+  id: string
+  /** Human-readable name; the id serves as the label when absent. */
+  name?: string
+  /** Maximum combined context, when the administrator supplied it. */
+  contextWindow?: number
+  /** Maximum output tokens, when the administrator supplied it. */
+  maxTokens?: number
+}
+
+/**
+ * Wire view of one administrator-managed route. The credential is write-only:
+ * the reply reports only whether one is stored.
+ */
+export interface ManagedProviderView {
+  /** Route id the model selection names. */
+  provider: string
+  /** Human-readable name configuration surfaces show. */
+  displayName: string
+  /** Wire protocol the route speaks. */
+  api: string
+  /** Endpoint every model on this route reaches. */
+  baseURL: string
+  /** The models this route serves; it replaces the installed catalog for the route. */
+  models: ManagedProviderModelView[]
+  /** Whether the route serves requests; a disabled record stays stored and inactive. */
+  enabled: boolean
+  /** Whether a credential is stored for this route. */
+  apiKeyConfigured: boolean
+  /** When this record was last written. */
+  updatedAt: string
+}
+
+/** Full write of one managed route: what `llm.addProvider` accepts. */
+export interface ManagedProviderWrite {
+  provider: string
+  displayName: string
+  api: string
+  baseURL: string
+  /** Credential stored with the record; write-only. */
+  apiKey?: string
+  models: ManagedProviderModelView[]
+  enabled?: boolean
+}
+
+/** Partial write of an existing managed route: what `llm.updateProvider` accepts. */
+export interface ManagedProviderPatch {
+  provider: string
+  displayName?: string
+  api?: string
+  baseURL?: string
+  /** A string replaces the stored key; null clears it; omission leaves it untouched. */
+  apiKey?: string | null
+  models?: ManagedProviderModelView[]
+  enabled?: boolean
 }
 
 /** Llm-domain unary methods (the map keys llm.* of RpcMethodMap). */
@@ -74,6 +142,31 @@ export interface LlmApi {
     }>,
     signal?: AbortSignal,
   ): Promise<RpcResponse<{ models: DiscoveredModelView[] }>>
+
+  /**
+   * Store a new provider route for the tenant, or replace an existing one of
+   * the same id. Nothing is restarted: the routing consumer re-resolves its
+   * route set in process, so the next request reaches the new endpoint.
+   *
+   * The tenant registry is the deployment's central provider configuration —
+   * there is no per-user layer above or below it. The key rides the record and
+   * is never returned.
+   */
+  addProvider(request: RpcRequest<ManagedProviderWrite>): Promise<RpcResponse<{ provider: ManagedProviderView }>>
+
+  /**
+   * Update an existing managed route in place; unspecified fields keep their
+   * stored value and `apiKey: null` clears the credential. A route the tenant
+   * registry does not hold is refused rather than created.
+   */
+  updateProvider(request: RpcRequest<ManagedProviderPatch>): Promise<RpcResponse<{ provider: ManagedProviderView }>>
+
+  /**
+   * Delete a managed route. The configuration tier below it is untouched, so a
+   * route the deployment configures falls back to that configuration instead of
+   * disappearing.
+   */
+  removeProvider(request: RpcRequest<{ provider: string }>): Promise<RpcResponse<{}>>
 }
 
 /** Wire view of one model an interrogated endpoint advertises. */

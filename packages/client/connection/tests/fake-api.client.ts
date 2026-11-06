@@ -232,6 +232,13 @@ export class FakeApiClient implements IApiClient {
     providers: payload => this.record('llm.providers', payload, Promise.resolve(ok({ providers: [] }))),
     models: payload => this.record('llm.models', payload, Promise.resolve(ok({ groups: [], failures: [] }))),
     discoverModels: payload => this.record('llm.discoverModels', payload, Promise.resolve(ok({ models: [] }))),
+    addProvider: payload => this.record('llm.addProvider', payload, Promise.resolve(ok({
+      provider: { provider: 'acme', displayName: 'Acme', api: 'openai-completions', baseURL: 'https://acme.example/v1', models: [], enabled: true, apiKeyConfigured: false, updatedAt: '2026-11-06T00:00:00.000Z' },
+    }))),
+    updateProvider: payload => this.record('llm.updateProvider', payload, Promise.resolve(ok({
+      provider: { provider: 'acme', displayName: 'Acme', api: 'openai-completions', baseURL: 'https://acme.example/v1', models: [], enabled: true, apiKeyConfigured: false, updatedAt: '2026-11-06T00:00:00.000Z' },
+    }))),
+    removeProvider: payload => this.record('llm.removeProvider', payload, Promise.resolve(ok({}))),
   }
 
   /** When true, streams never fire onOpen (misbehaving-carrier material for the handshake timeout guard). */

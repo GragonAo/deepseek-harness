@@ -5659,6 +5659,27 @@ importers:
         specifier: workspace:^
         version: link:../../util/timeout
 
+  packages/llm/llm-providers-postgres:
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: workspace:^
+        version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-invariants':
+        specifier: workspace:^
+        version: link:../../runtime-diagnostics/invariants
+      '@deepseek-ai/dsh-llm':
+        specifier: workspace:^
+        version: link:../llm
+      '@deepseek-ai/dsh-storage':
+        specifier: workspace:^
+        version: link:../../storage/storage
+      '@deepseek-ai/dsh-storage-postgres':
+        specifier: workspace:^
+        version: link:../../tenant/storage-postgres
+      '@deepseek-ai/dsh-tenant':
+        specifier: workspace:^
+        version: link:../../tenant/tenant
+
   packages/llm/llm-retry:
     dependencies:
       '@deepseek-ai/schemastery':
@@ -8601,6 +8622,9 @@ importers:
       '@deepseek-ai/dsh-llm-pi-ai':
         specifier: workspace:^
         version: link:../../llm/llm-pi-ai
+      '@deepseek-ai/dsh-llm-providers-postgres':
+        specifier: workspace:^
+        version: link:../../llm/llm-providers-postgres
       '@deepseek-ai/dsh-llm-retry':
         specifier: workspace:^
         version: link:../../llm/llm-retry

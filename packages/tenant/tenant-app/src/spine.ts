@@ -162,6 +162,8 @@ export const SPINE: readonly SpineRow[] = [
     disabled: '租户服务的模型供应商由部署方在配置里选；默认只留 deepseek 官方通道',
   },
   { id: 'llm-deepseek', module: '@deepseek-ai/dsh-llm-deepseek' },
+  // 租户层的厂商与密钥落在 PostgreSQL 分区：管理端写入即生效，`plugins.llm-pi-ai.providers` 与配置文件是它下面的兜底。
+  { id: 'llm-providers-postgres', module: '@deepseek-ai/dsh-llm-providers-postgres' },
   { id: 'session-persistence-jsonl', module: '@deepseek-ai/dsh-session-persistence-jsonl', disabled: '租户会话落在 PostgreSQL 分区' },
   { id: 'attachment-local', module: '@deepseek-ai/dsh-attachment-local' },
   { id: 'session-query-sqlite', module: '@deepseek-ai/dsh-session-query-sqlite', config: () => ({ path: ':memory:', openAt: 'never' }) },

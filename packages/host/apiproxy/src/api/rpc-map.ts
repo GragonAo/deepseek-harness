@@ -78,6 +78,9 @@ export interface RpcMethodMap {
   'llm.providers': LlmApi['providers']
   'llm.models': LlmApi['models']
   'llm.discoverModels': LlmApi['discoverModels']
+  'llm.addProvider': LlmApi['addProvider']
+  'llm.updateProvider': LlmApi['updateProvider']
+  'llm.removeProvider': LlmApi['removeProvider']
 }
 
 /** Business request payload of method K (reaches through the RpcRequest narrow form to payload). */

@@ -27,6 +27,7 @@ import type {} from '@deepseek-ai/dsh-settings-postgres'
 import type {} from '@deepseek-ai/dsh-credentials-postgres'
 import type {} from '@deepseek-ai/dsh-llm-pi-ai'
 import type {} from '@deepseek-ai/dsh-llm-deepseek'
+import type {} from '@deepseek-ai/dsh-llm-providers-postgres'
 import type {} from '@deepseek-ai/dsh-session-persistence-jsonl'
 import type {} from '@deepseek-ai/dsh-attachment-local'
 import type {} from '@deepseek-ai/dsh-session-query-sqlite'
@@ -160,6 +161,7 @@ export const SPINE_MODULES = [
   '@deepseek-ai/dsh-storage-json',
   '@deepseek-ai/dsh-storage-domain',
   '@deepseek-ai/dsh-storage-postgres',
+  '@deepseek-ai/dsh-llm-providers-postgres',
   '@deepseek-ai/dsh-workspace',
   '@deepseek-ai/dsh-message-feedback',
   '@deepseek-ai/dsh-host-plugin-inventory',

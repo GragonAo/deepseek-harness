@@ -88,6 +88,12 @@ export interface RpcErrorDetailsMap {
    * details name the endpoint asked, never the credential offered.
    */
   'model-discovery-failed': { settingsNs: string; baseURL?: string }
+  /** The deployment mounts no tenant provider registry, so a route write has nowhere to go. */
+  'provider-registry-unavailable': {}
+  /** The stored record was refused by validation before it reached the storage medium. */
+  'provider-record-invalid': { provider: string }
+  /** The tenant registry holds no record of this id, so there is nothing to update. */
+  'provider-not-found': { provider: string }
   'title-invalid': { sessionId: SessionId }
   'fork-unavailable': { sessionId: SessionId }
   'subagent-parent-unavailable': { parentSessionId: SessionId }

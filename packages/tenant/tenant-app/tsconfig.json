@@ -153,6 +153,9 @@
       "path": "../../llm/llm-pi-ai/tsconfig.json"
     },
     {
+      "path": "../../llm/llm-providers-postgres/tsconfig.json"
+    },
+    {
       "path": "../../llm/llm-retry/tsconfig.json"
     },
     {

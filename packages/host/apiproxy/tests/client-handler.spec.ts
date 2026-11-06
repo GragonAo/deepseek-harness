@@ -133,6 +133,10 @@ function scriptedApi(overrides: {
       providers: r => ok(r, { providers: [] }),
       models: r => ok(r, { groups: [], failures: [] }),
       discoverModels: err,
+      // No tenant registry in this stub: every managed write is refused.
+      addProvider: err,
+      updateProvider: err,
+      removeProvider: err,
       ...overrides.llm,
     },
     events: { mux: () => empty<MuxFrame>(), host: () => empty<HostFrame>(), ...overrides.events },

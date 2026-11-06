@@ -36,7 +36,7 @@ import type {
   ModelProviderGroup, ModelSelection, RpcRequest, RpcResponse, RpcResult, ServerRequest, ServerResponse, SessionSummary,
   ToolCallView, ToolEventView, ToolResultView, WorkspaceId, WorkspaceView,
 } from './api.ts'
-import type { RequestPayload, ResponseValue, RpcMethodMap } from '@deepseek-ai/dsh-host-apiproxy/api'
+import type { ManagedProviderView, RequestPayload, ResponseValue, RpcMethodMap } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { AbstractApiClient, RpcId, SESSION_SEARCH_RESULT_LIMIT } from './api.ts'
 import { randomUuid } from './random-uuid.ts'
 import type { ClientConnectionRpc } from '../rpc.ts'
@@ -1679,6 +1679,9 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
     return Promise.resolve({ rpcId: request.rpcId, result: { ok: false, error } })
   }
 
+  /** Routes this fixture stored through the managed-provider writes: process-local. */
+  const fixtureManagedProviders = new Map<string, ManagedProviderView>()
+
   const summaryOf = (id: SessionId): SessionSummary | undefined => sessions.find(s => s.sessionId === id)
   /** Skill name the fixture's stand-in bundle carries: the decoded archive's first line. */
   const fixtureBundleName = (zip: string): string => atob(zip).split('\n')[0]?.trim() ?? ''
@@ -3116,6 +3119,51 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
       discoverModels: request => ok(request, {
         models: fixtureModelGroups().flatMap(group => group.models.map(model => ({ id: model.id, name: model.name }))),
       }),
+      // Managed route writes against a process-local map: the fixture endpoint
+      // is imaginary, so a stored route lives only for this session — enough for
+      // a surface to exercise add, update, and remove.
+      addProvider: (request) => {
+        const known = fixtureManagedProviders.get(request.payload.provider)
+        const view: ManagedProviderView = {
+          provider: request.payload.provider,
+          displayName: request.payload.displayName,
+          api: request.payload.api,
+          baseURL: request.payload.baseURL,
+          models: request.payload.models.map(model => ({ ...model })),
+          enabled: request.payload.enabled ?? true,
+          apiKeyConfigured: request.payload.apiKey !== undefined || known?.apiKeyConfigured === true,
+          updatedAt: '2026-11-06T00:00:00.000Z',
+        }
+        fixtureManagedProviders.set(view.provider, view)
+        return ok(request, { provider: view })
+      },
+      updateProvider: (request) => {
+        const known = fixtureManagedProviders.get(request.payload.provider)
+        if (known === undefined) {
+          return err(request, {
+            code: 'provider-not-found',
+            message: 'provider "' + request.payload.provider + '" is not stored for this tenant',
+            details: { provider: request.payload.provider },
+          })
+        }
+        const view: ManagedProviderView = {
+          ...known,
+          ...request.payload.displayName === undefined ? {} : { displayName: request.payload.displayName },
+          ...request.payload.api === undefined ? {} : { api: request.payload.api },
+          ...request.payload.baseURL === undefined ? {} : { baseURL: request.payload.baseURL },
+          ...request.payload.models === undefined ? {} : { models: request.payload.models.map(model => ({ ...model })) },
+          ...request.payload.enabled === undefined ? {} : { enabled: request.payload.enabled },
+          apiKeyConfigured: request.payload.apiKey === null
+            ? false
+            : request.payload.apiKey !== undefined || known.apiKeyConfigured,
+        }
+        fixtureManagedProviders.set(view.provider, view)
+        return ok(request, { provider: view })
+      },
+      removeProvider: (request) => {
+        fixtureManagedProviders.delete(request.payload.provider)
+        return ok(request, {})
+      },
     },
     respond(message: ClientResponse): Promise<RpcReceipt> {
       // Same routing discipline as the host: rpcId first, then the payload's
@@ -3292,6 +3340,9 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'llm.providers': return this.api.llm.providers(request)
       case 'llm.models': return this.api.llm.models(request)
       case 'llm.discoverModels': return this.api.llm.discoverModels(request, signal)
+      case 'llm.addProvider': return this.api.llm.addProvider(request)
+      case 'llm.updateProvider': return this.api.llm.updateProvider(request)
+      case 'llm.removeProvider': return this.api.llm.removeProvider(request)
     }
   }
 

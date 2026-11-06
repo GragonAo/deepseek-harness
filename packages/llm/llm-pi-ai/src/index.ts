@@ -58,12 +58,12 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { assertUsableApiKey, LlmError } from '@deepseek-ai/dsh-llm'
-import type { AdapterRegistrationHandle, DirectoryRegistrationHandle, LlmConfigurableProvider } from '@deepseek-ai/dsh-llm'
+import type { AdapterRegistrationHandle, DirectoryRegistrationHandle, LlmConfigurableProvider, LlmProviderRecord, LlmProviderStore } from '@deepseek-ai/dsh-llm'
 import { deepEqualJson, installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { PiAiAdapter } from './adapter.ts'
 import { catalogProviderIds, catalogProviderTakesApiKey } from './catalog.ts'
 import { assertServiceable, Config, resolveProfiles } from './config.ts'
-import type { ResolvedPiAiProviderProfile } from './config.ts'
+import type { PiAiModelProfile, PiAiProviderProfile, ResolvedPiAiProviderProfile } from './config.ts'
 import { discoverModels } from './discovery.ts'
 
 export { PiAiAdapter } from './adapter.ts'
@@ -162,11 +162,68 @@ export function apply(ctx: Context, config: Config): void {
    * last good value for a stored section that fails. Anything reaching this
    * point has already resolved once.
    */
+  // Administrator-managed routes for the ambient tenant, when a registry is
+  // mounted. It is optional: a deployment without one keeps the configuration
+  // tiers as the whole provider source.
+  let providerStore: LlmProviderStore | undefined = ctx.get('llmProviders')
+  /** Empty stand-in so the registry readers need no branch of their own. */
+  const NO_RECORDS: readonly LlmProviderRecord[] = []
+  let registrySnapshot: readonly LlmProviderRecord[] | undefined
+  let registryProfiles: Record<string, PiAiProviderProfile> | undefined
+  let registryInUse: Record<string, PiAiProviderProfile> | undefined
+  /**
+   * The tenant registry as pi-ai profiles, memoized by the snapshot identity a
+   * store replaces on every change. Only enabled records appear, which is how an
+   * administrator retires a route without deleting its record.
+   * @returns provider profiles keyed by route id; empty without a registry.
+   */
+  const tenantProfiles = (): Record<string, PiAiProviderProfile> => {
+    const snapshot = providerStore?.snapshot() ?? NO_RECORDS
+    if (snapshot === registrySnapshot && registryProfiles !== undefined) return registryProfiles
+    const next: Record<string, PiAiProviderProfile> = {}
+    for (const record of snapshot) {
+      if (!record.enabled) continue
+      const models: PiAiModelProfile[] = record.models.map((model) => {
+        const entry: PiAiModelProfile = { id: model.id }
+        if (model.name !== undefined) entry.name = model.name
+        if (model.contextWindow !== undefined) entry.contextWindow = model.contextWindow
+        if (model.maxTokens !== undefined) entry.maxTokens = model.maxTokens
+        if (model.reasoningEfforts !== undefined) entry.reasoningEfforts = { ...model.reasoningEfforts }
+        return entry
+      })
+      next[record.id] = {
+        displayName: record.displayName,
+        api: record.api,
+        baseURL: record.baseURL,
+        models,
+      }
+    }
+    registrySnapshot = snapshot
+    registryProfiles = next
+    return next
+  }
+  /**
+   * The stored credential of one registry route.
+   * @param provider - route id to look up.
+   * @returns the stored key, or undefined when the route is absent or disabled.
+   */
+  const tenantApiKey = (provider: string): string | undefined => {
+    for (const record of providerStore?.snapshot() ?? NO_RECORDS) {
+      if (record.id !== provider) continue
+      return record.enabled ? record.apiKey : undefined
+    }
+    return undefined
+  }
   const profiles = (): ReadonlyMap<string, ResolvedPiAiProviderProfile> => {
     const raw = current()
-    if (raw === lastRaw && memoized !== undefined) return memoized
-    const next = resolveProfiles(raw.providers)
+    // A stored route wins over a same-named configuration route: the
+    // administrator's record is the newer authority, and the configuration
+    // tiers below it remain the fallback every other route keeps using.
+    const registry = tenantProfiles()
+    if (raw === lastRaw && registry === registryInUse && memoized !== undefined) return memoized
+    const next = resolveProfiles({ ...raw.providers, ...registry })
     lastRaw = raw
+    registryInUse = registry
     memoized = next
     return next
   }
@@ -176,6 +233,13 @@ export function apply(ctx: Context, config: Config): void {
     provider: string,
     profile: ResolvedPiAiProviderProfile,
   ): Promise<string | undefined> => {
+    // A stored credential is the administrator's answer for this route: it is
+    // the only place an operator supplies a key without an environment
+    // variable, so it wins over the profile's reference.
+    const stored = tenantApiKey(provider)
+    if (stored !== undefined && stored.length > 0) {
+      return assertUsableApiKey(stored, 'llm-pi-ai', 'tenant registry route "' + provider + '"')
+    }
     const ref = profile.apiKeyEnv
     // Only a profile that names no credential at all defers to pi-ai's
     // provider-native discovery. Once one is named, a miss must fail loud:
@@ -280,6 +344,40 @@ export function apply(ctx: Context, config: Config): void {
     registeredFacts = facts
   }
   ensureRegistrationFacts()
+
+  // The tenant registry can mount after this plugin (cordis.yml order is a
+  // deployment choice), and its writes arrive at any time afterwards. Both
+  // paths land here: adopt the store when it appears, then re-resolve the route
+  // set on every change so an added, edited, or retired provider applies to the
+  // next request without a restart.
+  ctx.inject(['llmProviders'], (scoped) => {
+    if (providerStore !== scoped.llmProviders) {
+      providerStore = scoped.llmProviders
+      // Invalidates the memoized profile map: the registry now takes part.
+      lastRaw = undefined
+      registrySnapshot = undefined
+      registryProfiles = undefined
+      registryInUse = undefined
+    }
+    const reconcile = (): void => {
+      try {
+        ensureRegistrationFacts()
+      }
+      catch (error) {
+        ctx.logger.error('llm-pi-ai: keeping the previously registered routes after a refused tenant registry change')
+        ctx.logger.error(error)
+      }
+      try {
+        ensureDirectory()
+      }
+      catch (error) {
+        ctx.logger.error('llm-pi-ai: keeping the previous configurable-provider directory after a refused tenant registry change')
+        ctx.logger.error(error)
+      }
+    }
+    reconcile()
+    scoped.effect(() => scoped.llmProviders.onChange(reconcile), 'llm-pi-ai: tenant registry changes')
+  })
 
   installSettingsSection(ctx, NS, Config, config, {
     // Refuse an unserviceable section where it is written: without this a
