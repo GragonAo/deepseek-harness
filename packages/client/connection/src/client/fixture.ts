@@ -3164,6 +3164,12 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         fixtureManagedProviders.delete(request.payload.provider)
         return ok(request, {})
       },
+      // The stored-route read answers the same process-local map the writes
+      // above maintain, so an administrative surface first draws what it
+      // stored rather than only the shipped catalog.
+      managedProviders: request => ok(request, {
+        providers: [...fixtureManagedProviders.values()].map(view => ({ ...view })),
+      }),
     },
     respond(message: ClientResponse): Promise<RpcReceipt> {
       // Same routing discipline as the host: rpcId first, then the payload's
@@ -3343,6 +3349,7 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'llm.addProvider': return this.api.llm.addProvider(request)
       case 'llm.updateProvider': return this.api.llm.updateProvider(request)
       case 'llm.removeProvider': return this.api.llm.removeProvider(request)
+      case 'llm.managedProviders': return this.api.llm.managedProviders(request)
     }
   }
 

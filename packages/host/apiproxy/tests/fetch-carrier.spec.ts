@@ -308,6 +308,9 @@ function fakeApi(overrides: Partial<{ muxFrames: MuxFrame[]; hostFrames: HostFra
       async removeProvider(request) {
         return { rpcId: request.rpcId, result: { ok: true, value: {} } }
       },
+      async managedProviders(request) {
+        return { rpcId: request.rpcId, result: { ok: true, value: { providers: [] } } }
+      },
     },
     events: {
       mux: (_request, signal) => stream(muxFrames, signal),

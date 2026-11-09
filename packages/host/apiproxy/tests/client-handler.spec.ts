@@ -137,6 +137,8 @@ function scriptedApi(overrides: {
       addProvider: err,
       updateProvider: err,
       removeProvider: err,
+      // The stored-route read answers an empty registry for the same reason.
+      managedProviders: r => ok(r, { providers: [] }),
       ...overrides.llm,
     },
     events: { mux: () => empty<MuxFrame>(), host: () => empty<HostFrame>(), ...overrides.events },
