@@ -1,4 +1,4 @@
-﻿import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,6 +7,7 @@ import { zipSync } from 'fflate'
 import { SignJWT } from 'jose'
 import type { JWTPayload } from 'jose'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
+import type { SessionIndex } from '@deepseek-ai/dsh-session-persistence'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
 import * as SkillFilesystem from '@deepseek-ai/dsh-skill-filesystem'
 import * as SkillTier from '@deepseek-ai/dsh-skill-tier'
@@ -48,7 +49,12 @@ interface Assembly {
 }
 
 /** Boot the management surface over a real web server, registry, and JWT authenticator. */
-async function boot(config: { maxRequestBodyBytes?: number; openapi?: boolean; skillStack?: boolean } = {}): Promise<Assembly> {
+async function boot(config: {
+  maxRequestBodyBytes?: number
+  openapi?: boolean
+  skillStack?: boolean
+  sessionIndex?: SessionIndex
+} = {}): Promise<Assembly> {
   const root = await mkdtemp(join(tmpdir(), 'dsh-admin-http-'))
   const ctx = new Context()
   await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
@@ -61,6 +67,7 @@ async function boot(config: { maxRequestBodyBytes?: number; openapi?: boolean; s
     await ctx.plugin(SkillTier, { systemSkillsDir: join(root, 'system', 'skills') })
     await ctx.plugin(SkillInstall)
   }
+  if (config.sessionIndex !== undefined) ctx.provide('sessionIndex', config.sessionIndex)
   await ctx.plugin(TenantAdminHttp, {
     ...(config.maxRequestBodyBytes !== undefined ? { maxRequestBodyBytes: config.maxRequestBodyBytes } : {}),
     ...(config.openapi !== undefined ? { openapi: config.openapi } : {}),
@@ -106,7 +113,11 @@ async function call(assembly: Assembly, method: string, payload: unknown, token?
 
 const cleanups: Array<() => Promise<void>> = []
 
-async function assembly(config: { maxRequestBodyBytes?: number; skillStack?: boolean } = {}): Promise<Assembly> {
+async function assembly(config: {
+  maxRequestBodyBytes?: number
+  skillStack?: boolean
+  sessionIndex?: SessionIndex
+} = {}): Promise<Assembly> {
   const booted = await boot(config)
   cleanups.push(async () => {
     await booted.dispose()
@@ -288,9 +299,10 @@ describe('TenantAdminHttp', () => {
     const response = await fetch(`${stack.base}${ADMIN_OPENAPI_PATH}`)
     expect(response.status).toBe(200)
     const document = await response.json() as { paths: Record<string, unknown>; components: { securitySchemes: Record<string, unknown> } }
-    expect(Object.keys(document.paths)).toHaveLength(14)
+    expect(Object.keys(document.paths)).toHaveLength(16)
     expect(document.paths[`${ADMIN_PATH}/tenants.create`]).toBeDefined()
     expect(document.paths[`${ADMIN_PATH}/users.ensure`]).toBeDefined()
+    expect(document.paths[`${ADMIN_PATH}/sessions.stats`]).toBeDefined()
     expect(document.paths[`${ADMIN_PATH}/skills.upload`]).toBeDefined()
     expect(document.components.securitySchemes.bearerAuth).toMatchObject({ type: 'http', scheme: 'bearer' })
   })
@@ -430,5 +442,48 @@ describe('TenantAdminHttp skills methods', () => {
     const result = await call(stack, 'skills.list', { tier: 'case' }, token)
     expect(result.status).toBe(503)
     expect(result.body.error?.code).toBe('tier-unavailable')
+  })
+})
+describe('TenantAdminHttp session methods', () => {
+  it("reports one subject's conversation figures across tenants", async () => {
+    const items = [
+      { tenant: 'acme', sessionCount: 3, lastPromptAt: 1700, updatedAt: 1800 },
+      { tenant: 'beta', sessionCount: 1, lastPromptAt: null, updatedAt: 900 },
+    ]
+    const asked: string[] = []
+    const stack = await assembly({
+      sessionIndex: {
+        statsOf: async (user) => { asked.push(user); return items },
+        reindex: async () => 0,
+      },
+    })
+    const token = await mintToken({ scope: ADMIN_SCOPE })
+    const result = await call(stack, 'sessions.stats', { userId: 'user-1' }, token)
+    expect(result.status).toBe(200)
+    expect(result.body.value).toEqual({ items })
+    expect(asked).toEqual(['user-1'])
+  })
+
+  it('rebuilds one tenant index on request', async () => {
+    const asked: string[] = []
+    const stack = await assembly({
+      sessionIndex: {
+        statsOf: async () => [],
+        reindex: async (tenant: string) => { asked.push(tenant); return 7 },
+      },
+    })
+    const token = await mintToken({ scope: ADMIN_SCOPE })
+    const result = await call(stack, 'sessions.reindex', { tenantId: 'acme' }, token)
+    expect(result.status).toBe(200)
+    expect(result.body.value).toEqual({ sessions: 7 })
+    expect(asked).toEqual(['acme'])
+  })
+
+  it('answers session-index-unavailable when no backend maintains an index', async () => {
+    const stack = await assembly()
+    const token = await mintToken({ scope: ADMIN_SCOPE })
+    const result = await call(stack, 'sessions.stats', { userId: 'user-1' }, token)
+    expect(result.status).toBe(503)
+    expect(result.body.error?.code).toBe('session-index-unavailable')
   })
 })

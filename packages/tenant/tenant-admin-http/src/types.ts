@@ -83,6 +83,40 @@ export interface RemoveTenantPayload extends TenantIdPayload {
   readonly purge?: boolean
 }
 
+/** Payload of `sessions.stats`: one subject's figures across every tenant. */
+export interface SessionStatsPayload {
+  /** Authenticated subject whose conversation figures are read. */
+  readonly userId: string
+}
+
+/**
+ * One tenant's conversation figures for that subject. The figures follow the
+ * session-list rule, so a blank session and a delegated child are neither
+ * counted nor dated.
+ */
+export interface SessionStatsView {
+  /** Tenant the figures describe. */
+  readonly tenant: string
+  /** Conversations the subject has in that tenant. */
+  readonly sessionCount: number
+  /** Epoch ms of the subject's latest question there, or `null` when none recorded one. */
+  readonly lastPromptAt: number | null
+  /** Epoch ms of the newest counted conversation: its creation, or its last question when that is newer. */
+  readonly updatedAt: number
+}
+
+/** Payload of `sessions.reindex`: rebuild one tenant's conversation index from its logs. */
+export interface SessionReindexPayload {
+  /** Tenant whose partitions are folded again. */
+  readonly tenantId: string
+}
+
+/** Value of `sessions.reindex`. */
+export interface SessionReindexView {
+  /** Sessions the rebuild wrote or advanced. */
+  readonly sessions: number
+}
+
 /** Business failure body: one machine code, one message, optional detail fields. */
 export interface AdminErrorBody {
   /** Machine-readable failure code, stable across carriers. */

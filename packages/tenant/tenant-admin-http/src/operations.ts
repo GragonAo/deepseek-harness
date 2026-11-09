@@ -15,11 +15,16 @@
 import { Buffer } from 'node:buffer'
 import { z } from 'zod'
 import { SKILL_TIER_KINDS } from '@deepseek-ai/dsh-skill'
+import type { SessionIndex, SessionIndexStats } from '@deepseek-ai/dsh-session-persistence'
 import type { SkillInstallService } from '@deepseek-ai/dsh-skill-install'
 import type { Tenant } from '@deepseek-ai/dsh-tenant'
 import type { TenantAdmin } from '@deepseek-ai/dsh-tenant-admin'
 import { AdminRequestError } from './errors.ts'
-import type { TenantAdminView } from './types.ts'
+import type {
+  SessionReindexView,
+  SessionStatsView,
+  TenantAdminView,
+} from './types.ts'
 
 /**
  * Map one tenant record to its wire view, normalizing the optional fields a
@@ -46,6 +51,8 @@ export interface AdminServices {
   readonly admin: TenantAdmin
   /** Skill bundle installation, present when `@deepseek-ai/dsh-skill-install` is mounted. */
   readonly skillInstall?: SkillInstallService | undefined
+  /** Conversation index, present when a persistence backend maintains one. */
+  readonly sessionIndex?: SessionIndex | undefined
 }
 
 /**
@@ -81,6 +88,24 @@ function adminOperation<P, V>(
   }
 }
 
+/**
+ * Resolve the conversation index a session method cannot run without. A
+ * deployment whose persistence backend keeps no index answers 503 rather than
+ * appearing to report zero conversations.
+ * @param services - the services this surface serves methods against.
+ * @returns the mounted conversation index.
+ */
+function sessionIndexOf(services: AdminServices): SessionIndex {
+  if (services.sessionIndex === undefined) {
+    throw new AdminRequestError(
+      503,
+      'session-index-unavailable',
+      'sessions.* methods need a persistence backend that maintains the conversation index',
+    )
+  }
+  return services.sessionIndex
+}
+
 /** Resolve the bundle installation service a skill method cannot run without. */
 function skillInstallOf(services: AdminServices): SkillInstallService {
   if (services.skillInstall === undefined) {
@@ -105,6 +130,41 @@ const tenantView = z.object({
 })
 
 const membersValue = z.object({ members: z.array(z.string()) })
+
+const sessionStatsValue = z.object({
+  items: z.array(z.object({
+    tenant: z.string(),
+    sessionCount: z.number(),
+    lastPromptAt: z.number().nullable(),
+    updatedAt: z.number(),
+  })),
+})
+
+const sessionReindexValue = z.object({ sessions: z.number() })
+
+/**
+ * Map a rebuild's row count to its wire value.
+ * @param sessions - how many rows the rebuild wrote.
+ * @returns the value served to a management client.
+ */
+function sessionReindexViewOf(sessions: number): SessionReindexView {
+  return { sessions }
+}
+
+/**
+ * Map one conversation-index entry to its wire view, dropping the index's own
+ * naming for the payload's.
+ * @param entry - the figures as the backend reports them.
+ * @returns the view served to a management client.
+ */
+function sessionStatsViewOf(entry: SessionIndexStats): SessionStatsView {
+  return {
+    tenant: entry.tenant,
+    sessionCount: entry.sessionCount,
+    lastPromptAt: entry.lastPromptAt,
+    updatedAt: entry.updatedAt,
+  }
+}
 
 const tenantIdPayload = z.object({ id: z.string().min(1) })
 
@@ -209,6 +269,15 @@ export const OPERATIONS: Record<string, AdminOperation> = {
   'users.ensure': adminOperation(z.object({ subject: z.string().min(1) }),
     z.object({ root: z.string() }), async (services, payload) =>
       await services.admin.usersEnsure(payload.subject)),
+
+  'sessions.stats': adminOperation(z.object({ userId: z.string().min(1) }), sessionStatsValue,
+    async (services, payload) => ({
+      items: (await sessionIndexOf(services).statsOf(payload.userId)).map(sessionStatsViewOf),
+    })),
+
+  'sessions.reindex': adminOperation(z.object({ tenantId: z.string().min(1) }), sessionReindexValue,
+    async (services, payload) =>
+      sessionReindexViewOf(await sessionIndexOf(services).reindex(payload.tenantId))),
 
   'skills.list': adminOperation(z.object({ tier: skillTier }), skillListingValue, async (services, payload) => {
     const listing = await skillInstallOf(services).list({ tier: payload.tier })

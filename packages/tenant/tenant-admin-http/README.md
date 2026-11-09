@@ -26,9 +26,11 @@
 | `users.ensure` | `{ subject }` | `{ root }` | 预建某个主体的 `/global` 分层目录，不属于任何租户。 |
 | `skills.list` | `{ tier }` | `{ tier, directory, entries }` | 某个环境技能层的目录清单，逐条给出是否可加载与不可加载的带码原因。 |
 | `skills.upload` | `{ tier, zip, replace? }` | `{ tier, name, directory, replaced, files, visible }` | 上传一个技能包（`zip` 为 base64 的 zip），校验后原子换入；`replace` 允许覆盖同名技能。 |
+| `sessions.stats` | `{ userId }` | `{ items }` | 某个主体在各租户的会话数量与最后问答时间，口径同会话列表（未开始的空会话与子代理会话不计）。由 `ctx.sessionIndex` 提供；没有后端维护索引时答 503 `session-index-unavailable`。 |
+| `sessions.reindex` | `{ tenantId }` | `{ sessions }` | 按该租户分区里已存的日志重建索引行，用于补齐索引上线前写入的会话。 |
 | `skills.remove` | `{ tier, name }` | `{ tier, name, directory, visible }` | 删除某个已安装技能，`name` 可用该层条目名（目录或扁平 `.md`，即 `skills.list` 的 `entry`）或 frontmatter 名；条目名优先。 |
 
-`tier` 取 `case`、`user-global`、`system` 之一，实际可写的层由当前请求作用域发布的技能层决定：平台管理令牌没有租户与用户，因此只能写系统层。三个 `skills.*` 方法由 [`@deepseek-ai/dsh-skill-install`](../../skill/skill-install/README.md)（`ctx.skillInstall`）执行，每次变更后由它刷新进程级技能目录缓存，`visible` 即刷新后的目录是否列出该技能。
+`tier` 取 `case`、`user-global`、`system` 之一，实际可写的层由当前请求作用域发布的技能层决定：平台管理令牌没有租户与用户，因此只能写系统层。两个 `sessions.*` 方法由 [`@deepseek-ai/dsh-session-persistence-postgres`](../session-persistence-postgres/README.md) 通过 `ctx.sessionIndex` 提供的跨租户会话索引执行：一次问答即可回答某个主体在所有租户的会话数，无需逐个租户读日志。三个 `skills.*` 方法由 [`@deepseek-ai/dsh-skill-install`](../../skill/skill-install/README.md)（`ctx.skillInstall`）执行，每次变更后由它刷新进程级技能目录缓存，`visible` 即刷新后的目录是否列出该技能。
 
 ## 响应
 

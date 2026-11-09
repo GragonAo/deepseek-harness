@@ -21,6 +21,9 @@
       "path": "../../host/webserver"
     },
     {
+      "path": "../../session/session-persistence"
+    },
+    {
       "path": "../../skill/skill"
     },
     {

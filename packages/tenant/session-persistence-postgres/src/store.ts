@@ -6,14 +6,21 @@
  * cross-user ids are unaddressable by construction); writes capture the owning
  * (tenant, user) at materialize/load time so an asynchronous flush that
  * outlives the request still lands in the right schema and user.
+ *
+ * The same store maintains `session_index`, one platform-level row per session
+ * carrying the session-list facts (started, last question time) in the
+ * transaction that appends the events that advance them, so a subject's
+ * figures across every tenant are one indexed read instead of one log walk per
+ * tenant. The rows are a view of the logs: {@link PostgresSessionStore.reindex}
+ * rebuilds them from a tenant's partitions.
  * @module @deepseek-ai/dsh-session-persistence-postgres/src/store
  */
 
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import { SessionPersistenceRevision } from '@deepseek-ai/dsh-session-persistence'
-import type { PersistenceBackend, SessionPersistenceSnapshot, StoredPrefix, StoredSuffix } from '@deepseek-ai/dsh-session-persistence'
-import { currentTenant, currentUser, requireTenant, requireUser, tenantPartitionName } from '@deepseek-ai/dsh-tenant'
-import type { TenantId, UserId } from '@deepseek-ai/dsh-tenant'
+import type { PersistenceBackend, SessionIndexStats, SessionPersistenceSnapshot, StoredPrefix, StoredSuffix } from '@deepseek-ai/dsh-session-persistence'
+import { currentTenant, currentUser, requireTenant, requireUser, TenantId, tenantPartitionName } from '@deepseek-ai/dsh-tenant'
+import type { UserId } from '@deepseek-ai/dsh-tenant'
 import type { SqlExecutor } from './executor.ts'
 
 /** JSON-encode an opaque value for a `::jsonb` column. */
@@ -60,6 +67,32 @@ const META_COLUMNS = 'id, user_id, tenant_id, version, created_at, cwd, parent_s
 const EVENT_ROWS_PER_STATEMENT = 200
 
 /**
+ * The conversation index, one row per session. It lives beside `tenant_record`
+ * in the connection's own schema rather than inside a tenant partition: a
+ * subject's figures span tenants, and a per-partition table could only answer
+ * one tenant at a time.
+ */
+const INDEX_TABLE = 'session_index'
+
+/**
+ * The index facts one appended batch advances: `turn/start` makes a session a
+ * conversation, and a `user/message` whose source is the human prompt dates its
+ * last question. Both rules are the session-list fold, so the index and the
+ * list cannot disagree about what counts.
+ * @param events - the batch's events, in seq order.
+ * @returns the advanced facts, or `undefined` when the batch advances none.
+ */
+function indexAdvance(events: readonly SessionEvent[]): { started: boolean; lastPromptAt: number | null } | undefined {
+  let started = false
+  let lastPromptAt: number | null = null
+  for (const event of events) {
+    if (event.type === 'turn/start') started = true
+    else if (event.type === 'user/message' && event.data.source.kind === 'user') lastPromptAt = event.time
+  }
+  return started || lastPromptAt !== null ? { started, lastPromptAt } : undefined
+}
+
+/**
  * The PostgreSQL session store. Implements {@link PersistenceBackend} with
  * rows of full-JSON events; `appendBatch` and `commitRepair` run in a single
  * transaction, so no torn tail exists and {@link StoredPrefix.tornMarker} is
@@ -72,6 +105,8 @@ export class PostgresSessionStore implements PersistenceBackend<never> {
   private readonly bindings = new Map<SessionId, { tenant: TenantId; user: UserId }>()
   /** Deferred schema materializations, memoized per schema name. */
   private readonly ensuredSchemas = new Map<string, Promise<void>>()
+  /** The one-process index-table materialization, memoized until it succeeds. */
+  private ensuredIndex: Promise<void> | undefined
 
   constructor(readonly executor: SqlExecutor) {}
 
@@ -212,6 +247,12 @@ export class PostgresSessionStore implements PersistenceBackend<never> {
       }
       await this.insertEvents(tx, schema, meta.id, user, events)
       await tx.query(`UPDATE ${schema}.session_meta SET revision = revision + 1 WHERE id = $1`, [meta.id])
+      const advance = indexAdvance(events)
+      // A materialization always seeds the row, so a session the index has
+      // never seen gets one even when its first batch starts no turn; a later
+      // batch writes only when it advances a fact.
+      if (!isMaterialized) await this.upsertIndex(tx, tenant, user, meta, advance ?? { started: false, lastPromptAt: null })
+      else if (advance !== undefined) await this.upsertIndex(tx, tenant, user, meta, advance)
     })
     if (!isMaterialized) this.bindings.set(meta.id, { tenant, user })
   }
@@ -253,8 +294,82 @@ export class PostgresSessionStore implements PersistenceBackend<never> {
     await this.executor.transaction(async (tx) => {
       await tx.query(`DELETE FROM ${schema}.session_event WHERE id = $1 AND user_id = $2`, [id, user])
       await tx.query(`DELETE FROM ${schema}.session_meta WHERE id = $1 AND user_id = $2`, [id, user])
+      await tx.query(
+        `DELETE FROM ${INDEX_TABLE} WHERE tenant_id = $1 AND user_id = $2 AND session_id = $3`,
+        [tenant, user, id],
+      )
     })
     this.bindings.delete(id)
+  }
+
+
+  // --- Conversation index (platform-level) ---
+
+  /**
+   * Read one subject's conversation figures across every tenant. Unlike the
+   * ambient-scoped reads above, this one names its subject: the index exists so
+   * a management surface can answer for a user it is not authenticated as.
+   * @param user - the subject whose figures to read.
+   * @returns one entry per tenant that subject has conversations in, ordered by tenant id.
+   */
+  async statsOf(user: string): Promise<SessionIndexStats[]> {
+    await this.ensureIndex()
+    const rows = await this.executor.query(
+      `SELECT tenant_id,
+              count(*) AS session_count,
+              max(last_prompt_at) AS last_prompt_at,
+              max(GREATEST(created_at, last_prompt_at)) AS updated_at
+       FROM ${INDEX_TABLE}
+       WHERE user_id = $1 AND started AND parent_session IS NULL AND origin IS DISTINCT FROM 'subagent'
+       GROUP BY tenant_id
+       ORDER BY tenant_id`,
+      [user],
+    )
+    return rows.map(row => ({
+      tenant: String(row.tenant_id),
+      sessionCount: Number(row.session_count),
+      lastPromptAt: row.last_prompt_at === null || row.last_prompt_at === undefined
+        ? null
+        : Number(row.last_prompt_at),
+      updatedAt: Number(row.updated_at),
+    }))
+  }
+
+  /**
+   * Rebuild one tenant's index rows from its stored partitions: sessions
+   * written before the index existed have no row, and neither has any written
+   * by a process that crashed between the append and its index write. The
+   * rebuild folds the stored log exactly as the append path does; a row already
+   * advanced is left advanced.
+   * @param tenant - the tenant id whose partitions to fold.
+   * @returns how many rows the rebuild wrote.
+   */
+  async reindex(tenant: string): Promise<number> {
+    await this.ensureIndex()
+    const schema = tenantPartitionName(TenantId(tenant))
+    await this.ensureSchema(schema)
+    const rows = await this.executor.query(
+      `INSERT INTO ${INDEX_TABLE} (tenant_id, user_id, session_id, created_at, started, last_prompt_at, parent_session, origin, updated_at)
+       SELECT m.tenant_id, m.user_id, m.id, m.created_at,
+              EXISTS (
+                SELECT 1 FROM ${schema}.session_event e
+                WHERE e.id = m.id AND e.user_id = m.user_id AND e.event->>'type' = 'turn/start'
+              ),
+              (
+                SELECT max((e.event->>'time')::bigint) FROM ${schema}.session_event e
+                WHERE e.id = m.id AND e.user_id = m.user_id AND e.event->>'type' = 'user/message'
+                  AND e.event->'data'->'source'->>'kind' = 'user'
+              ),
+              m.parent_session, m.origin, $1
+       FROM ${schema}.session_meta m
+       ON CONFLICT (tenant_id, user_id, session_id) DO UPDATE SET
+         started = ${INDEX_TABLE}.started OR EXCLUDED.started,
+         last_prompt_at = GREATEST(${INDEX_TABLE}.last_prompt_at, EXCLUDED.last_prompt_at),
+         updated_at = EXCLUDED.updated_at
+       RETURNING session_id`,
+      [Date.now()],
+    )
+    return rows.length
   }
 
   // --- Internal ---
@@ -312,6 +427,75 @@ export class PostgresSessionStore implements PersistenceBackend<never> {
     }
   }
 
+  /**
+   * Write one session's index facts on the caller's transaction, so the row
+   * commits with the events that produced it. `started` only ever turns true
+   * and the question time only ever moves forward, which keeps a replayed or
+   * out-of-order batch from walking a row backwards.
+   * @param tx - the flush's transaction-scoped executor.
+   * @param tenant - the owning tenant.
+   * @param user - the owning subject.
+   * @param meta - the session header the row is keyed by.
+   * @param advance - the facts this batch advances.
+   */
+  private async upsertIndex(
+    tx: SqlExecutor,
+    tenant: TenantId,
+    user: UserId,
+    meta: SessionHeader,
+    advance: { started: boolean; lastPromptAt: number | null },
+  ): Promise<void> {
+    await tx.query(
+      `INSERT INTO ${INDEX_TABLE} (tenant_id, user_id, session_id, created_at, started, last_prompt_at, parent_session, origin, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       ON CONFLICT (tenant_id, user_id, session_id) DO UPDATE SET
+         started = ${INDEX_TABLE}.started OR EXCLUDED.started,
+         last_prompt_at = GREATEST(${INDEX_TABLE}.last_prompt_at, EXCLUDED.last_prompt_at),
+         updated_at = EXCLUDED.updated_at`,
+      [
+        tenant,
+        user,
+        meta.id,
+        meta.createdAt,
+        advance.started,
+        advance.lastPromptAt,
+        meta.parentSession ?? null,
+        meta.origin ?? null,
+        Date.now(),
+      ],
+    )
+  }
+
+  private ensureIndex(): Promise<void> {
+    const existing = this.ensuredIndex
+    if (existing !== undefined) return existing
+    const pending = this.materializeIndex()
+    this.ensuredIndex = pending
+    pending.catch(() => { this.ensuredIndex = undefined })
+    return pending
+  }
+
+  /**
+   * Create the shared index table once per process. Every tenant schema
+   * materialization ensures it too, so a deployment that only ever writes
+   * through the append path never issues a second one.
+   */
+  private async materializeIndex(): Promise<void> {
+    await this.executor.query(`CREATE TABLE IF NOT EXISTS ${INDEX_TABLE} (
+      tenant_id text NOT NULL,
+      user_id text NOT NULL,
+      session_id text NOT NULL,
+      created_at bigint NOT NULL,
+      started boolean NOT NULL DEFAULT false,
+      last_prompt_at bigint,
+      parent_session text,
+      origin text,
+      updated_at bigint NOT NULL,
+      PRIMARY KEY (tenant_id, user_id, session_id)
+    )`)
+    await this.executor.query(`CREATE INDEX IF NOT EXISTS ${INDEX_TABLE}_user ON ${INDEX_TABLE} (user_id)`)
+  }
+
   private ensureSchema(schema: string): Promise<void> {
     const existing = this.ensuredSchemas.get(schema)
     if (existing !== undefined) return existing
@@ -322,6 +506,7 @@ export class PostgresSessionStore implements PersistenceBackend<never> {
   }
 
   private async materializeSchema(schema: string): Promise<void> {
+    await this.ensureIndex()
     await this.executor.query(`CREATE SCHEMA IF NOT EXISTS ${schema}`)
     await this.executor.query(`CREATE TABLE IF NOT EXISTS ${schema}.session_meta (
       id text PRIMARY KEY,

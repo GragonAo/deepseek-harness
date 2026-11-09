@@ -2,7 +2,9 @@
  * Opt-in tenant-keyed PostgreSQL persistence provider. Logical sessions remain
  * unchanged; the physical backend stores each session's header in
  * `session_meta` and its events as full-JSON rows in `session_event`, both
- * inside a per-tenant schema.
+ * inside a per-tenant schema. The same store maintains the platform-level
+ * conversation index (`ctx.sessionIndex`) that answers a subject's figures
+ * across tenants without walking their logs.
  * @module @deepseek-ai/dsh-session-persistence-postgres
  */
 
@@ -73,6 +75,12 @@ export class PostgresSessionPersistence extends SessionPersistence {
     this.coordinator = new PersistenceCoordinator(ctx, this.store, {
       preparedSessionCacheSize,
       writeBatchMaxDelayMs,
+    })
+    // The store maintains the conversation index in the same transactions as
+    // the logs it indexes, so serving it needs no second pool or second owner.
+    ctx.provide('sessionIndex', {
+      statsOf: (user: string) => this.store.statsOf(user),
+      reindex: (tenant: string) => this.store.reindex(tenant),
     })
   }
 

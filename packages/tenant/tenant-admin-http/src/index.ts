@@ -210,9 +210,10 @@ export class TenantAdminHttp extends Service {
       const principal = await this.ctx.tenantAuth.authenticate(req.headers.authorization ?? '')
       const body = await readJson(req, this.bodyLimit(method))
       const skillInstall = this.ctx.get('skillInstall')
+      const sessionIndex = this.ctx.get('sessionIndex')
       const value = await runWithScopes(principal.scopes, async () => {
         requireScope(this.config.adminScope)
-        return await operation.invoke({ admin: this.ctx.tenantAdmin, skillInstall }, body)
+        return await operation.invoke({ admin: this.ctx.tenantAdmin, skillInstall, sessionIndex }, body)
       })
       respond(res, 200, { ok: true, value })
     } catch (error: unknown) {
