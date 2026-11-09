@@ -201,6 +201,9 @@
       "path": "../../session/session-projection/tsconfig.json"
     },
     {
+      "path": "../../session/session-followups/tsconfig.json"
+    },
+    {
       "path": "../../session/session-stats/tsconfig.json"
     },
     {

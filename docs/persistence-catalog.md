@@ -439,6 +439,30 @@ Source: [`packages/deliverables/tool-present/src/types.ts:53`](../packages/deliv
 
 Source: [`packages/feedback/command-feedback/src/index.ts:62`](../packages/feedback/command-feedback/src/index.ts)
 
+### `followup/*`
+
+<a id="followupllm-request--log-only"></a>
+
+#### `followup/llm-request` — log-only
+
+```ts persistence-catalog
+/** Log-only pre-dispatch record of one follow-up suggestion request. */
+'followup/llm-request': FollowupLlmRequestEventData
+```
+
+Source: [`packages/session/session-followups/src/index.ts:64`](../packages/session/session-followups/src/index.ts)
+
+<a id="followupsuggested--log-only"></a>
+
+#### `followup/suggested` — log-only
+
+```ts persistence-catalog
+/** Accepted follow-up questions for one completed turn. Log-only: never model-visible. */
+'followup/suggested': FollowupSuggestedEventData
+```
+
+Source: [`packages/session/session-followups/src/index.ts:62`](../packages/session/session-followups/src/index.ts)
+
 ### `goal/*`
 
 <a id="goalchange--log-only"></a>

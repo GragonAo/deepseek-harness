@@ -695,6 +695,201 @@ export interface Config {
 
 Source: [`packages/tenant/container-docker/src/index.ts:66`](../packages/tenant/container-docker/src/index.ts)
 
+<a id="deepseek-aidsh-container-k8s"></a>
+
+## `@deepseek-ai/dsh-container-k8s`
+
+```ts config-catalog
+/** Kubernetes 沙箱 provider 的配置。 */
+export interface Config {
+  /**
+   * 沙箱 Pod 所在的命名空间。本 provider 只在这一个命名空间里创建、读取和删除沙箱 Pod，
+   * 每一条 kubectl 调用都带着它，除此之外不碰集群里的任何对象。
+   * 没有默认值：默认值就等于把某一台集群的事实写进包里。
+   */
+  namespace?: string
+  /** 沙箱容器镜像引用；必须已经存在于节点上。 */
+  image?: string
+  /** `kubectl` 可执行文件名或绝对路径。 */
+  kubectlBinary?: string
+  /** 沙箱容器的镜像拉取策略。 */
+  imagePullPolicy?: string
+  /**
+   * 沙箱内 tool-exec 服务监听的容器端口。provider 把它同时用在两处：写进 Pod 的
+   * `containerPort`，并作为镜像 entrypoint 的第一个位置参数传给沙箱进程，
+   * 因此改这个值真的会改沙箱内的监听端口。与 `container-docker` 的同名字段同义。
+   */
+  toolExecPort?: number
+  /**
+   * 执行容器的工作目录。provider 在沙箱里把它挂成一个 `emptyDir`：容器根文件系统是只读的，
+   * 不是挂载点就不存在，而它又必须存在——会话按相对路径解析出的位置就是这里。
+   *
+   * 它不能是任何 claim 上的挂载点：模型按相对路径写出的中间产物应当随沙箱销毁而消失，
+   * 不落进用户案件的工作目录。宿主的 `sandbox.workDir` 必须是同一个值。
+   */
+  workDir?: string
+  /**
+   * `/case`（案件工作目录）是否对沙箱只读，默认只读。
+   *
+   * 它由一个案件下的所有用户共用，业务侧通过管理接口写入；沙箱可写就意味着任何用户的沙箱都能
+   * 改到别人的输入。案件级的 `config`、`skills`、`tools` 三棵树与它平级、各自只读挂载，
+   * 松开它只松开工作目录本身。
+   */
+  caseReadOnly?: boolean
+  /**
+   * `/global`（该 subject 的跨案件目录）是否对沙箱只读，默认只读。
+   *
+   * 它盛放用户全局提交上来的文件，由业务侧写入；用户全局技能树是它的同级目录、单独只读
+   * 挂载，松开它只松开工作目录本身。
+   */
+  usersReadOnly?: boolean
+  /**
+   * 与 {@link claimRoot} 对应的 PersistentVolumeClaim。两者都设置时，每个挂载都通过
+   * `subPath` 投影到这个 claim 上，沙箱不再带任何 `hostPath`，可以在任意节点启动。
+   * 不设置则每一层都从节点目录提供，这要求运行沙箱的节点上确实存在这些目录。
+   * 两者必须同时设置或同时省略：只写一个，本 provider 会在加载时报错，而不是悄悄退回 hostPath 模式。
+   */
+  workspaceClaim?: string
+  /**
+   * claim 在宿主机上的挂载点，同时也是每个 `source` 换算成 `subPath` 的根。
+   * host 进程把同一个 claim 挂在这里，因此同一路径在两侧含义一致，
+   * 两种模式之间切换时也不需要改任何已配置的根。
+   */
+  claimRoot?: string
+  /** 宿主机上按 subject 分目录的根，挂到 `/global`。不设置则跳过该挂载。 */
+  usersRoot?: string
+  /** 存放全局 skill 树的宿主机目录，以只读方式挂到同一路径。 */
+  systemRoot?: string
+  /**
+   * `/tools` 挂载的来源，供租户记录里没有 `toolsRoot` 的租户使用。来源规则是租户记录优先：
+   * `tenant.toolsRoot` 存在时用它，缺省才回落到这里。省略本字段则这类租户的沙箱没有
+   * `/tools` 挂载。（`container-docker` 的同名字段逐字同义。）
+   */
+  toolsRoot?: string
+  /**
+   * 存放 Python 运行时的宿主机目录，以只读方式挂到同一路径。tool-exec 镜像自身不带解释器，
+   * 所以这份挂载就是沙箱唯一的 Python。省略则不挂载，也不设任何 Python 变量，
+   * 沙箱里根本没有 `python3`——与 `container-docker` 省略同名 `pythonRoot` 完全一致。
+   */
+  pythonRoot?: string
+  /**
+   * 沙箱内 Python 三件套的取值，与 `container-docker` 的变量语义相同（`PATH` 前置、
+   * `VIRTUAL_ENV`、`PYTHONPATH`），差别只在取值从哪来：docker 在宿主进程里读 `pythonRoot`
+   * 的目录布局（同一个文件系统），而 k8s 的 `pythonRoot` 是节点上的目录（hostPath 模式）
+   * 或 claim 里的子路径，宿主进程通常看不到它，也没有任何东西能替它读——所以这三个值
+   * 必须由部署声明。每个字段各自独立：只给 `binDir` 的目录就只前置 `PATH`，
+   * 与 docker 那边「只有 `bin` 就只设 `PATH`」是同一条规则。
+   * 设置本字段时必须同时设置 {@link pythonRoot}：三个值描述的都是被挂载的那份运行时，
+   * 没有挂载就无处可指。省略本字段时校验结果里不会留下空对象，`undefined` 就是「没配 Python」。
+   */
+  pythonEnv?: PythonSandboxEnv
+  /**
+   * `PATH` 的沙箱镜像取值，用于 `pythonEnv.binDir` 把挂载目录前置时重述镜像其余部分的 `PATH`
+   * （Pod 的 `env` 是整体替换容器环境，不是追加）。默认取随包镜像的 Debian 基础值
+   * （`node:22-bookworm-slim`；`docker/Dockerfile` 自己没设 PATH），与 `container-docker`
+   * 的同名字段默认值相同。镜像的 PATH 不同时要一并设置，否则那个镜像追加的目录在沙箱里不再解析。
+   */
+  toolExecImagePath?: string
+  /**
+   * 每个沙箱里启动的容器命令，默认 `['node', 'entry.mjs']`——与随包镜像的
+   * `ENTRYPOINT` 一致。provider 会把 {@link toolExecPort} 追加成它的下一个位置参数，
+   * 因为镜像 entrypoint 的契约是 `entry.mjs <port> [host]`：Pod 写了 `command` 就不再使用
+   * 镜像的 `CMD`，端口只能由 provider 显式给出。镜像的 entrypoint 契约不同时，把完整命令写在这里。
+   */
+  command?: string[]
+  /**
+   * 沙箱容器的显式环境变量。身份变量（`DSH_CASE_ID`、`DSH_TENANT_ID`、`DSH_USER_ID`）
+   * 与 Python 三件套由本 provider 在它之后写入，因此部署改不了这几项：一个沙箱属于哪个案子
+   * 与哪个人，只有平台知道，不能由被注入者自己声明。
+   */
+  env?: Record<string, string>
+  /**
+   * 单次 `kubectl` 调用的时间上限，单位毫秒。kubectl 会一直阻塞到 apiserver 作答，
+   * 只有期限能终止它。默认 60000，与 `container-docker` 的同名字段同义且同默认值：
+   * 同名字段的默认值必须一致，否则同一个部署换后端就换了超时行为。
+   */
+  cliTimeoutMs?: number
+  /**
+   * 一次冷启动的总时间上限，单位毫秒：它的 kubectl 调用（建 Pod、读状态）与等待就绪一起算在内。
+   * 超过就让这次启动失败，并清掉该主体缓存的句柄与正在进行的启动记录，下一次 exec 重新冷启动，
+   * 而不是复用一个永不 settle 的 promise。默认 180000，与 `container-docker` 的同名字段
+   * 同义且同默认值；集群侧还要算上调度与拉镜像，所以这个上界不能按单次调用来估。
+   */
+  startTimeoutMs?: number
+  /**
+   * 等待 Pod 就绪期间读取集群状态的轮询间隔，单位毫秒。取值要权衡的是「多久发现沙箱起来了」
+   * 与「每次读都要花掉一个 kubectl 进程和一次 apiserver 往返」。默认 500。
+   */
+  statusPollMs?: number
+  /**
+   * Pod 报告就绪之后，再等它内部 tool-exec 服务答得上话的时间上限，单位毫秒。
+   * Pod 的 Ready 只说明容器进程起来了，而 tool-exec 服务何时开始监听端口是镜像 entrypoint
+   * 自己的事，这段空档里第一条命令会撞上连接被拒。默认 10000，与 `container-docker`
+   * 的同名字段同义。
+   */
+  readyTimeoutMs?: number
+  /** 上面那次等待每次重试之间的间隔，单位毫秒。默认 30，与 `container-docker` 的同名字段同义。 */
+  readyPollMs?: number
+  /**
+   * 一次 tool-exec HTTP 往返的时间上限，单位毫秒。它覆盖命令在沙箱内的执行，不只是连接，
+   * 因此是这几个期限里最大的那个。默认 600000，与 `container-docker` 的同名字段同义。
+   */
+  transportTimeoutMs?: number
+  /**
+   * 一次解析出的沙箱句柄在多少毫秒内可以直接复用，过后重新从集群读一次状态。
+   * 每次工具调用都要解析沙箱，不缓存的解析会在命令真正执行前先花掉一个 `kubectl` 进程和一次
+   * API server 往返；并发会话会把这份开销成倍放大。取值要短到能及时发现沙箱被替换：
+   * 过期的句柄指向一个已经不再服务的 Pod IP。默认 5000，与 `container-docker` 的同名字段同义。
+   */
+  sandboxCacheTtlMs?: number
+  /**
+   * 空闲多久后让该主体的沙箱自己退出，单位毫秒：provider 把它作为 `DSH_TOOL_EXEC_IDLE_MS`
+   * 注入沙箱，容器据此判定「没有在途请求、且距上一次请求已超过预算」后自行退出，Pod 因此进入
+   * 终态，由下一次启动的收尸清掉。宿主不自己计时：它看不见别的副本对这个沙箱的使用，而每一个
+   * 请求都要到达容器。正在执行的命令不算空闲。省略则沙箱永不自行退出。
+   * 与 `container-docker` 的同名字段同义。
+   */
+  idleTimeoutMs?: number
+  /**
+   * 沙箱内每次 exec 里**每条输出流**最多保留多少字节：provider 把它作为
+   * `DSH_TOOL_EXEC_MAX_OUTPUT_BYTES` 注入沙箱，容器超过上界后继续读完这条流（停止读会让子进程
+   * 在写满管道时阻塞），只保留末尾一段，并在结果里把该流标成已截断（见 `container-docker`
+   * 的 `src/tool-exec.ts`，两个后端跑的是同一份服务）。上界只需高于宿主自己的结果上界
+   * （`ctx.subprocess` 的每条流预算），它的用处是保护沙箱自己：原始流是容器先攒满、宿主才轮得到
+   * 加界的，所以一条大输出命令能撑死沙箱。调低它会连带截断那些本来整段读得回来的大结果
+   * （整份文件读取、`run_code` 自己 64 MiB 的载荷上界），所以它要留在部署里那些上界之上。
+   * 与 `container-docker` 的同名字段逐字同义。默认 67108864。
+   */
+  maxOutputBytes?: number
+  /**
+   * 沙箱容器的内存上限，按 Kubernetes quantity 写法（如 `8Gi`）；省略则不限。
+   *
+   * 它管的是**命令自身**的内存，而不是被捕获的输出：`maxOutputBytes` 只约束 provider 留存的字节，
+   * 一条在内存里排序大文件的命令照样能把容器撑到节点内存耗尽。不给上限的沙箱 Pod 落在 BestEffort，
+   * 内核在内存耗尽时按 `oom_score_adj` 挑受害者，被挑中的可能是节点上任何与它无关的进程——
+   * 沙箱里跑的是模型拼出来的命令，所以这里应当有界。
+   */
+  memoryLimit?: string
+  /**
+   * 沙箱容器的核数上限（整核数）；省略则不限。与 `container-docker` 的同名字段同义，
+   * 只是写法换成 quantity：`2` 表示两核。
+   */
+  cpuLimit?: number
+}
+
+/** 沙箱内 Python 三件套的显式取值；每项各自独立，与 `container-docker` 按标记逐个设置的规则一致。 */
+export interface PythonSandboxEnv {
+  /** 前置到 `PATH` 的目录，通常是 `<pythonRoot>/bin`。省略则不前置，`PATH` 保持镜像自己的值。 */
+  binDir?: string
+  /** `VIRTUAL_ENV` 的取值，通常是 `pythonRoot` 自身（该目录带 `pyvenv.cfg` 时）。省略则不设。 */
+  virtualEnv?: string
+  /** `PYTHONPATH` 的取值，通常是 `<pythonRoot>/lib/python3.<minor>/site-packages`，多个目录用 `:` 连接。省略则不设。 */
+  sitePackages?: string
+}
+```
+
+Source: [`packages/tenant/container-k8s/src/index.ts:130`](../packages/tenant/container-k8s/src/index.ts)
+
 <a id="deepseek-aidsh-cordis-host-runner"></a>
 
 ## `@deepseek-ai/dsh-cordis-host-runner`
@@ -885,6 +1080,34 @@ export interface Config {
 ```
 
 Source: [`packages/goal/goal/src/index.ts:116`](../packages/goal/goal/src/index.ts)
+
+<a id="deepseek-aidsh-goal-round-driver"></a>
+
+## `@deepseek-ai/dsh-goal-round-driver`
+
+Requires: `agents` · `goals` · `sessions`
+
+```ts config-catalog
+/**
+ * Deployment policy for a goal round that failed. A failure releases automatic
+ * continuation first — no other trigger may restart a round before the retry
+ * fires — and the bounded retry re-arms the goal after
+ * {@link RETRY_DEFAULTS.errorRetryDelayMs}. The bound, not the delay, is what
+ * stops a goal that keeps failing from spending its round budget: every retry
+ * is one admitted goal round.
+ */
+export interface Config {
+  /**
+   * Consecutive failure-driven releases retried before continuation stays
+   * released for a human resume (default 3). `0` disables automatic retry.
+   */
+  maxErrorRetries?: number
+  /** Delay before the first automatic re-arm in milliseconds; each consecutive attempt doubles it (default 5000). */
+  errorRetryDelayMs?: number
+}
+```
+
+Source: [`packages/goal/goal-round-driver/src/index.ts:40`](../packages/goal/goal-round-driver/src/index.ts)
 
 <a id="deepseek-aidsh-headless"></a>
 
@@ -1725,6 +1948,42 @@ export interface Config {
 
 Source: [`packages/feedback/message-feedback/src/index.ts:49`](../packages/feedback/message-feedback/src/index.ts)
 
+<a id="deepseek-aidsh-object-store"></a>
+
+## `@deepseek-ai/dsh-object-store`
+
+Requires: `tools`
+
+```ts config-catalog
+/** 对象存储配置。除端点、桶与对外基址外都有默认值。 */
+export interface Config {
+  /** S3 端点源（`scheme://host[:port]`），服务访问存储用的那个地址。 */
+  endpoint: string
+  /** 桶名；该桶必须是部署侧已开放匿名只读的桶。 */
+  bucket: string
+  /** 对外下载基址（`scheme://host[:port]`），用户浏览器能到达的那个地址。 */
+  publicBaseUrl: string
+  /** 签名区域；RGW 默认 zonegroup 用 `us-east-1`。 */
+  region?: string
+  /** 读取访问密钥 ID 的环境变量名。 */
+  accessKeyEnv?: string
+  /** 读取秘密访问密钥的环境变量名。 */
+  secretKeyEnv?: string
+  /** 路径式寻址；RGW 与 MinIO 用 `true`。 */
+  forcePathStyle?: boolean
+  /** 对象键前缀，用来把本部署的对象与同一个桶里的其它对象分开。 */
+  keyPrefix?: string
+  /** 单个文件的上限字节数。 */
+  maxBytes?: number
+  /** `/global` 挂载对应的宿主根；该挂载不存在时省略。 */
+  usersRoot?: string
+  /** 写完之后匿名校验一次公开地址；确认「公开可下载」这件事真的成立。 */
+  verifyPublic?: boolean
+}
+```
+
+Source: [`packages/tenant/object-store/src/index.ts:35`](../packages/tenant/object-store/src/index.ts)
+
 <a id="deepseek-aidsh-permission-presets"></a>
 
 ## `@deepseek-ai/dsh-permission-presets`
@@ -1975,6 +2234,42 @@ export interface JsonRpcConfig {
 Depends on: `Readable` (`node:stream`) · `Writable` (`node:stream`)
 
 Source: [`packages/sdk/server/src/index.ts:25`](../packages/sdk/server/src/index.ts)
+
+<a id="deepseek-aidsh-session-followups"></a>
+
+## `@deepseek-ai/dsh-session-followups`
+
+Requires: `llm`
+
+```ts config-catalog
+/** Required deployment policy for the suggestion generator. */
+export interface Config {
+  /**
+   * Task framing the auxiliary model reads: what counts as a useful follow-up
+   * question for this deployment, in this deployment's domain and language.
+   */
+  readonly instructions: string
+  /** Maximum accepted questions per turn. */
+  readonly maxQuestions: number
+  /** Maximum UTF-8 bytes in the final framed user prompt; the answer is shortened to fit. */
+  readonly maxInputBytes: number
+  /** Auxiliary generation output-token cap. */
+  readonly maxOutputTokens: number
+  /** End-to-end auxiliary request deadline in milliseconds. */
+  readonly timeoutMs: number
+  /**
+   * Shortest final answer, in UTF-8 bytes, worth suggesting follow-ups for:
+   * acknowledgement-only turns cost no auxiliary request.
+   */
+  readonly minAnswerBytes: number
+  /** Optional explicit provider route; must be paired with `model`. */
+  readonly provider?: string
+  /** Optional explicit model id; must be paired with `provider`. */
+  readonly model?: string
+}
+```
+
+Source: [`packages/session/session-followups/src/index.ts:72`](../packages/session/session-followups/src/index.ts)
 
 <a id="deepseek-aidsh-session-persistence-jsonl"></a>
 
@@ -2348,6 +2643,24 @@ export interface Config {
 ```
 
 Source: [`packages/skill/skill-filesystem/src/index.ts:49`](../packages/skill/skill-filesystem/src/index.ts)
+
+<a id="deepseek-aidsh-skill-install"></a>
+
+## `@deepseek-ai/dsh-skill-install`
+
+Requires: `skills`
+
+```ts config-catalog
+/** Skill bundle installation configuration. */
+export interface Config {
+  /** Largest accepted compressed bundle in bytes. Defaults to 16 MiB. */
+  maxBundleBytes?: number
+  /** Largest accepted total expanded size in bytes. Defaults to 64 MiB. */
+  maxExpandedBytes?: number
+}
+```
+
+Source: [`packages/skill/skill-install/src/index.ts:56`](../packages/skill/skill-install/src/index.ts)
 
 <a id="deepseek-aidsh-skill-tier"></a>
 
@@ -2874,6 +3187,58 @@ export interface Config {
 
 Source: [`packages/tenant/tenant-auth-jwt/src/index.ts:23`](../packages/tenant/tenant-auth-jwt/src/index.ts)
 
+<a id="deepseek-aidsh-tenant-fs-http"></a>
+
+## `@deepseek-ai/dsh-tenant-fs-http`
+
+Requires: `tenantAuth` · `tenants`
+
+```ts config-catalog
+/** Surface configuration. */
+export interface Config {
+  /** Prefix the surface answers on. */
+  path?: string
+  /** Deployment root of the cross-case work directories; without it the `global` scope is unavailable. */
+  usersRoot?: string
+  /** Deployment root of the system tree; without it the `system` scope is unavailable. */
+  systemRoot?: string
+  /** Largest accepted `PUT` body in bytes. */
+  maxBytes?: number
+  /**
+   * Scopes this deployment accepts a write or a delete into, as scope names.
+   * Defaults to `session` and `user`; naming another one (typically `global`,
+   * whose directories hold cross-case assets a subject maintains) is the only way
+   * to let the business side write it. An unknown name refuses to load.
+   */
+  writableScopes?: string[]
+}
+```
+
+Source: [`packages/tenant/fs-http/src/index.ts:92`](../packages/tenant/fs-http/src/index.ts)
+
+<a id="deepseek-aidsh-tenant-questions"></a>
+
+## `@deepseek-ai/dsh-tenant-questions`
+
+Requires: `userQuestions`
+
+```ts config-catalog
+/**
+ * Service configuration.
+ *
+ * `answerTimeoutMs` must stay below the `user-questions` seam's own
+ * `answerTimeoutMs`: reaching the seam's deadline withdraws the ask through the
+ * provider's abort signal, so a longer window here would leave the model with the
+ * seam's generic no-answer failure instead of this channel's explicit timeout.
+ */
+export interface Config {
+  /** Milliseconds an unanswered question waits before `ask()` rejects with the timeout. */
+  answerTimeoutMs?: number
+}
+```
+
+Source: [`packages/tenant/tenant-questions/src/index.ts:131`](../packages/tenant/tenant-questions/src/index.ts)
+
 <a id="deepseek-aidsh-terminal-bash"></a>
 
 ## `@deepseek-ai/dsh-terminal-bash`
@@ -2924,6 +3289,46 @@ export type ShellDialect = 'bash' | 'pwsh'
 
 Source: [`packages/terminal/terminal-bash/src/config.ts:10`](../packages/terminal/terminal-bash/src/config.ts)
 
+<a id="deepseek-aidsh-terminal-container"></a>
+
+## `@deepseek-ai/dsh-terminal-container`
+
+Requires: `terminals` · `containerRuntime`
+
+```ts config-catalog
+/** 插件公开配置。 */
+export interface Config {
+  /** 后端注册类型（默认 `shell`：终端工具与 `tool-bash-persistent` 默认要的就是这个名字）。 */
+  backendType?: string
+  /** 沙箱里的交互式 shell 可执行文件。 */
+  shellPath?: string
+  /** shell 参数。 */
+  shellArgs?: string[]
+  /** 未指定工作目录的会话在沙箱里的落地目录。 */
+  cwd?: string
+  /** 终端行数。 */
+  rows?: number
+  /** 终端列数。 */
+  cols?: number
+  /** 保留的最大逻辑行数。 */
+  scrollbackLines?: number
+  /** 保留的最大 UTF-8 字节数，同时也是容器侧保留输出的上界。 */
+  scrollbackMaxBytes?: number
+  /** 一次读或一次结算视图返回的最大字节数。 */
+  readMaxBytes?: number
+  /** 观察输出的轮询间隔（只读本地缓冲，不产生沙箱往返）。 */
+  pollIntervalMs?: number
+  /** 静默多久后判定「对方在等输入」。 */
+  idleSilenceMs?: number
+  /** 一次发送的绝对等待上界。 */
+  timeoutMs?: number
+  /** 会话结束时先 TERM、超过这个宽限才升级到 KILL 的等待时长。 */
+  disposeGraceMs?: number
+}
+```
+
+Source: [`packages/tenant/terminal-container/src/config.ts:6`](../packages/tenant/terminal-container/src/config.ts)
+
 <a id="deepseek-aidsh-time-context"></a>
 
 ## `@deepseek-ai/dsh-time-context`
@@ -2968,36 +3373,6 @@ export type TokenMeterConfig = Record<string, never>
 ```
 
 Source: [`packages/llm/token-meter/src/types.ts:12`](../packages/llm/token-meter/src/types.ts)
-
-<a id="deepseek-aidsh-tool-artifact"></a>
-
-## `@deepseek-ai/dsh-tool-artifact`
-
-Requires: `tools`
-
-```ts config-catalog
-/** Artifact delivery configuration. */
-export interface Config {
-  /** Absolute host directory the deployment's web front end serves as static files. */
-  mediaRoot: string
-  /**
-   * The web front end's origin (scheme, host, and port — no path), used only to build the absolute
-   * `url` for callers that need one (logs, curl, a non-browser client). The delivery tag never
-   * carries it.
-   */
-  publicOrigin?: string
-  /** Same-origin path prefix the front end serves {@link Config.mediaRoot} under. */
-  urlPrefix: string
-  /** Host root of the per-subject directories mounted at `/global`; omit when that mount is absent. */
-  usersRoot?: string
-  /** File published artifacts into a per-kind subdirectory instead of the case directory itself. */
-  groupByKind: boolean
-  /** Largest file this tool publishes, in bytes. */
-  maxBytes: number
-}
-```
-
-Source: [`packages/tenant/tool-artifact/src/index.ts:42`](../packages/tenant/tool-artifact/src/index.ts)
 
 <a id="deepseek-aidsh-tool-bash"></a>
 
@@ -3178,6 +3553,26 @@ export interface Config {
 ```
 
 Source: [`packages/lsp/tool-lsp/src/index.ts:58`](../packages/lsp/tool-lsp/src/index.ts)
+
+<a id="deepseek-aidsh-tool-present"></a>
+
+## `@deepseek-ai/dsh-tool-present`
+
+Requires: `tools` · `systemPrompt`
+
+```ts config-catalog
+/** Model-facing deliverable declaration configuration. */
+export interface Config {
+  /**
+   * How many of the most recent turns the projection retains. Older turns drop out of the state,
+   * which bounds what a long session ships to a client on every delivery; the session log keeps
+   * every declaration, so a client that reads history can still find them.
+   */
+  retainTurns: number
+}
+```
+
+Source: [`packages/deliverables/tool-present/src/index.ts:36`](../packages/deliverables/tool-present/src/index.ts)
 
 <a id="deepseek-aidsh-tool-pwsh"></a>
 
@@ -3526,6 +3921,19 @@ export interface Config {
 ```
 
 Source: [`packages/tenant/tools-manifest/src/index.ts:35`](../packages/tenant/tools-manifest/src/index.ts)
+
+<a id="deepseek-aidsh-tools-restriction"></a>
+
+## `@deepseek-ai/dsh-tools-restriction`
+
+Requires: `tools`
+
+```ts config-catalog
+/** This restriction consumer has no config; the tier roots come from `ctx.toolTiers`. */
+export type Config = Readonly<Record<string, never>>
+```
+
+Source: [`packages/tenant/tools-restriction/src/index.ts:43`](../packages/tenant/tools-restriction/src/index.ts)
 
 <a id="deepseek-aidsh-tools-tier"></a>
 

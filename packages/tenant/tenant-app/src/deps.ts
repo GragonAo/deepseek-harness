@@ -16,6 +16,7 @@ import type {} from '@deepseek-ai/dsh-api-gateway'
 import type {} from '@deepseek-ai/dsh-host-apiproxy'
 import type {} from '@deepseek-ai/dsh-session-title'
 import type {} from '@deepseek-ai/dsh-session-title-first-prompt-llm'
+import type {} from '@deepseek-ai/dsh-session-followups'
 import type {} from '@deepseek-ai/dsh-user-questions'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
@@ -136,6 +137,7 @@ export const SPINE_MODULES = [
   '@deepseek-ai/dsh-host-apiproxy',
   '@deepseek-ai/dsh-session-title',
   '@deepseek-ai/dsh-session-title-first-prompt-llm',
+  '@deepseek-ai/dsh-session-followups',
   '@deepseek-ai/dsh-user-questions',
   '@deepseek-ai/dsh-agent',
   '@deepseek-ai/dsh-agent-default-model',

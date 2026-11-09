@@ -139,6 +139,40 @@ export const SPINE: readonly SpineRow[] = [
     module: '@deepseek-ai/dsh-session-title-first-prompt-llm',
     config: () => ({ targetWords: 5, targetCjkCharacters: 10, maxInputBytes: 4096, maxOutputTokens: 64, timeoutMs: 60000 }),
   },
+  // 收尾追问：一轮正常结束后，由宿主任命一次辅助模型调用问出「用户接下来最可能想
+  // 问什么」，结果记成 followup/suggested 会话事件，业务面折进它已经渲染的那一轮。
+  //
+  // 它不是提示词里的输出格式：追问曾经由主模型在正文末尾写 [hermes-followup] 标签、
+  // 前端解析标签渲染，那套协议把「结构化数据」塞进自然语言流里，要额外处理半截标签、
+  // 剥离、分享导出、历史重建，而且提示词在部署侧、解析器在代码里，两边一漂移旧会话
+  // 就丢了追问。改成事件后，主提示词不再有条目要求，主回答不受影响，失败也只是这一轮
+  // 没有追问。
+  //
+  // 不给 provider/model 就用会话最近一次请求那条路由（与主回答同一个模型），
+  // 单个案件覆盖它就在 plugins.session-followups 里写全这一对。
+  // instructions 是部署政策、包自身不给默认值：这决定追问像不像这个业务的人问出来的。
+  {
+    id: 'session-followups',
+    module: '@deepseek-ai/dsh-session-followups',
+    config: () => ({
+      instructions: [
+        '下面是一轮已经结束的问答，JSON 字段：question 是用户提问，answer 是助手回答，tools 是本轮调用过的数据工具名。',
+        '请给出 3 条用户接下来最可能想问的追问，要求：',
+        '1. 每条是一个完整的问句，不超过 20 个汉字，不要编号、不要引号；',
+        '2. 承接这一轮的真实内容（人物、账户、时间范围、查过的数据），不要泛泛而问；',
+        '3. 递进而非重复：一条深挖细节，一条扩大范围（时间/主体/维度），一条交叉验证（换数据源或换口径）；',
+        '4. 只输出 JSON 字符串数组，例如 ["…","…","…"]，不要解释、不要代码块标记。',
+      ].join('\n'),
+      maxQuestions: 3,
+      maxInputBytes: 16384,
+      // 2048 是给「思考型模型」留的余量，不是给答案的：这一轮的回答只有几十个 token，
+      // 但 newapi 上的 deepseek-v4.1-flash 会先想再用，实测 3 条追问花掉 676 个推理 token。
+      // 256 时截断在推理中途，正文为空，一轮好好的问答就静默没有追问。
+      maxOutputTokens: 2048,
+      timeoutMs: 60000,
+      minAnswerBytes: 120,
+    }),
+  },
   // 提问能力缝的 Service Definition。它自己不注册任何提供者，所以这一行必须开着：停用会让缝
   // 消失，下面 api-gateway 与 tenant-questions 两行的注入都不满足，业务面的 RPC 网关与 /api
   // 会一起挂不上，启动末尾的核对会直接报「组合里缺少这些服务」。

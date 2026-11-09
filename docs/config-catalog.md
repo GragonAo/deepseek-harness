@@ -2297,6 +2297,42 @@ Depends on: `Readable` (`node:stream`) · `Writable` (`node:stream`)
 
 Source: [`packages/sdk/server/src/index.ts:25`](../packages/sdk/server/src/index.ts)
 
+<a id="deepseek-aidsh-session-followups"></a>
+
+## `@deepseek-ai/dsh-session-followups`
+
+Requires: `llm`
+
+```ts config-catalog
+/** Required deployment policy for the suggestion generator. */
+export interface Config {
+  /**
+   * Task framing the auxiliary model reads: what counts as a useful follow-up
+   * question for this deployment, in this deployment's domain and language.
+   */
+  readonly instructions: string
+  /** Maximum accepted questions per turn. */
+  readonly maxQuestions: number
+  /** Maximum UTF-8 bytes in the final framed user prompt; the answer is shortened to fit. */
+  readonly maxInputBytes: number
+  /** Auxiliary generation output-token cap. */
+  readonly maxOutputTokens: number
+  /** End-to-end auxiliary request deadline in milliseconds. */
+  readonly timeoutMs: number
+  /**
+   * Shortest final answer, in UTF-8 bytes, worth suggesting follow-ups for:
+   * acknowledgement-only turns cost no auxiliary request.
+   */
+  readonly minAnswerBytes: number
+  /** Optional explicit provider route; must be paired with `model`. */
+  readonly provider?: string
+  /** Optional explicit model id; must be paired with `provider`. */
+  readonly model?: string
+}
+```
+
+Source: [`packages/session/session-followups/src/index.ts:72`](../packages/session/session-followups/src/index.ts)
+
 <a id="deepseek-aidsh-session-persistence-jsonl"></a>
 
 ## `@deepseek-ai/dsh-session-persistence-jsonl`
@@ -2354,7 +2390,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/tenant/session-persistence-postgres/src/index.ts:38`](../packages/tenant/session-persistence-postgres/src/index.ts)
+Source: [`packages/tenant/session-persistence-postgres/src/index.ts:40`](../packages/tenant/session-persistence-postgres/src/index.ts)
 
 <a id="deepseek-aidsh-session-persistence-sqlite"></a>
 
@@ -4328,6 +4364,7 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 - `@deepseek-ai/dsh-host-directory-picker-native` ([`packages/host/directory-picker-native/src/index.ts`](../packages/host/directory-picker-native/src/index.ts))
 - `@deepseek-ai/dsh-host-plugin-inventory` — requires `loader` ([`packages/host/plugin-inventory/src/index.ts`](../packages/host/plugin-inventory/src/index.ts))
 - `@deepseek-ai/dsh-llm` ([`packages/llm/llm/src/index.ts`](../packages/llm/llm/src/index.ts))
+- `@deepseek-ai/dsh-llm-providers-postgres` — requires `storage` · `storageBackendServiceKey('postgres')` ([`packages/llm/llm-providers-postgres/src/index.ts`](../packages/llm/llm-providers-postgres/src/index.ts))
 - `@deepseek-ai/dsh-lsp` ([`packages/lsp/lsp/src/index.ts`](../packages/lsp/lsp/src/index.ts))
 - `@deepseek-ai/dsh-schedule` — requires `agents` · `sessions` · `tools` · `sessionPersistence` ([`packages/schedule/schedule/src/index.ts`](../packages/schedule/schedule/src/index.ts))
 - `@deepseek-ai/dsh-session` ([`packages/core/session/src/index.ts`](../packages/core/session/src/index.ts))

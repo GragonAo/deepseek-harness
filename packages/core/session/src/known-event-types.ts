@@ -32,6 +32,8 @@ export const KNOWN_SESSION_EVENT_TYPES: ReadonlySet<string> = new Set([
   'compaction/summary',
   'deliverables/presented',
   'feedback/record',
+  'followup/llm-request',
+  'followup/suggested',
   'goal-round-driver/disarmed',
   'goal-round-driver/rearmed',
   'goal/change',
