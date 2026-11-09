@@ -137,6 +137,38 @@ describe('managed provider routes', () => {
     expect(value.providers.find(entry => entry.provider === 'catalog-route')).toMatchObject({ source: 'config' })
   })
 
+  it('answers the edit surface with the stored endpoint, protocol, and catalog', async () => {
+    const { api } = await boot()
+    expectOk(await api.llm.addProvider(request(WRITE)))
+    const value = expectOk(await api.llm.managedProviders(request({})))
+    expect(value.providers).toEqual([
+      {
+        provider: 'acme-gateway',
+        displayName: 'Acme Gateway',
+        api: 'openai-completions',
+        baseURL: 'https://gateway.acme.example/v1',
+        models: [{ id: 'acme-large', name: 'Acme Large', contextWindow: 128000, maxTokens: 8192 }],
+        enabled: true,
+        apiKeyConfigured: true,
+        updatedAt: expect.any(String),
+      },
+    ])
+    // The form is filled from this reply, so it must never carry the credential.
+    expect(JSON.stringify(value)).not.toContain('sk-acme-secret')
+  })
+
+  it('reports a disabled route as stored rather than dropping it', async () => {
+    const { api } = await boot()
+    expectOk(await api.llm.addProvider(request({ ...WRITE, enabled: false })))
+    const value = expectOk(await api.llm.managedProviders(request({})))
+    expect(value.providers.map(entry => [entry.provider, entry.enabled])).toEqual([['acme-gateway', false]])
+  })
+
+  it('answers an empty edit surface when the deployment mounts no registry', async () => {
+    const { api } = await boot({ registry: false })
+    expect(expectOk(await api.llm.managedProviders(request({}))).providers).toEqual([])
+  })
+
   it('updates only the fields it is given and clears the key when told to', async () => {
     const { ctx, api } = await boot()
     expectOk(await api.llm.addProvider(request(WRITE)))

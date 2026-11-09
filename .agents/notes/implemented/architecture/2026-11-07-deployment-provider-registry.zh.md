@@ -19,7 +19,7 @@ Status: implemented
 - **配置降为兜底层。** 路由解析把 `config.providers` 与注册表快照合并，注册表优先；注册表为空时行为与以前完全一致。只有一份注册表就意味着一家厂商一条凭据 —— 已经没有租户维度可以撞车。
 - **写入对下一次请求生效。** 存储在变更时通知，`llm-pi-ai` 重注册路由与目录；不需要重启进程，共用 PostgreSQL 的副本在下一次 `refresh()` 就能看到别人的写入。
 - **一条提问可以自带模型。** `session.prompt` 接受可选的 `model: { provider, model, reasoningEffort? }`。宿主用 `session.selectModel` 同一个解析器校验它（同样的路由校验、同样的图片模态准入），并在消息入队**之前**应用到活着的 Agent 上，于是这一轮就走新路由，而会话默认值不动。这条路径让已经在跑的会话也能换模型；`session.selectModel` 仍然负责改会话的持久默认值。
-- **管理走 RPC**：`llm.addProvider`、`llm.updateProvider`、`llm.removeProvider` 与 `llm.providers`、`llm.models` 并列，上层业务面调用时不再带案件维度。凭据只写不读：视图只报 `apiKeyConfigured`。写方法不带权限位 —— harness 信任自己的网络，角色判断留给上面的业务层。
+- **管理走 RPC**：`llm.addProvider`、`llm.updateProvider`、`llm.removeProvider` 与 `llm.providers`、`llm.managedProviders`、`llm.models`、`llm.discoverModels` 并列，上层业务面调用时不再带案件维度。`llm.managedProviders` 的存在是因为编辑表单需要已存的端点、协议与模型目录，而只报身份与来源的 `llm.providers` 并不携带这些；`llm.discoverModels` 让那张表单在写入之前先从端点把目录填出来。凭据只写不读：视图只报 `apiKeyConfigured`。写方法不带权限位 —— harness 信任自己的网络，角色判断留给上面的业务层。
 - **用户面收窄。** 对话页只读目录，并把选中的路由随每条提问发过来；"发现并采纳"的写入路径已删除，选择器也不再写会话默认值。
 
 - **交叉引用。** 本 note 扩展的选择面是 [Web 对话输入区的会话模型选择](../feature/2026-07-24-web-session-model-selector.md)；本项目不改的默认值由 [默认模型跟随选择器](../feature/2026-08-07-default-model-follows-the-picker.md) 负责；与 `selectModel` 共用的图片准入见 [原子化的 Web 图片准入](../bug-fix/2026-07-29-atomic-web-image-admission.md)。

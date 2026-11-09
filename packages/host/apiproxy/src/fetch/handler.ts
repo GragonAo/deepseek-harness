@@ -66,7 +66,7 @@ import {
 import {
   credentialsDescribeRequestSchema, credentialsSetRequestSchema, credentialsUnsetRequestSchema,
 } from '../api/credentials.schema.ts'
-import { llmAddProviderRequestSchema, llmDiscoverModelsRequestSchema, llmModelsRequestSchema, llmProvidersRequestSchema, llmRemoveProviderRequestSchema, llmUpdateProviderRequestSchema } from '../api/llm.schema.ts'
+import { llmAddProviderRequestSchema, llmDiscoverModelsRequestSchema, llmManagedProvidersRequestSchema, llmModelsRequestSchema, llmProvidersRequestSchema, llmRemoveProviderRequestSchema, llmUpdateProviderRequestSchema } from '../api/llm.schema.ts'
 import {
   subagentHistoryRequestSchema,
   subagentInterruptRequestSchema,
@@ -146,6 +146,7 @@ export const UNARY_ROUTES: UnaryRoutes = {
   'credentials.set': { schema: credentialsSetRequestSchema, invoke: (api, r) => api.credentials.set(r) },
   'credentials.unset': { schema: credentialsUnsetRequestSchema, invoke: (api, r) => api.credentials.unset(r) },
   'llm.providers': { schema: llmProvidersRequestSchema, invoke: (api, r) => api.llm.providers(r) },
+  'llm.managedProviders': { schema: llmManagedProvidersRequestSchema, invoke: (api, r) => api.llm.managedProviders(r) },
   'llm.models': { schema: llmModelsRequestSchema, invoke: (api, r) => api.llm.models(r) },
   'llm.discoverModels': { schema: llmDiscoverModelsRequestSchema, invoke: (api, r, signal) => api.llm.discoverModels(r, signal) },
   'llm.addProvider': { schema: llmAddProviderRequestSchema, invoke: (api, r) => api.llm.addProvider(r) },

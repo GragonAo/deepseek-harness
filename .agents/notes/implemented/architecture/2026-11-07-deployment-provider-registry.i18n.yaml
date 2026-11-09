@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-11-07-deployment-provider-registry.md
-2026-11-07-deployment-provider-registry.md: b89cf2a75742ae6d2239a1b42dae9ac11123da49
-2026-11-07-deployment-provider-registry.zh.md: 9420702b6a309dd7a03750fc082d8c91f22a51c3
+2026-11-07-deployment-provider-registry.md: 788c5d1eec47376703381cb1a9a5397851fc6702
+2026-11-07-deployment-provider-registry.zh.md: a94bd2551279186f255df4eb9467d1b89f0a8a87

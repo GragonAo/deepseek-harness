@@ -75,6 +75,16 @@ export interface ManagedProviderView {
   updatedAt: string
 }
 
+/**
+ * One managed route as the edit surface reads it: the stored record plus who
+ * wrote it last. The registry list answers "what would I be editing"; the
+ * narrower `llm.providers` answers "which routes exist and where each is defined".
+ */
+export interface ManagedProviderRowView extends ManagedProviderView {
+  /** Subject that performed the last write, when known. */
+  updatedBy?: string
+}
+
 /** Full write of one managed route: what `llm.addProvider` accepts. */
 export interface ManagedProviderWrite {
   provider: string
@@ -108,6 +118,14 @@ export interface LlmApi {
    * registration identity and no settings address.
    */
   providers(request: RpcRequest<{}>): Promise<RpcResponse<{ providers: ConfigurableProviderView[] }>>
+
+  /**
+   * List the routes the registry holds with the endpoint, wire protocol, model
+   * catalog, and credential flag the edit surface needs to fill its form. A
+   * deployment that mounts no registry, or one that has stored nothing, answers
+   * with an empty list — the configuration tier is `llm.providers`' subject.
+   */
+  managedProviders(request: RpcRequest<{}>): Promise<RpcResponse<{ providers: ManagedProviderRowView[] }>>
 
   /**
    * Host-scoped model catalog over every registered provider route: the

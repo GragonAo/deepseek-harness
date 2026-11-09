@@ -26,14 +26,15 @@ describe('generateOpenApiDocument', () => {
     expect(doc.openapi).toBe('3.1.0')
     const routes = Object.keys(doc.paths)
     // session.* + subagent.* + host.* + workspace.* + skill.* + agentPreset.* +
-    // goal.* + settings.* + credentials.* + llm.* = 59 routes (session.delete,
-    // the three skill tier methods, and the three managed-provider writes
-    // included).
-    expect(routes).toHaveLength(59)
+    // goal.* + settings.* + credentials.* + llm.* = 60 routes (session.delete,
+    // the three skill tier methods, the three managed-provider writes, and the
+    // managed-provider read the edit form fills itself from included).
+    expect(routes).toHaveLength(60)
     // Named so a route that stops being projected fails on its own name, not
     // only on the group count above.
     expect(routes).toContain('/api/session.delete')
     expect(routes).toContain('/api/skill.install')
+    expect(routes).toContain('/api/llm.managedProviders')
     for (const route of routes) {
       const operation = (doc.paths[route] as Json).post as Json
       expect(operation.security).toEqual([{ bearerAuth: [] }])

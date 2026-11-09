@@ -6,7 +6,7 @@
 import { z } from 'zod'
 import type { RequestPayload, ResponseValue } from './rpc-map.ts'
 import type { Wire } from './rpc.schema.ts'
-import type { ConfigurableProviderView, DiscoveredModelView, ManagedProviderModelView, ManagedProviderView } from './llm.ts'
+import type { ConfigurableProviderView, DiscoveredModelView, ManagedProviderModelView, ManagedProviderRowView, ManagedProviderView } from './llm.ts'
 import { modelCatalogFailureSchema, modelProviderGroupSchema } from './sessions.schema.ts'
 
 /** ConfigurableProviderView row of llm.providers. */
@@ -84,6 +84,19 @@ export const managedProviderViewSchema = z.object({
   apiKeyConfigured: z.boolean(),
   updatedAt: z.string().min(1),
 }) satisfies z.ZodType<Wire<ManagedProviderView>>
+
+/** ManagedProviderRowView: a stored route plus who wrote it last. */
+export const managedProviderRowViewSchema = managedProviderViewSchema.extend({
+  updatedBy: z.string().min(1).optional(),
+}) satisfies z.ZodType<Wire<ManagedProviderRowView>>
+
+/** llm.managedProviders request payload. */
+export const llmManagedProvidersRequestSchema = z.object({}) satisfies z.ZodType<Wire<RequestPayload<'llm.managedProviders'>>>
+
+/** llm.managedProviders response value. */
+export const llmManagedProvidersValueSchema = z.object({
+  providers: z.array(managedProviderRowViewSchema),
+}) satisfies z.ZodType<Wire<ResponseValue<'llm.managedProviders'>>>
 
 /** llm.addProvider request payload: the whole record. */
 export const llmAddProviderRequestSchema = z.object({

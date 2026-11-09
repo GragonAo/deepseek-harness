@@ -63,7 +63,7 @@ import {
 import {
   credentialsDescribeValueSchema, credentialsSetValueSchema, credentialsUnsetValueSchema,
 } from '../api/credentials.schema.ts'
-import { llmAddProviderValueSchema, llmDiscoverModelsValueSchema, llmModelsValueSchema, llmProvidersValueSchema, llmRemoveProviderValueSchema, llmUpdateProviderValueSchema } from '../api/llm.schema.ts'
+import { llmAddProviderValueSchema, llmDiscoverModelsValueSchema, llmManagedProvidersValueSchema, llmModelsValueSchema, llmProvidersValueSchema, llmRemoveProviderValueSchema, llmUpdateProviderValueSchema } from '../api/llm.schema.ts'
 import {
   subagentHistoryValueSchema,
   subagentInterruptValueSchema,
@@ -165,6 +165,7 @@ export interface IApiClient {
   }
   llm: {
     providers(payload: RequestPayload<'llm.providers'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'llm.providers'>>>
+    managedProviders(payload: RequestPayload<'llm.managedProviders'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'llm.managedProviders'>>>
     models(payload: RequestPayload<'llm.models'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'llm.models'>>>
     discoverModels(payload: RequestPayload<'llm.discoverModels'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'llm.discoverModels'>>>
     addProvider(payload: RequestPayload<'llm.addProvider'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'llm.addProvider'>>>
@@ -234,6 +235,7 @@ export const UNARY_VALUE_SCHEMAS: { [K in keyof RpcMethodMap]: z.ZodType<Wire<Re
   'credentials.set': credentialsSetValueSchema,
   'credentials.unset': credentialsUnsetValueSchema,
   'llm.providers': llmProvidersValueSchema,
+  'llm.managedProviders': llmManagedProvidersValueSchema,
   'llm.models': llmModelsValueSchema,
   'llm.discoverModels': llmDiscoverModelsValueSchema,
   'llm.addProvider': llmAddProviderValueSchema,
@@ -517,6 +519,7 @@ export abstract class AbstractApiClient implements IApiClient {
 
   readonly llm: IApiClient['llm'] = {
     providers: (payload, signal) => this.callUnary('llm.providers', payload, signal),
+    managedProviders: (payload, signal) => this.callUnary('llm.managedProviders', payload, signal),
     models: (payload, signal) => this.callUnary('llm.models', payload, signal),
     discoverModels: (payload, signal) => this.callUnary('llm.discoverModels', payload, signal),
     addProvider: (payload, signal) => this.callUnary('llm.addProvider', payload, signal),

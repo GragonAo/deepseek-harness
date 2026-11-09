@@ -38,7 +38,7 @@ import type { PresetBearingSession } from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {
   ApiProxy, ConfigurableProviderView, CredentialView, GoalRef, HistoryEntry, HostFrame,
-  ManagedProviderModelView, ManagedProviderView,
+  ManagedProviderModelView, ManagedProviderRowView, ManagedProviderView,
   ModelCatalogFailure, ModelProviderGroup,
   ModelReasoning, MuxFrame, PromptContentPart, QuestionResponsePayload, SessionListMetadata, SessionProjectionsBlock, SessionSearchItem,
   QueuedInboxItem, SessionSummary, SettingsNamespaceView, SubagentAddress, JobView, ToolEventView,
@@ -3736,6 +3736,18 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             ...provenance(provider.id),
           })
         }
+        return ok(request, { providers: views })
+      },
+
+      async managedProviders(request) {
+        const store = ctx.get('llmProviders')
+        // A record another replica wrote becomes visible on the next read: the
+        // edit form must show what is stored now, not what this process loaded.
+        await store?.refresh()
+        const views: ManagedProviderRowView[] = (store?.snapshot() ?? []).map(record => ({
+          ...managedProviderView(record),
+          ...record.updatedBy === undefined ? {} : { updatedBy: record.updatedBy },
+        }))
         return ok(request, { providers: views })
       },
 
