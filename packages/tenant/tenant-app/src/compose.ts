@@ -233,6 +233,11 @@ function staticMounts(config: TenantAppConfig): readonly StaticMount[] {
         usersRoot: config.tenants.usersRoot,
         ...(sandbox.systemRoot !== undefined ? { systemRoot: sandbox.systemRoot } : {}),
         ...(config.files?.writableScopes !== undefined ? { writableScopes: [...config.files.writableScopes] } : {}),
+        // 对话里上传的附件落在会话工作目录，而那个目录本来是会话第一条命令 mkdir 出来的：
+        // 用户在新会话的第一条消息就带文件时，业务侧的写入早于那条命令，所以文件面自己把
+        // 会话目录建出来（沙箱之后的 mkdir -p 看到的还是同一层）。关掉它，首条消息的附件
+        // 就会以 404 file-session-unknown 失败——这条链路是本栈的产品契约，不是部署选项。
+        createSessionDirs: true,
       }),
     },
     {

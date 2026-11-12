@@ -44,7 +44,7 @@ import { Readable } from 'node:stream'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { bridgeFetchRequest } from '@deepseek-ai/dsh-host-webserver'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
-import { TenantError, UserId } from '@deepseek-ai/dsh-tenant'
+import { TenantError, UserId, sandboxSessionDirOf } from '@deepseek-ai/dsh-tenant'
 import { TenantAuthError } from '@deepseek-ai/dsh-tenant-auth'
 import z from '@deepseek-ai/schemastery'
 import { DEFAULT_WRITABLE_SCOPES, FILE_SCOPES, decodeSegments, plainSegments, resolveTarget, scopeRoots } from './roots.ts'
@@ -105,6 +105,21 @@ export interface Config {
    * to let the business side write it. An unknown name refuses to load.
    */
   writableScopes?: string[]
+  /**
+   * Whether a `PUT` into the `session` scope may create the session directory it
+   * names. Defaults to `false`: the session's own first command creates that
+   * directory, so a write to a session that never ran answers
+   * `404 file-session-unknown`.
+   *
+   * A deployment whose business side uploads into a session before the model runs
+   * its first command (a user attaching a document to their opening message) sets
+   * this to `true`. The directory is then created on the host, and the sandbox's
+   * own `mkdir -p` for the same path stays idempotent, so both writers agree on
+   * one directory. The session id must be shaped like a session directory name
+   * (`/sessions/<id>` is what the sandbox would mount), and the target still
+   * resolves inside the scope root exactly as any other write does.
+   */
+  createSessionDirs?: boolean
 }
 
 /** One entry of a directory listing. */
@@ -130,6 +145,7 @@ export class TenantFsHttp extends Service {
     systemRoot: z.string(),
     maxBytes: z.natural().min(1).default(DEFAULT_MAX_BYTES),
     writableScopes: z.array(z.string()).default([...DEFAULT_WRITABLE_SCOPES]),
+    createSessionDirs: z.boolean().default(false),
   })
 
   /** Scopes this deployment accepts a write or a delete into. */
@@ -339,15 +355,28 @@ export class TenantFsHttp extends Service {
     if (relative.length === 0) {
       return jsonError(400, 'file-path-invalid', `要写的文件需要一个名字；不能写整个 ${root.scope} 作用域`)
     }
-    // A session writes inside a session that exists: the platform creates those
-    // directories, so a client cannot mint one by writing into it.
+    // A session writes inside a session that exists. The platform creates those
+    // directories — the session's first command runs `mkdir -p /sessions/<id>` on
+    // the same mount — unless this deployment lets the business side upload into a
+    // session before that command ever ran (`createSessionDirs`); then the write
+    // creates the directory itself, and the sandbox's own `mkdir -p` later finds
+    // it already there.
     if (root.scope === 'session') {
       const [sessionId, ...rest] = relative
       if (sessionId === undefined || rest.length === 0) {
         return jsonError(400, 'file-path-invalid', '会话作用域要写成 <sessionId>/<文件路径>；会话目录本身不是文件')
       }
-      const sessionDir = await statOrUndefined(join(root.dir, sessionId))
-      if (sessionDir === undefined || !sessionDir.isDirectory()) {
+      const sessionDir = join(root.dir, sessionId)
+      const existing = await statOrUndefined(sessionDir)
+      if (existing === undefined && this.config.createSessionDirs === true) {
+        // A name that could never be a session directory (`sandboxSessionDirOf`
+        // answers undefined) would mint a directory no session can ever write to,
+        // so it stays an unknown session instead of becoming a new one.
+        if (sandboxSessionDirOf(sessionId) === undefined) {
+          return jsonError(400, 'file-path-invalid', `不是合法的会话 id：${sessionId}（会话 id 直接成为它自己的目录名）`)
+        }
+        await mkdir(sessionDir, { recursive: true })
+      } else if (existing === undefined || !existing.isDirectory()) {
         return jsonError(404, 'file-session-unknown', `没有这个会话目录：${sessionId}（会话目录由会话启动时创建）`)
       }
     }

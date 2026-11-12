@@ -326,6 +326,9 @@ export interface TenantAppConfig {
  * 作用域根由 `tenants.usersRoot` 与 `sandbox.systemRoot` 给出，这里只说可写范围：报告模板这类
  * 主体自己维护的跨案件资产落在 `global/<目录>/`，要把 `global` 列进 `writableScopes` 才写得进去。
  * 沙箱侧的写权限由它的挂载决定，与这里无关。
+ *
+ * 会话作用域不需要在挂载时预先建好：对话里上传的附件（用户在新会话第一条消息就带的文件）由文件面
+ * 自己建出会话目录，早于会话第一条命令的 `mkdir -p`。见 `compose.ts` 里 `tenant-fs-http` 那一行。
  */
 export interface FilesConfig {
   /**

@@ -66,9 +66,12 @@
     systemRoot: /opt/dsh/.dsh/system
     maxBytes: 67108864
     writableScopes: [session, user]   # 要把 global 交给业务侧维护就写成 [session, user, global]
+    createSessionDirs: true           # 业务侧在会话第一条命令之前就往会话目录里写（对话附件上传）
 ```
 
 `writableScopes` 默认 `[session, user]`，只认五个作用域名：写错一个名字会让插件在装配时抛错，而不是安静地读成「这个作用域仍然只读」。
+
+`createSessionDirs` 默认 `false`：会话目录由会话自己的第一条命令建（沙箱在那条命令里 `mkdir -p /sessions/<会话 id>`），所以写到一条没跑过的会话答 `404 file-session-unknown`。部署若让业务侧在会话跑起来之前就往会话目录里写——最典型的是对话里上传的附件，用户在新会话第一条消息就带文件——把它打开：那次写自己把会话目录建出来，沙箱之后的 `mkdir -p` 看到的是同一层，两边没有第二份约定。会话 id 还得是能当目录名的形状（`sandboxSessionDirOf` 认的那一种），否则答 `400` —— 一个永远不会有会话认领的目录，不该由一次写入造出来。
 
 `path` 默认 `/files`。`usersRoot` 与 `systemRoot` 只决定 `global` 与 `system` 两个作用域：不配就没有那个作用域，请求答 `503 file-scope-unavailable`（`session`、`user`、`case` 三个作用域由租户记录的 `workspaceRoot` 决定，无需配置）。`maxBytes` 默认 64 MiB，同时是 `PUT` 正文与容器内桥接缓冲的上限：这份面面向报告与文档，不是磁盘镜像通道。
 
@@ -84,7 +87,7 @@ None, as the file surface moves bytes between an authenticated caller and the ho
 
 - **没有 `Range`。** 范围请求与大文件断点续传尚未提供，读一份超过 `maxBytes` 的文件仍然可以（限制只作用于写），但只能整份取。
 - **`DELETE` 只删文件，且与 `PUT` 同权。** 目录不递归删除——一份目录里的东西要不要一起没了是业务决定，字节通道不替它决定；写一个作用域的权限就是从中删东西的权限，拆成两套只会让调用方毁掉它不能替换的东西。
-- **`PUT` 会在可写作用域里建父目录。** 写 `user/a/b/c.md` 会建出 `a/b`；会话作用域反而更严——会话目录必须已由会话启动创建，否则答 `404 file-session-unknown`，因为写一个文件不该顺带造出一个会话。
+- **`PUT` 会在可写作用域里建父目录。** 写 `user/a/b/c.md` 会建出 `a/b`。会话作用域默认更严——会话目录必须已由会话启动创建，否则答 `404 file-session-unknown`，因为写一个文件不该顺带造出一个会话；打开 `createSessionDirs` 之后这一层目录由写入自己建出来（见上文配置一节）。
 - **ETag 不是内容摘要。** 它按大小与纳秒级修改时间导出；文件系统不提供纳秒修改时间时（例如某些 FAT 挂载）精度下降，同一时间窗内的两次写可能得到同一个 ETag。要绝对的内容寻址需要每次读取多算一遍摘要。
 - **没有审计与配额。** 每次读写只进宿主日志；谁在什么时候改了哪个文件、一个主体能占多少空间，都不在本面记录。
 - **`system` 作用域是整个系统树。** 只读，但可读：它包含 `skills/` 与配置，暴露给业务侧是否合适取决于部署；不需要时别配 `systemRoot`，那个作用域就不存在。

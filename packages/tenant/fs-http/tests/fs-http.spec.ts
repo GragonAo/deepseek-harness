@@ -324,7 +324,7 @@ describe('file surface', () => {
     }
   })
 
-  it('refuses a session directory that does not exist, so a write cannot mint one', async () => {
+  it('refuses a session directory that does not exist, so a write cannot mint one by default', async () => {
     const deployment = layout()
     const { ctx, token } = await boot(deployment)
     try {
@@ -333,10 +333,52 @@ describe('file surface', () => {
       )
       expect(ghost.status).toBe(404)
       expect((await ghost.json() as { error: { code: string } }).error.code).toBe('file-session-unknown')
+      expect(existsSync(join(deployment.workspaceRoot, 'users', 'user-1', 'sessions', 'ghost'))).toBe(false)
       const bare = await ctx.tenantFsHttp.fetch(
         request(token, '/files/session/session-1', { method: 'PUT', body: Buffer.from('x') }),
       )
       expect(bare.status).toBe(400)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('creates the session directory on the first write when the deployment allows it', async () => {
+    const deployment = layout()
+    const { ctx, token } = await boot(deployment, { config: { createSessionDirs: true } })
+    try {
+      // A user attaching a document to the opening message uploads before the
+      // session's own first command ran, so the directory does not exist yet.
+      const uploaded = await ctx.tenantFsHttp.fetch(
+        request(token, `/files/session/session-2/uploads/${encodeURIComponent('供述材料.pdf')}`, {
+          method: 'PUT',
+          body: Buffer.from('%PDF-1.4'),
+        }),
+      )
+      expect(uploaded.status).toBe(200)
+      expect((await uploaded.json() as { path: string }).path).toBe('session-2/uploads/供述材料.pdf')
+      const hostPath = join(deployment.workspaceRoot, 'users', 'user-1', 'sessions', 'session-2', 'uploads', '供述材料.pdf')
+      expect(readFileSync(hostPath)).toEqual(Buffer.from('%PDF-1.4'))
+      // The next read through another scope's own session is untouched.
+      const neighbour = await ctx.tenantFsHttp.fetch(request(token, '/files/session/session-1/a.md'))
+      expect(await neighbour.text()).toBe('# 会话笔记\n')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('refuses a session id that could never name a session directory', async () => {
+    const deployment = layout()
+    const { ctx, token } = await boot(deployment, { config: { createSessionDirs: true } })
+    try {
+      // `sandboxSessionDirOf` would refuse this id, so no session could ever own the
+      // directory a write would create here.
+      const unjustifiable = await ctx.tenantFsHttp.fetch(
+        request(token, `/files/session/${encodeURIComponent('会话一')}/x.md`, { method: 'PUT', body: Buffer.from('x') }),
+      )
+      expect(unjustifiable.status).toBe(400)
+      expect((await unjustifiable.json() as { error: { code: string } }).error.code).toBe('file-path-invalid')
+      expect(existsSync(join(deployment.workspaceRoot, 'users', 'user-1', 'sessions', '会话一'))).toBe(false)
     } finally {
       await ctx.fiber.dispose()
     }
