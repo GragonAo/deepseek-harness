@@ -18,7 +18,10 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 10Gi
+      # 容量按事件日志的写入量算，不是按「一个库能有多大」猜：session_event 是追加写，
+      # 每个租户一个 schema，流式增量（assistant/chunk）一条一行，单租户两天可写 4~5GB。
+      # 10Gi 在 171 上两天就被写穿（写穿后 PG 连新连接都建不起来）。50Gi 是 171 的现役值。
+      storage: 50Gi
   storageClassName: rook-ceph-block
 ---
 apiVersion: apps/v1
