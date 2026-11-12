@@ -71,6 +71,7 @@ import type {} from '@deepseek-ai/dsh-skill-tier'
 import type {} from '@deepseek-ai/dsh-skill-install'
 import type {} from '@deepseek-ai/dsh-skill-badge'
 import type {} from '@deepseek-ai/dsh-tool-skill'
+import type {} from '@deepseek-ai/dsh-tool-skill-publish'
 import type {} from '@deepseek-ai/dsh-tools-tier'
 import type {} from '@deepseek-ai/dsh-tools-manifest'
 import type {} from '@deepseek-ai/dsh-tools-restriction'
@@ -192,6 +193,7 @@ export const SPINE_MODULES = [
   '@deepseek-ai/dsh-skill-install',
   '@deepseek-ai/dsh-skill-badge',
   '@deepseek-ai/dsh-tool-skill',
+  '@deepseek-ai/dsh-tool-skill-publish',
   '@deepseek-ai/dsh-tools-tier',
   '@deepseek-ai/dsh-tools-manifest',
   '@deepseek-ai/dsh-tools-restriction',

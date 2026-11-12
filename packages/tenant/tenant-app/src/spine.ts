@@ -296,6 +296,15 @@ export const SPINE: readonly SpineRow[] = [
     // 直接往三层根里放文件不触发 watcher，宿主那份缓存只有这一条路能刷新。默认开启：
     // 这一行停用后 `/admin/skills.upload` 会以 `skill-install-unavailable` 拒绝。
   },
+  {
+    id: 'tool-skill-publish',
+    module: '@deepseek-ai/dsh-tool-skill-publish',
+    // 模型写完技能后给出会话工作区里的目录名即可，字节不再经工具参数往返（平台侧收 base64
+    // zip 的那条路每次调用都把整包塞进上下文）。它只把这一个目录提交给部署的管理平台：
+    // 入库与安装都由平台做，宿主不装——技能库、页面、模型清单三处以平台为准。
+    // record 必填，没配就加载失败（不会退化成「悄悄装在本地」）。
+    // 目录数与字节上限留给部署按现场调整，缺省值只挡异常写入。
+  },
   { id: 'tool-skill', module: '@deepseek-ai/dsh-tool-skill' },
   { id: 'tools-tier', module: '@deepseek-ai/dsh-tools-tier' },
   { id: 'tools-manifest', module: '@deepseek-ai/dsh-tools-manifest' },

@@ -9,7 +9,9 @@ This family discovers reusable agent instructions and exposes them to the model 
 | [`skill/`](skill/README.md) | Defines skill provider registration and lookup | `ctx.skills` |
 | [`skill-badge/`](skill-badge/README.md) | Contributes the optional bundled dsh badge skill | registers on `ctx.skills` |
 | [`skill-filesystem/`](skill-filesystem/README.md) | Discovers skills from local filesystems | registers on `ctx.skills` |
+| [`skill-install/`](skill-install/README.md) | Installs, replaces, and removes a skill in one tier | `ctx.skillInstall` |
 | [`tool-skill/`](tool-skill/README.md) | Publishes the skill catalog and model-facing loader | registers on `ctx.tools` |
+| [`tool-skill-publish/`](tool-skill-publish/README.md) | Submits a skill the agent wrote as files to the deployment management plane, which records and installs it | registers on `ctx.tools` |
 
 This capability remains outside the core control spine and can use local, embedded, or remote providers without changing the model-facing contract.
 

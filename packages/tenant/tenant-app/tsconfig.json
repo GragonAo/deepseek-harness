@@ -255,6 +255,9 @@
       "path": "../../skill/tool-skill/tsconfig.json"
     },
     {
+      "path": "../../skill/tool-skill-publish/tsconfig.json"
+    },
+    {
       "path": "../../spill/spill-local/tsconfig.json"
     },
     {

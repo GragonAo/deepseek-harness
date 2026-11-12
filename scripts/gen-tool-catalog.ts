@@ -56,6 +56,7 @@ import * as ToolSchedule from '@deepseek-ai/dsh-schedule'
 import Lsp from '@deepseek-ai/dsh-lsp'
 import * as ToolLsp from '@deepseek-ai/dsh-tool-lsp'
 import * as ToolSkill from '@deepseek-ai/dsh-tool-skill'
+import * as ToolSkillPublish from '@deepseek-ai/dsh-tool-skill-publish'
 import * as ToolSessionQuery from '@deepseek-ai/dsh-tool-session-query'
 import * as ToolTasks from '@deepseek-ai/dsh-tool-jobs'
 import type TeamService from '@deepseek-ai/dsh-experimental-agent-team'
@@ -439,6 +440,24 @@ const TOOL_PACKAGES: ToolPackage[] = [
       })
       await ctx.plugin(ToolSkill)
     },
+  },
+  {
+    pkg: '@deepseek-ai/dsh-tool-skill-publish',
+    dir: 'tool-skill-publish',
+    source: 'packages/skill/tool-skill-publish/src/index.ts',
+    requires: ['ctx.tools', 'ctx.fs', 'a recorded management plane', 'an ambient user (execution time)'],
+    writes: ['tool/call', 'tool/result', 'one multipart submission to the configured record endpoint (execution time)'],
+    async mount(ctx) {
+      // Registration only needs the two injected seams; the walk, the document
+      // check, and the submission run at execution time, so the bare fs provider
+      // plus a placeholder record target satisfy the schema harvest.
+      await ctx.plugin(LocalFileSystem)
+      await ctx.plugin(ToolSkillPublish, {
+        record: { url: 'https://skills.example.invalid/dsh/inner/skill/ingest', token: 'example-token' },
+      })
+    },
+    note:
+      'The call carries a directory path, not the skill: the plugin walks it through `ctx.fs` and submits those files, so publishing cost does not grow with the skill. Nothing is installed here — the configured management plane records and installs the skill, and a deployment with no `record` does not load.',
   },
   {
     pkg: '@deepseek-ai/dsh-tool-session-query',

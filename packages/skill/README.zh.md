@@ -9,7 +9,9 @@
 | [`skill/`](skill/README.md) | 定义 skill 提供方注册和查找 | `ctx.skills` |
 | [`skill-badge/`](skill-badge/README.md) | 贡献可选的内置 dsh 徽章 skill | 注册到 `ctx.skills` |
 | [`skill-filesystem/`](skill-filesystem/README.md) | 从本地文件系统发现 skill | 注册到 `ctx.skills` |
+| [`skill-install/`](skill-install/README.md) | 在某一层里安装、替换、移除 skill | `ctx.skillInstall` |
 | [`tool-skill/`](tool-skill/README.md) | 发布 skill 目录和面向模型的 loader | 注册到 `ctx.tools` |
+| [`tool-skill-publish/`](tool-skill-publish/README.md) | 把模型写好的 skill 目录提交给部署方的管理平台，由平台入库并安装 | 注册到 `ctx.tools` |
 
 该能力位于核心控制主干之外，可以使用本地、嵌入式或远程提供方，而无需更改面向模型的约定。
 

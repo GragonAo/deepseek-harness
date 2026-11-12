@@ -195,6 +195,7 @@
     { "path": "./packages/skill/skill-filesystem" },
     { "path": "./packages/skill/skill-install" },
     { "path": "./packages/skill/tool-skill" },
+    { "path": "./packages/skill/tool-skill-publish" },
     { "path": "./packages/interaction/tool-ask-user" },
     { "path": "./packages/context/agent-instructions" },
     { "path": "./packages/core/agent-loop" },

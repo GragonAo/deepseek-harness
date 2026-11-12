@@ -215,6 +215,16 @@ stringData:
           secretKeyEnv: DSH_OBJECT_SECRET_KEY
           # /global 挂载对应的宿主根（宿主的 /opt/dsh 与沙箱共用同一份 PVC）。
           usersRoot: /opt/dsh/.dsh/users
+      # 技能发布入库（见 packages/skill/tool-skill-publish/README.md）：模型用 skill_publish 把技能
+      # 装进用户全局层之后，宿主把这同一份包以 multipart 二进制回传平台，平台「我的技战法」里才有记录。
+      # url 是平台入库端点的集群内地址；token 由 Deployment 的环境变量注入（同名 Secret 的 token 键），
+      # 配置里只写变量名——这份配置是挂在卷上的文件，明文令牌等于把它交给所有能读该对象的人。
+      tool-skill-publish:
+        enabled: true
+        config:
+          record:
+            url: http://jeecg-boot-system.jeecg.svc.cluster.local:8080/jeecg-boot/dsh/inner/skill/ingest
+            tokenEnv: DSH_SKILL_INGEST_TOKEN
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -255,6 +265,15 @@ spec:
                 secretKeyRef:
                   name: dsh-tenant-secret
                   key: DSH_TENANT_OIDC_SECRET
+            # 技能发布入库的共享令牌，与平台侧 `dsh.skill.ingest.token` 必须是同一个值；
+            # `tool-skill-publish.record.tokenEnv` 就是按这个名字去读的（配置里不写明文）。
+            # 不配置则 record 在装载时就失败——那正是想要的：宁可宿主不起，也不要「发布成功但库里没记录」。
+            - name: DSH_SKILL_INGEST_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: dsh-skill-ingest
+                  key: token
+                  optional: true
           readinessProbe:
             httpGet:
               path: /openapi.json

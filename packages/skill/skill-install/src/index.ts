@@ -111,6 +111,7 @@ export interface SkillInstallRequest {
   readonly signal?: AbortSignal | undefined
 }
 
+
 /** Result of one accepted installation. */
 export interface SkillInstallResult {
   /** Tier the skill was installed into. */
@@ -221,12 +222,38 @@ export class SkillInstallService extends Service {
   async install(request: SkillInstallRequest): Promise<SkillInstallResult> {
     request.signal?.throwIfAborted()
     const directory = this.tierDirectory(request.tier)
-    const parsed = readBundleDocument(readBundle(request.bundle, this.config))
+    return await this.commit(
+      request.tier,
+      directory,
+      readBundleDocument(readBundle(request.bundle, this.config)),
+      request.replace,
+      request.signal,
+    )
+  }
+
+
+  /**
+   * Write one already-validated skill document set into a tier and report what
+   * the refreshed catalog makes of it.
+   * @param tier - tier the files are being installed into.
+   * @param directory - absolute directory of that tier.
+   * @param parsed - the parsed skill document and the files to write.
+   * @param replace - whether an existing same-name skill may be replaced.
+   * @param signal - cancels the write and the swap.
+   * @returns the installed skill and whether the refreshed catalog lists it.
+   */
+  private async commit(
+    tier: SkillTierKind,
+    directory: string,
+    parsed: { document: SkillDocument; files: BundleFile[] },
+    replace: boolean | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<SkillInstallResult> {
     const target = join(directory, parsed.document.name)
     const staging = join(directory, `${STAGING_PREFIX}${parsed.document.name}-${randomUUID()}`)
-    const replaced = await stage(staging, parsed.files, request.replace === true, target, request.signal)
+    const replaced = await stage(staging, parsed.files, replace === true, target, signal)
     return {
-      tier: request.tier,
+      tier,
       name: parsed.document.name,
       directory: target,
       replaced,
