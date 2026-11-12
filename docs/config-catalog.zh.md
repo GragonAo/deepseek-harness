@@ -3211,6 +3211,21 @@ export interface Config {
    * to let the business side write it. An unknown name refuses to load.
    */
   writableScopes?: string[]
+  /**
+   * Whether a `PUT` into the `session` scope may create the session directory it
+   * names. Defaults to `false`: the session's own first command creates that
+   * directory, so a write to a session that never ran answers
+   * `404 file-session-unknown`.
+   *
+   * A deployment whose business side uploads into a session before the model runs
+   * its first command (a user attaching a document to their opening message) sets
+   * this to `true`. The directory is then created on the host, and the sandbox's
+   * own `mkdir -p` for the same path stays idempotent, so both writers agree on
+   * one directory. The session id must be shaped like a session directory name
+   * (`/sessions/<id>` is what the sandbox would mount), and the target still
+   * resolves inside the scope root exactly as any other write does.
+   */
+  createSessionDirs?: boolean
 }
 ```
 
@@ -3667,6 +3682,45 @@ export interface Config {
 ```
 
 Source: [`packages/skill/tool-skill/src/index.ts:61`](../packages/skill/tool-skill/src/index.ts)
+
+<a id="deepseek-aidsh-tool-skill-publish"></a>
+
+## `@deepseek-ai/dsh-tool-skill-publish`
+
+Requires: `fs` · `tools`
+
+```ts config-catalog
+/** Skill publication configuration. */
+export interface Config {
+  /** Largest number of files one skill may hold. Defaults to 512. */
+  maxFiles?: number
+  /** Largest single file accepted, in bytes. Defaults to 1 MiB. */
+  maxFileBytes?: number
+  /** Largest total size of one skill, in bytes. Defaults to 16 MiB. */
+  maxTotalBytes?: number
+  /** The management plane that records and installs a publication. Required. */
+  record: RecordConfig
+}
+
+/** Where a publication is filed: the management plane's ingestion endpoint. */
+export interface RecordConfig {
+  /** Absolute URL of the platform's host-publication ingestion endpoint. */
+  url: string
+  /** Shared token that endpoint requires, written into the configuration. */
+  token?: string
+  /**
+   * Name of the environment variable holding the shared token. The alternative to
+   * {@link RecordConfig.token} for deployments that deliver the token as a Secret;
+   * the plugin reads it once at load, so a missing variable fails the load rather
+   * than every publication.
+   */
+  tokenEnv?: string
+  /** Request deadline in milliseconds. Defaults to 30000. */
+  timeoutMs?: number
+}
+```
+
+Source: [`packages/skill/tool-skill-publish/src/index.ts:74`](../packages/skill/tool-skill-publish/src/index.ts)
 
 <a id="deepseek-aidsh-tool-str-replace-editor"></a>
 
