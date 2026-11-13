@@ -1932,6 +1932,47 @@ export type ToolConcurrencyMode = 'fixed' | 'adaptive'
 
 Source: [`packages/mcp/mcp-client/src/index.ts:114`](../packages/mcp/mcp-client/src/index.ts)
 
+<a id="deepseek-aidsh-mcp-external"></a>
+
+## `@deepseek-ai/dsh-mcp-external`
+
+Requires: `mcpServers`
+
+```ts config-catalog
+/** 挂载配置。 */
+export interface Config {
+  /**
+   * 会话的第一步最多等它那些服务器连上多久，超时就先带着已有工具把请求发出去（毫秒）。
+   * 这样一条慢的第三方地址就不会把整轮对话卡住；重新核对（reconcile）用同一份预算。
+   */
+  firstStepWaitMs?: number
+  /**
+   * 单个会话最多挂多少个服务器。对模型可见的工具清单本身就是上下文预算，所以超出的
+   * 尾巴会被丢掉（并记一条警告），而不是悄悄把别的东西全挤出去。
+   */
+  maxServersPerAgent?: number
+  /** 某一行没自带超时值时，单次工具调用用的默认超时（毫秒）。 */
+  toolCallTimeoutMs?: number
+}
+```
+
+Source: [`packages/tenant/mcp-external/src/index.ts:71`](../packages/tenant/mcp-external/src/index.ts)
+
+<a id="deepseek-aidsh-mcp-servers-postgres"></a>
+
+## `@deepseek-ai/dsh-mcp-servers-postgres`
+
+Requires: `storage` · `storageBackendServiceKey('postgres')`
+
+```ts config-catalog
+/** 插件配置：写入时的配额与宿主策略。 */
+export interface Config extends McpServerLimits {}
+```
+
+Depends on: [`McpServerLimits`](../packages/mcp/mcp-servers/src/index.ts)
+
+Source: [`packages/mcp/mcp-servers-postgres/src/index.ts:56`](../packages/mcp/mcp-servers-postgres/src/index.ts)
+
 <a id="deepseek-aidsh-message-feedback"></a>
 
 ## `@deepseek-ai/dsh-message-feedback`
@@ -4286,6 +4327,7 @@ Source: [`packages/workflow/workflow-worker-thread/src/index.ts:43`](../packages
 - `@deepseek-ai/dsh-host-directory-picker-native` ([`packages/host/directory-picker-native/src/index.ts`](../packages/host/directory-picker-native/src/index.ts))
 - `@deepseek-ai/dsh-host-plugin-inventory` — 需要 `loader` ([`packages/host/plugin-inventory/src/index.ts`](../packages/host/plugin-inventory/src/index.ts))
 - `@deepseek-ai/dsh-llm` ([`packages/llm/llm/src/index.ts`](../packages/llm/llm/src/index.ts))
+- `@deepseek-ai/dsh-llm-providers-postgres` — 需要 `storage` · `storageBackendServiceKey('postgres')` ([`packages/llm/llm-providers-postgres/src/index.ts`](../packages/llm/llm-providers-postgres/src/index.ts))
 - `@deepseek-ai/dsh-lsp` ([`packages/lsp/lsp/src/index.ts`](../packages/lsp/lsp/src/index.ts))
 - `@deepseek-ai/dsh-schedule` — 需要 `agents` · `sessions` · `tools` · `sessionPersistence` ([`packages/schedule/schedule/src/index.ts`](../packages/schedule/schedule/src/index.ts))
 - `@deepseek-ai/dsh-session` ([`packages/core/session/src/index.ts`](../packages/core/session/src/index.ts))
@@ -4319,6 +4361,7 @@ Source: [`packages/workflow/workflow-worker-thread/src/index.ts:43`](../packages
 - `@deepseek-ai/dsh-fs` — 抽象 `FileSystem` ([`packages/fs/fs/src/index.ts`](../packages/fs/fs/src/index.ts))
 - `@deepseek-ai/dsh-host-directory-picker` — 抽象 `DirectoryPicker` ([`packages/host/directory-picker/src/index.ts`](../packages/host/directory-picker/src/index.ts))
 - `@deepseek-ai/dsh-jobs` — 抽象 `JobRegistry` ([`packages/jobs/jobs/src/index.ts`](../packages/jobs/jobs/src/index.ts))
+- `@deepseek-ai/dsh-mcp-servers` — 抽象 `McpServerStore` ([`packages/mcp/mcp-servers/src/index.ts`](../packages/mcp/mcp-servers/src/index.ts))
 - `@deepseek-ai/dsh-sandbox` — 抽象 `SandboxProvider` ([`packages/sandbox/sandbox/src/index.ts`](../packages/sandbox/sandbox/src/index.ts))
 - `@deepseek-ai/dsh-session-persistence` — 抽象 `SessionPersistence` ([`packages/session/session-persistence/src/index.ts`](../packages/session/session-persistence/src/index.ts))
 - `@deepseek-ai/dsh-session-query` — 抽象 `SessionQueryEngine` ([`packages/session-query/session-query/src/index.ts`](../packages/session-query/session-query/src/index.ts))
@@ -4346,6 +4389,7 @@ Source: [`packages/workflow/workflow-worker-thread/src/index.ts:43`](../packages
 - `@deepseek-ai/dsh-client-web` ([`packages/client/web/src/index.ts`](../packages/client/web/src/index.ts))
 - `@deepseek-ai/dsh-cmdline` ([`packages/boot/cmdline/src/index.ts`](../packages/boot/cmdline/src/index.ts))
 - `@deepseek-ai/dsh-code-runtime-python` ([`packages/code-runtime/code-runtime-python/src/index.ts`](../packages/code-runtime/code-runtime-python/src/index.ts))
+- `@deepseek-ai/dsh-container-transport` ([`packages/tenant/container-transport/src/index.ts`](../packages/tenant/container-transport/src/index.ts))
 - `@deepseek-ai/dsh-home-paths` ([`packages/util/home-paths/src/index.ts`](../packages/util/home-paths/src/index.ts))
 - `@deepseek-ai/dsh-hook-protocol` ([`packages/hooks/hook-protocol/src/index.ts`](../packages/hooks/hook-protocol/src/index.ts))
 - `@deepseek-ai/dsh-launch-environment` ([`packages/util/launch-environment/src/index.ts`](../packages/util/launch-environment/src/index.ts))
@@ -4353,6 +4397,7 @@ Source: [`packages/workflow/workflow-worker-thread/src/index.ts:43`](../packages
 - `@deepseek-ai/dsh-loader-smoke` ([`packages/test-support/loader-smoke/src/index.ts`](../packages/test-support/loader-smoke/src/index.ts))
 - `@deepseek-ai/dsh-native-command` ([`packages/util/native-command/src/index.ts`](../packages/util/native-command/src/index.ts))
 - `@deepseek-ai/dsh-output-retention` ([`packages/util/output-retention/src/index.ts`](../packages/util/output-retention/src/index.ts))
+- `@deepseek-ai/dsh-partition-scope` ([`packages/core/partition-scope/src/index.ts`](../packages/core/partition-scope/src/index.ts))
 - `@deepseek-ai/dsh-sandbox-windows-acl` ([`packages/sandbox/sandbox-windows-acl/src/index.ts`](../packages/sandbox/sandbox-windows-acl/src/index.ts))
 - `@deepseek-ai/dsh-scope` ([`packages/core/scope/src/index.ts`](../packages/core/scope/src/index.ts))
 - `@deepseek-ai/dsh-sdk-client` ([`packages/sdk/client/src/index.ts`](../packages/sdk/client/src/index.ts))
@@ -4361,6 +4406,7 @@ Source: [`packages/workflow/workflow-worker-thread/src/index.ts:43`](../packages
 - `@deepseek-ai/dsh-session-telemetry` ([`packages/session/session-telemetry/src/index.ts`](../packages/session/session-telemetry/src/index.ts))
 - `@deepseek-ai/dsh-session-title-llm` ([`packages/session/session-title-llm/src/index.ts`](../packages/session/session-title-llm/src/index.ts))
 - `@deepseek-ai/dsh-subagent-in-process-driver` ([`packages/subagent/subagent-in-process-driver/src/index.ts`](../packages/subagent/subagent-in-process-driver/src/index.ts))
+- `@deepseek-ai/dsh-tenant-app` ([`packages/tenant/tenant-app/src/index.ts`](../packages/tenant/tenant-app/src/index.ts))
 - `@deepseek-ai/dsh-timeout` ([`packages/util/timeout/src/index.ts`](../packages/util/timeout/src/index.ts))
 - `@deepseek-ai/dsh-typert-generator` ([`packages/typert/generator/src/index.ts`](../packages/typert/generator/src/index.ts))
 - `@deepseek-ai/dsh-typert-protocol` ([`packages/typert/protocol/src/index.ts`](../packages/typert/protocol/src/index.ts))
