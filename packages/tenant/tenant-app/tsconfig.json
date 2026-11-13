@@ -168,6 +168,15 @@
       "path": "../../mcp/mcp-client/tsconfig.json"
     },
     {
+      "path": "../../mcp/mcp-servers/tsconfig.json"
+    },
+    {
+      "path": "../../mcp/mcp-servers-postgres/tsconfig.json"
+    },
+    {
+      "path": "../mcp-external/tsconfig.json"
+    },
+    {
       "path": "../../plan/plan-mode/tsconfig.json"
     },
     {

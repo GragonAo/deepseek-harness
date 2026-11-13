@@ -278,7 +278,7 @@ function validate(config: Record<string, unknown>): TenantAppConfig {
   const root = new Reader('配置', config)
   root.rejectUnknown([
     'http', 'database', 'auth', 'admin', 'tenants', 'sandbox',
-    'permissions', 'model', 'web', 'telemetry', 'surfaces', 'tools', 'files', 'plugins', 'mcpServers', 'mcpMeta',
+    'permissions', 'model', 'web', 'telemetry', 'surfaces', 'tools', 'files', 'plugins', 'mcpServers', 'mcpMeta', 'mcp',
   ])
 
   const http = readHttp(root.child('http'))
@@ -297,6 +297,7 @@ function validate(config: Record<string, unknown>): TenantAppConfig {
   const plugins = readPlugins(root.optionalChild('plugins'))
   const mcpServers = readMcpServers(root)
   const mcpMeta = readMcpMeta(root)
+  const mcp = readMcp(root.optionalChild('mcp'))
 
   return {
     http,
@@ -315,6 +316,41 @@ function validate(config: Record<string, unknown>): TenantAppConfig {
     ...(plugins !== undefined ? { plugins } : {}),
     ...(mcpServers !== undefined ? { mcpServers } : {}),
     ...(mcpMeta !== undefined ? { mcpMeta } : {}),
+    ...(mcp !== undefined ? { mcp } : {}),
+  }
+}
+
+/**
+ * 外部 MCP 服务的管理形态。
+ *
+ * 这一节决定 MCP 服务器「谁说了算」：关掉 `external`（默认）就还是配置文件说了算，与加这一节之前
+ * 完全一致；打开之后注册表（数据库）说了算，`mcpServers` 只在第一次启动时当种子。
+ *
+ * 每个值都必须显式给出：这些是部署的判断（谁有权限配、允不允许打内网），没有一个能由代码替部署猜。
+ * @param reader - `mcp` 小节；未配置时为 `undefined`。
+ * @returns 已校验的小节；未配置时为 `undefined`。
+ */
+function readMcp(reader: Reader | undefined): TenantAppConfig['mcp'] {
+  if (reader === undefined) return undefined
+  reader.rejectUnknown(['external'])
+  const external = reader.optionalChild('external')
+  if (external === undefined) return {}
+  external.rejectUnknown([
+    'enabled', 'seedFromConfig', 'systemMaxServers', 'userMaxServers',
+    'allowPrivateHosts', 'firstStepWaitMs', 'maxServersPerAgent',
+  ])
+  return {
+    external: {
+      enabled: external.boolean('enabled'),
+      seedFromConfig: external.optionalBoolean('seedFromConfig') ?? true,
+      systemMaxServers: external.optionalPositiveInteger('systemMaxServers') ?? 32,
+      userMaxServers: external.optionalPositiveInteger('userMaxServers') ?? 8,
+      // 内网地址是配 MCP 的常态（警方内网的服务几乎都在内网），所以默认放行；两份清单和
+      // "测试连接"用同一个值，不会出现"测通了却存不进去"。要只许公网的部署把它关掉。
+      allowPrivateHosts: external.optionalBoolean('allowPrivateHosts') ?? true,
+      firstStepWaitMs: external.optionalNonNegativeInteger('firstStepWaitMs') ?? 5000,
+      maxServersPerAgent: external.optionalPositiveInteger('maxServersPerAgent') ?? 16,
+    },
   }
 }
 

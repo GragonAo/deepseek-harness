@@ -314,10 +314,42 @@ export interface TenantAppConfig {
   readonly files?: FilesConfig
   /** 逐行覆盖组合清单：停用某一行或追加它的配置。 */
   readonly plugins?: Readonly<Record<string, PluginOverride>>
-  /** 要接入的 MCP 服务器。 */
+  /** 要接入的 MCP 服务器。`mcp.external.enabled` 打开时，这份清单只在首次启动时作为种子上车。 */
   readonly mcpServers?: readonly McpServerConfig[]
   /** 每次 MCP 工具调用随 `params._meta` 上送的入站请求头。省略则一个都不送。 */
   readonly mcpMeta?: McpMetaConfig
+  /** 外部 MCP 服务的管理形态：谁来配、配在哪、按什么范围挂载。 */
+  readonly mcp?: McpSettings
+}
+
+/**
+ * 外部 MCP 服务的挂载策略。
+ *
+ * 打开 `external.enabled` 之后，MCP 服务器不再由配置文件决定，而是由数据库里的注册表决定：
+ * 系统管理员维护一份（所有人可见），每个用户维护自己的一份，两者按会话合并挂载。配置文件里的
+ * `mcpServers` 只在注册表还空着时作为种子写入一次，之后改配置不再生效——唯一的真相在库里。
+ */
+export interface McpSettings {
+  /** 外部 MCP 注册表与按会话挂载；不给即关闭，沿用 `mcpServers` 的全局挂载。 */
+  readonly external?: McpExternalConfig
+}
+
+/** 外部 MCP 注册表的挂载配置。 */
+export interface McpExternalConfig {
+  /** 打开注册表形态：系统配置 + 用户自己的配置合并挂载，配置文件不再直接决定服务器。 */
+  readonly enabled: boolean
+  /** 注册表为空时，把 `mcpServers` 写成系统清单的初始种子；之后改配置不覆盖库里的内容。 */
+  readonly seedFromConfig: boolean
+  /** 系统清单最多几条。 */
+  readonly systemMaxServers: number
+  /** 每个用户最多几条自己的服务器。 */
+  readonly userMaxServers: number
+  /** 系统清单是否允许指向内网/回环地址（用户自己配的永远不允许）。 */
+  readonly allowPrivateHosts: boolean
+  /** 会话第一步最多等外部服务器连上多久（毫秒）。 */
+  readonly firstStepWaitMs: number
+  /** 一个会话最多挂几个外部服务器。 */
+  readonly maxServersPerAgent: number
 }
 
 /**
