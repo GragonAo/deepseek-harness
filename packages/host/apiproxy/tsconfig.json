@@ -9,6 +9,12 @@
   ],
   "references": [
     {
+      "path": "../../tenant/tenant/tsconfig.json"
+    },
+    {
+      "path": "../../mcp/mcp-servers/tsconfig.json"
+    },
+    {
       "path": "../../goal/goal"
     },
     {

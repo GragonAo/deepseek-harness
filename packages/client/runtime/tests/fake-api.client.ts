@@ -293,6 +293,19 @@ export class FakeApiClient implements IApiClient {
     managedProviders: payload => this.record('llm.managedProviders', payload, Promise.resolve(ok({ providers: [] }))),
   }
 
+  readonly mcp: IApiClient['mcp'] = {
+    systemServers: payload => this.record('mcp.systemServers', payload, Promise.resolve(ok({ servers: [], revision: 0 }))),
+    saveServer: payload => this.record('mcp.saveServer', payload, Promise.resolve(ok({ servers: [], revision: 0 }))),
+    removeServer: payload => this.record('mcp.removeServer', payload, Promise.resolve(ok({ servers: [], revision: 0 }))),
+    myServers: payload => this.record('mcp.myServers', payload, Promise.resolve(ok({ servers: [], revision: 0, system: [] }))),
+    saveMyServer: payload => this.record('mcp.saveMyServer', payload, Promise.resolve(ok({ servers: [], revision: 0 }))),
+    removeMyServer: payload => this.record('mcp.removeMyServer', payload, Promise.resolve(ok({ servers: [], revision: 0 }))),
+    effectiveServers: payload => this.record('mcp.effectiveServers', payload, Promise.resolve(ok({ servers: [] }))),
+    testConnection: payload => this.record('mcp.testConnection', payload, Promise.resolve(ok({
+      ok: true, toolsSupported: true, toolCount: 0, latencyMs: 1, addressAllowed: true,
+    }))),
+  }
+
   /** When true, streams never fire onOpen (misbehaving-carrier material for the handshake timeout guard). */
   suppressStreamOpen = false
 

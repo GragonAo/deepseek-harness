@@ -28,6 +28,7 @@ function scriptedApi(overrides: {
   settings?: Partial<ApiProxy['settings']>
   credentials?: Partial<ApiProxy['credentials']>
   llm?: Partial<ApiProxy['llm']>
+  mcp?: Partial<ApiProxy['mcp']>
   respond?: ApiProxy['respond']
 } = {}): ApiProxy {
   async function *empty<F>(): AsyncGenerator<RpcRequest<F>> { /* no frames */ }
@@ -140,6 +141,19 @@ function scriptedApi(overrides: {
       // The stored-route read answers an empty registry for the same reason.
       managedProviders: r => ok(r, { providers: [] }),
       ...overrides.llm,
+    },
+    mcp: {
+      // No external MCP registry in this stub: both registers read empty and every
+      // write is refused, which is what a deployment without the plugin answers.
+      systemServers: r => ok(r, { servers: [], revision: 0 }),
+      myServers: r => ok(r, { servers: [], system: [], revision: 0 }),
+      effectiveServers: r => ok(r, { servers: [] }),
+      saveServer: err,
+      removeServer: err,
+      saveMyServer: err,
+      removeMyServer: err,
+      testConnection: err,
+      ...overrides.mcp,
     },
     events: { mux: () => empty<MuxFrame>(), host: () => empty<HostFrame>(), ...overrides.events },
     respond: overrides.respond ?? (() => Promise.resolve({ accepted: false as const, reason: 'not-pending' as const })),

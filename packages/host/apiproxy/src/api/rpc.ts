@@ -94,6 +94,14 @@ export interface RpcErrorDetailsMap {
   'provider-record-invalid': { provider: string }
   /** The tenant registry holds no record of this id, so there is nothing to update. */
   'provider-not-found': { provider: string }
+  /** The deployment mounts no external MCP registry, so a server write has nowhere to go. */
+  'mcp-registry-unavailable': {}
+  /** The stored MCP row was refused by the registry's validation before it reached the medium. */
+  'mcp-server-invalid': { serverName: string }
+  /** The MCP registry moved since the caller read it; the write was refused rather than applied. */
+  'mcp-revision-conflict': { serverName: string; revision: number }
+  /** A personal MCP method ran outside a user scope, so it had no personal register. */
+  'user-scope-required': {}
   'title-invalid': { sessionId: SessionId }
   'fork-unavailable': { sessionId: SessionId }
   'subagent-parent-unavailable': { parentSessionId: SessionId }

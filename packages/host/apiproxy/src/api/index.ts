@@ -15,6 +15,7 @@ import type { GoalsApi } from './goals.ts'
 import type { SettingsApi } from './settings.ts'
 import type { CredentialsApi } from './credentials.ts'
 import type { LlmApi } from './llm.ts'
+import type { McpApi } from './mcp.ts'
 import type { DownloadsApi } from './downloads.ts'
 import type { ClientResponse, RpcReceipt } from './rpc.ts'
 
@@ -31,6 +32,7 @@ export interface ApiProxy {
   settings: SettingsApi
   credentials: CredentialsApi
   llm: LlmApi
+  mcp: McpApi
   /** Host-only download surfaces (GET, no wire envelope); absent from IApiClient. */
   downloads: DownloadsApi
   /**
@@ -61,6 +63,10 @@ export type { GoalsApi, GoalId, GoalRef } from './goals.ts'
 export type { SettingsApi, SettingsNamespaceView, SettingsPathOpView, SettingsSecretView } from './settings.ts'
 export type { CredentialsApi, CredentialView } from './credentials.ts'
 export type { ConfigurableProviderView, DiscoveredModelView, LlmApi, ManagedProviderModelView, ManagedProviderPatch, ManagedProviderRowView, ManagedProviderView, ManagedProviderWrite } from './llm.ts'
+export type {
+  McpApi, McpEffectiveServerView, McpMyServersValue, McpProbeInput, McpProbeView, McpRegistrySnapshot,
+  McpServerConcurrencyView, McpServerView, McpServerWrite,
+} from './mcp.ts'
 export type { DownloadsApi } from './downloads.ts'
 export type { ApprovalResponsePayload } from './approvals.ts'
 

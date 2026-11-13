@@ -3171,6 +3171,25 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         providers: [...fixtureManagedProviders.values()].map(view => ({ ...view })),
       }),
     },
+    // No external MCP registry behind the fixture: both registers read empty, so a
+    // surface can draw its empty state without a backend, and a write answers the
+    // registry it would have (both lists empty, the revision moving).
+    mcp: {
+      systemServers: request => ok(request, { servers: [], revision: 0 }),
+      saveServer: request => ok(request, { servers: [], revision: 1 }),
+      removeServer: request => ok(request, { servers: [], revision: 1 }),
+      myServers: request => ok(request, { servers: [], system: [], revision: 0 }),
+      saveMyServer: request => ok(request, { servers: [], revision: 0 }),
+      removeMyServer: request => ok(request, { servers: [], revision: 0 }),
+      effectiveServers: request => ok(request, { servers: [] }),
+      testConnection: request => ok(request, {
+        ok: true,
+        toolsSupported: true,
+        toolCount: 0,
+        latencyMs: 1,
+        addressAllowed: true,
+      }),
+    },
     respond(message: ClientResponse): Promise<RpcReceipt> {
       // Same routing discipline as the host: rpcId first, then the payload's
       // audit correlation; a settled or unknown id is not-pending.
@@ -3350,6 +3369,14 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'llm.updateProvider': return this.api.llm.updateProvider(request)
       case 'llm.removeProvider': return this.api.llm.removeProvider(request)
       case 'llm.managedProviders': return this.api.llm.managedProviders(request)
+      case 'mcp.systemServers': return this.api.mcp.systemServers(request)
+      case 'mcp.saveServer': return this.api.mcp.saveServer(request)
+      case 'mcp.removeServer': return this.api.mcp.removeServer(request)
+      case 'mcp.myServers': return this.api.mcp.myServers(request)
+      case 'mcp.saveMyServer': return this.api.mcp.saveMyServer(request)
+      case 'mcp.removeMyServer': return this.api.mcp.removeMyServer(request)
+      case 'mcp.effectiveServers': return this.api.mcp.effectiveServers(request)
+      case 'mcp.testConnection': return this.api.mcp.testConnection(request)
     }
   }
 
