@@ -64,6 +64,7 @@ import {
   credentialsDescribeValueSchema, credentialsSetValueSchema, credentialsUnsetValueSchema,
 } from '../api/credentials.schema.ts'
 import { llmAddProviderValueSchema, llmDiscoverModelsValueSchema, llmManagedProvidersValueSchema, llmModelsValueSchema, llmProvidersValueSchema, llmRemoveProviderValueSchema, llmUpdateProviderValueSchema } from '../api/llm.schema.ts'
+import { mcpEffectiveServersValueSchema, mcpMyServersValueSchema, mcpProbeValueSchema, mcpRegistrySnapshotValueSchema } from '../api/mcp.schema.ts'
 import {
   subagentHistoryValueSchema,
   subagentInterruptValueSchema,
@@ -172,6 +173,16 @@ export interface IApiClient {
     updateProvider(payload: RequestPayload<'llm.updateProvider'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'llm.updateProvider'>>>
     removeProvider(payload: RequestPayload<'llm.removeProvider'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'llm.removeProvider'>>>
   }
+  mcp: {
+    systemServers(payload: RequestPayload<'mcp.systemServers'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'mcp.systemServers'>>>
+    saveServer(payload: RequestPayload<'mcp.saveServer'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'mcp.saveServer'>>>
+    removeServer(payload: RequestPayload<'mcp.removeServer'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'mcp.removeServer'>>>
+    myServers(payload: RequestPayload<'mcp.myServers'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'mcp.myServers'>>>
+    saveMyServer(payload: RequestPayload<'mcp.saveMyServer'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'mcp.saveMyServer'>>>
+    removeMyServer(payload: RequestPayload<'mcp.removeMyServer'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'mcp.removeMyServer'>>>
+    effectiveServers(payload: RequestPayload<'mcp.effectiveServers'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'mcp.effectiveServers'>>>
+    testConnection(payload: RequestPayload<'mcp.testConnection'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'mcp.testConnection'>>>
+  }
   /** client-response passthrough (rpcId is a backfill of the server-request's id — never minted here). */
   respond(message: ClientResponse, signal?: AbortSignal): Promise<RpcReceipt>
 }
@@ -241,6 +252,14 @@ export const UNARY_VALUE_SCHEMAS: { [K in keyof RpcMethodMap]: z.ZodType<Wire<Re
   'llm.addProvider': llmAddProviderValueSchema,
   'llm.updateProvider': llmUpdateProviderValueSchema,
   'llm.removeProvider': llmRemoveProviderValueSchema,
+  'mcp.systemServers': mcpRegistrySnapshotValueSchema,
+  'mcp.saveServer': mcpRegistrySnapshotValueSchema,
+  'mcp.removeServer': mcpRegistrySnapshotValueSchema,
+  'mcp.myServers': mcpMyServersValueSchema,
+  'mcp.saveMyServer': mcpRegistrySnapshotValueSchema,
+  'mcp.removeMyServer': mcpRegistrySnapshotValueSchema,
+  'mcp.effectiveServers': mcpEffectiveServersValueSchema,
+  'mcp.testConnection': mcpProbeValueSchema,
 }
 
 /** Default timeout for bounded unary calls (rpc-compare 2026-07-19: a hung host must not leave callers pending forever). */
@@ -525,6 +544,17 @@ export abstract class AbstractApiClient implements IApiClient {
     addProvider: (payload, signal) => this.callUnary('llm.addProvider', payload, signal),
     updateProvider: (payload, signal) => this.callUnary('llm.updateProvider', payload, signal),
     removeProvider: (payload, signal) => this.callUnary('llm.removeProvider', payload, signal),
+  }
+
+  readonly mcp: IApiClient['mcp'] = {
+    systemServers: (payload, signal) => this.callUnary('mcp.systemServers', payload, signal),
+    saveServer: (payload, signal) => this.callUnary('mcp.saveServer', payload, signal),
+    removeServer: (payload, signal) => this.callUnary('mcp.removeServer', payload, signal),
+    myServers: (payload, signal) => this.callUnary('mcp.myServers', payload, signal),
+    saveMyServer: (payload, signal) => this.callUnary('mcp.saveMyServer', payload, signal),
+    removeMyServer: (payload, signal) => this.callUnary('mcp.removeMyServer', payload, signal),
+    effectiveServers: (payload, signal) => this.callUnary('mcp.effectiveServers', payload, signal),
+    testConnection: (payload, signal) => this.callUnary('mcp.testConnection', payload, signal),
   }
 
   readonly events: IApiClient['events'] = {

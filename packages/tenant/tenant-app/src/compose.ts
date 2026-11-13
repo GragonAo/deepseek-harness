@@ -26,6 +26,7 @@ import { PostgresSessionPersistence } from '@deepseek-ai/dsh-session-persistence
 import { SPINE, workDir } from './spine.ts'
 import type { SpineRow } from './spine.ts'
 import { TenantMcpCallMeta } from './mcp-meta.ts'
+import { seedSystemServers } from './mcp-external.ts'
 import type { McpServerConfig, TenantApp, TenantAppConfig } from './types.ts'
 
 /**
@@ -44,12 +45,40 @@ export async function createTenantApp(config: TenantAppConfig): Promise<TenantAp
     const fiber = await mountSpineRow(ctx, row, config)
     if (fiber !== undefined) mounted.push({ what: `组合行 ${row.id}（${row.module}）`, fiber })
   }
-  for (const [index, server] of (config.mcpServers ?? []).entries()) {
-    const id = `mcp-${index}-${server.serverName}`
-    mounted.push({
-      what: `组合行 ${id}（@deepseek-ai/dsh-mcp-client）`,
-      fiber: await mountModule(ctx, id, '@deepseek-ai/dsh-mcp-client', mcpServerMountConfig(server)),
+  const external = config.mcp?.external
+  if (external?.enabled === true) {
+    // 注册表形态：MCP 服务器由库里的两份清单决定（系统管理员一份、每个用户一份），按会话合并挂载。
+    const storeWhat = '组合行 mcp-servers（@deepseek-ai/dsh-mcp-servers-postgres）'
+    const storeFiber = await mountModule(ctx, 'mcp-servers', '@deepseek-ai/dsh-mcp-servers-postgres', {
+      maxSystemServers: external.systemMaxServers,
+      maxUserServers: external.userMaxServers,
+      allowPrivateHosts: external.allowPrivateHosts,
     })
+    mounted.push({ what: storeWhat, fiber: storeFiber })
+    // 种子上车之前注册表必须真的打开：Cordis 对注入不满足的插件是静默跳过的，
+    // 少了这一等，下面的写入会以「注册表没起来」失败，而不是指名哪一行。
+    await mountLabeled(storeWhat, async () => {
+      await storeFiber.await()
+      return storeFiber
+    })
+    if (external.seedFromConfig && (config.mcpServers?.length ?? 0) > 0) {
+      await seedSystemServers(ctx, config.mcpServers ?? [])
+    }
+    mounted.push({
+      what: '组合行 mcp-external（@deepseek-ai/dsh-mcp-external）',
+      fiber: await mountModule(ctx, 'mcp-external', '@deepseek-ai/dsh-mcp-external', {
+        firstStepWaitMs: external.firstStepWaitMs,
+        maxServersPerAgent: external.maxServersPerAgent,
+      }),
+    })
+  } else {
+    for (const [index, server] of (config.mcpServers ?? []).entries()) {
+      const id = `mcp-${index}-${server.serverName}`
+      mounted.push({
+        what: `组合行 ${id}（@deepseek-ai/dsh-mcp-client）`,
+        fiber: await mountModule(ctx, id, '@deepseek-ai/dsh-mcp-client', mcpServerMountConfig(server)),
+      })
+    }
   }
   // The provider mounts after the clients: they read `mcpCallMeta` per call, so
   // what matters is that it exists before the first tool call, not at load.

@@ -633,6 +633,12 @@ export const TYPE_LINK_EXEMPTIONS: Readonly<Record<string, string>> = {
   ContainerExecOptions: 'container exec options are owned by packages/tenant/container/README.md',
   CreateTenantRequest: 'tenant-admin create contract is owned by packages/tenant/tenant-admin/README.md',
   UpdateTenantRequest: 'tenant-admin update contract is owned by packages/tenant/tenant-admin/README.md',
+  ExternalMcpServerRecord: 'external MCP registry row is owned by packages/mcp/mcp-servers/README.md',
+  EffectiveMcpServer: 'merged registry entry is owned by packages/mcp/mcp-servers/README.md',
+  StoredRegistry: 'medium mirror of one register is owned by packages/mcp/mcp-servers/src/index.ts',
+  McpServerLimits: 'registry quota policy is owned by packages/mcp/mcp-servers/README.md',
+  McpServerConcurrency: 'per-server concurrency policy is owned by packages/mcp/mcp-servers/README.md',
+  McpProbeResult: 'endpoint probe outcome is owned by packages/mcp/mcp-servers/README.md',
 }
 
 /** Repository data policy consumed by the Cordis catalog projector. */

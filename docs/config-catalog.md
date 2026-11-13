@@ -1992,7 +1992,51 @@ export type ToolConcurrencyPolicy = 'annotations' | 'parallel' | 'exclusive'
 export type ToolConcurrencyMode = 'fixed' | 'adaptive'
 ```
 
-Source: [`packages/mcp/mcp-client/src/index.ts:137`](../packages/mcp/mcp-client/src/index.ts)
+Source: [`packages/mcp/mcp-client/src/index.ts:136`](../packages/mcp/mcp-client/src/index.ts)
+
+<a id="deepseek-aidsh-mcp-external"></a>
+
+## `@deepseek-ai/dsh-mcp-external`
+
+Requires: `mcpServers`
+
+```ts config-catalog
+/** Mounting configuration. */
+export interface Config {
+  /**
+   * How long a session's first step may wait for its servers to connect before
+   * the request goes out without them (milliseconds). Keeps a slow third-party
+   * endpoint from stalling a conversation. A reconcile waits under the same
+   * budget.
+   */
+  firstStepWaitMs?: number
+  /**
+   * Maximum servers mounted into one session. A model-facing tool list is a
+   * context budget, so the tail of the effective set is dropped (with a warning)
+   * rather than silently crowding out everything else.
+   */
+  maxServersPerAgent?: number
+  /** Per-tool-call timeout applied to a row that does not set its own (milliseconds). */
+  toolCallTimeoutMs?: number
+}
+```
+
+Source: [`packages/tenant/mcp-external/src/index.ts:71`](../packages/tenant/mcp-external/src/index.ts)
+
+<a id="deepseek-aidsh-mcp-servers-postgres"></a>
+
+## `@deepseek-ai/dsh-mcp-servers-postgres`
+
+Requires: `storage` · `storageBackendServiceKey('postgres')`
+
+```ts config-catalog
+/** Plugin configuration: quotas and host policy for writes. */
+export interface Config extends McpServerLimits {}
+```
+
+Depends on: [`McpServerLimits`](../packages/mcp/mcp-servers/src/index.ts)
+
+Source: [`packages/mcp/mcp-servers-postgres/src/index.ts:56`](../packages/mcp/mcp-servers-postgres/src/index.ts)
 
 <a id="deepseek-aidsh-message-feedback"></a>
 
@@ -4452,6 +4496,7 @@ Abstract service classes — a deployment loads a concrete implementation packag
 - `@deepseek-ai/dsh-fs` — abstract `FileSystem` ([`packages/fs/fs/src/index.ts`](../packages/fs/fs/src/index.ts))
 - `@deepseek-ai/dsh-host-directory-picker` — abstract `DirectoryPicker` ([`packages/host/directory-picker/src/index.ts`](../packages/host/directory-picker/src/index.ts))
 - `@deepseek-ai/dsh-jobs` — abstract `JobRegistry` ([`packages/jobs/jobs/src/index.ts`](../packages/jobs/jobs/src/index.ts))
+- `@deepseek-ai/dsh-mcp-servers` — abstract `McpServerStore` ([`packages/mcp/mcp-servers/src/index.ts`](../packages/mcp/mcp-servers/src/index.ts))
 - `@deepseek-ai/dsh-sandbox` — abstract `SandboxProvider` ([`packages/sandbox/sandbox/src/index.ts`](../packages/sandbox/sandbox/src/index.ts))
 - `@deepseek-ai/dsh-session-persistence` — abstract `SessionPersistence` ([`packages/session/session-persistence/src/index.ts`](../packages/session/session-persistence/src/index.ts))
 - `@deepseek-ai/dsh-session-query` — abstract `SessionQueryEngine` ([`packages/session-query/session-query/src/index.ts`](../packages/session-query/session-query/src/index.ts))

@@ -67,6 +67,7 @@ import {
   credentialsDescribeRequestSchema, credentialsSetRequestSchema, credentialsUnsetRequestSchema,
 } from '../api/credentials.schema.ts'
 import { llmAddProviderRequestSchema, llmDiscoverModelsRequestSchema, llmManagedProvidersRequestSchema, llmModelsRequestSchema, llmProvidersRequestSchema, llmRemoveProviderRequestSchema, llmUpdateProviderRequestSchema } from '../api/llm.schema.ts'
+import { mcpEmptyRequestSchema, mcpRemoveServerRequestSchema, mcpSaveServerRequestSchema, mcpTestConnectionRequestSchema } from '../api/mcp.schema.ts'
 import {
   subagentHistoryRequestSchema,
   subagentInterruptRequestSchema,
@@ -152,6 +153,14 @@ export const UNARY_ROUTES: UnaryRoutes = {
   'llm.addProvider': { schema: llmAddProviderRequestSchema, invoke: (api, r) => api.llm.addProvider(r) },
   'llm.updateProvider': { schema: llmUpdateProviderRequestSchema, invoke: (api, r) => api.llm.updateProvider(r) },
   'llm.removeProvider': { schema: llmRemoveProviderRequestSchema, invoke: (api, r) => api.llm.removeProvider(r) },
+  'mcp.systemServers': { schema: mcpEmptyRequestSchema, invoke: (api, r) => api.mcp.systemServers(r) },
+  'mcp.saveServer': { schema: mcpSaveServerRequestSchema, invoke: (api, r) => api.mcp.saveServer(r) },
+  'mcp.removeServer': { schema: mcpRemoveServerRequestSchema, invoke: (api, r) => api.mcp.removeServer(r) },
+  'mcp.myServers': { schema: mcpEmptyRequestSchema, invoke: (api, r) => api.mcp.myServers(r) },
+  'mcp.saveMyServer': { schema: mcpSaveServerRequestSchema, invoke: (api, r) => api.mcp.saveMyServer(r) },
+  'mcp.removeMyServer': { schema: mcpRemoveServerRequestSchema, invoke: (api, r) => api.mcp.removeMyServer(r) },
+  'mcp.effectiveServers': { schema: mcpEmptyRequestSchema, invoke: (api, r) => api.mcp.effectiveServers(r) },
+  'mcp.testConnection': { schema: mcpTestConnectionRequestSchema, invoke: (api, r) => api.mcp.testConnection(r) },
 }
 
 /** Route lookup that narrows an arbitrary path segment to a map key (single cast point for the string→key refinement). */

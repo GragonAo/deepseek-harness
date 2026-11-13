@@ -16,6 +16,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
+import { reserveServerName } from './reservation.ts'
 import { RECONNECT_DEFAULTS, resolveReconnectPolicy, startConnection } from './connection.ts'
 import type { ReconnectConfig } from './connection.ts'
 import { TOOL_CONCURRENCY_DEFAULTS, resolveToolConcurrencyPolicy } from './concurrency.ts'
@@ -72,12 +73,10 @@ const DEFAULT_TOOL_CALL_TIMEOUT_MS = 60_000
 const SERVER_NAME_PATTERN = /^[A-Za-z0-9_-]{1,32}$/
 
 /**
- * Live `serverName` reservations per app, keyed off `ctx.root` (multiple apps
- * in one process — tests — must not see each other's names). A duplicate
- * namespace is a configuration error surfaced at plugin load, never silent
- * shadowing.
+ * Live `serverName` reservations are owned by `reservation.ts`, keyed by the
+ * registration's scope: a descendant scope may shadow a farther name, while two
+ * instances in one scope stay a configuration error.
  */
-const activeServerNames = new WeakMap<Context, Set<string>>()
 
 // ---- Config ----
 
@@ -217,22 +216,12 @@ export async function apply(ctx: Context, config: Config, internals: ToolConcurr
     `mcp-client(${config.serverName}): toolConcurrency`,
   )
 
-  // Reserve the namespace next: a duplicate `serverName` fails THIS instance
-  // at load with an actionable error and leaves the earlier instance intact.
-  ctx.effect(() => {
-    let names = activeServerNames.get(ctx.root)
-    if (!names) {
-      names = new Set()
-      activeServerNames.set(ctx.root, names)
-    }
-    if (names.has(config.serverName)) {
-      throw new Error(
-        `mcp-client: serverName "${config.serverName}" is already in use by another mcp-client instance — pick a unique serverName in cordis.yml`,
-      )
-    }
-    names.add(config.serverName)
-    return () => void names.delete(config.serverName)
-  }, 'mcp-client.serverName')
+  // Reserve the namespace next: a duplicate `serverName` in the same scope fails
+  // THIS instance at load with an actionable error and leaves the earlier
+  // instance intact. A registration in a descendant scope is not a conflict —
+  // the tool registry resolves a name through the scope chain, nearest scope
+  // first, so the outer instance stays reachable for the sessions it serves.
+  ctx.effect(() => reserveServerName(ctx, config.serverName), 'mcp-client.serverName')
 
   // The supervisor owns the client/transport generations, the reconnect
   // loop, and the live tool registrations; disposal stops reconnection,

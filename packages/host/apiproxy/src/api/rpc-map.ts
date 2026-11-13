@@ -13,6 +13,7 @@ import type { GoalsApi } from './goals.ts'
 import type { SettingsApi } from './settings.ts'
 import type { CredentialsApi } from './credentials.ts'
 import type { LlmApi } from './llm.ts'
+import type { McpApi } from './mcp.ts'
 import type { SubagentsApi } from './subagents.ts'
 import type { RpcResponse } from './rpc.ts'
 
@@ -82,6 +83,14 @@ export interface RpcMethodMap {
   'llm.addProvider': LlmApi['addProvider']
   'llm.updateProvider': LlmApi['updateProvider']
   'llm.removeProvider': LlmApi['removeProvider']
+  'mcp.systemServers': McpApi['systemServers']
+  'mcp.saveServer': McpApi['saveServer']
+  'mcp.removeServer': McpApi['removeServer']
+  'mcp.myServers': McpApi['myServers']
+  'mcp.saveMyServer': McpApi['saveMyServer']
+  'mcp.removeMyServer': McpApi['removeMyServer']
+  'mcp.effectiveServers': McpApi['effectiveServers']
+  'mcp.testConnection': McpApi['testConnection']
 }
 
 /** Business request payload of method K (reaches through the RpcRequest narrow form to payload). */

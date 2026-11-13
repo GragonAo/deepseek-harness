@@ -36,9 +36,13 @@ import {
 } from '@deepseek-ai/dsh-agent-presets'
 import type { PresetBearingSession } from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-tools'
+import { McpServerRevisionConflict, mountNameFor, probeMcpServer } from '@deepseek-ai/dsh-mcp-servers'
+import type { ExternalMcpServerRecord, McpServerOrigin, McpServerStore } from '@deepseek-ai/dsh-mcp-servers'
+import { currentPartition } from '@deepseek-ai/dsh-partition-scope'
 import type {
   ApiProxy, ConfigurableProviderView, CredentialView, GoalRef, HistoryEntry, HostFrame,
   ManagedProviderModelView, ManagedProviderRowView, ManagedProviderView,
+  McpEffectiveServerView, McpProbeInput, McpProbeView, McpServerView,
   ModelCatalogFailure, ModelProviderGroup,
   ModelReasoning, MuxFrame, PromptContentPart, QuestionResponsePayload, SessionListMetadata, SessionProjectionsBlock, SessionSearchItem,
   QueuedInboxItem, SessionSummary, SettingsNamespaceView, SubagentAddress, JobView, ToolEventView,
@@ -614,6 +618,72 @@ function directoryError(error: unknown): RpcError {
     return { code: error.code, message: error.message, details: { path: error.path } }
   }
   return { code: 'internal', message: error instanceof Error ? error.message : String(error), details: {} }
+}
+
+/**
+ * Decide what a connectivity test actually connects to: the draft in the payload,
+ * or a saved row's own endpoint and credential.
+ *
+ * A saved row exists so a form never has to hold the credential again — and so a
+ * credential is never sent back to a browser. The reuse is narrow on purpose: the
+ * stored headers apply only while the effective endpoint is still the stored one,
+ * so a test cannot redirect a secret to another host.
+ * @param payload - the test request.
+ * @param saved - the rows the caller may draw from: their own first, then the deployment register.
+ * @returns the endpoint, headers and budget to test with.
+ * @throws TypeError when the request names neither a url nor a saved row, or names a row that is not there.
+ */
+export function resolveMcpProbeTarget(
+  payload: McpProbeInput,
+  saved: readonly ExternalMcpServerRecord[],
+): { url: string; headers: Record<string, string>; timeoutMs?: number } {
+  const name = payload.serverName?.trim()
+  const row = name === undefined || name === '' ? undefined : saved.find(entry => entry.serverName === name)
+  if (name !== undefined && name !== '' && row === undefined) {
+    throw new TypeError(`no saved server named "${name}" to test; send a url, or save the row first`)
+  }
+  const url = payload.url?.trim() ?? row?.url
+  if (url === undefined || url === '') {
+    throw new TypeError('a connectivity test needs a url, or the serverName of a saved row')
+  }
+  const headers = payload.headers ?? (row !== undefined && row.url === url ? row.headers : {})
+  return payload.timeoutMs === undefined ? { url, headers } : { url, headers, timeoutMs: payload.timeoutMs }
+}
+
+/**
+ * The refusal a connectivity test answers with when the request itself cannot be
+ * resolved.
+ * @param error - whatever the resolver threw.
+ * @param serverName - the row the caller named, if any.
+ * @returns the wire error.
+ */
+function mcpProbeError(error: unknown, serverName: string | undefined): RpcError {
+  return {
+    code: 'mcp-server-invalid',
+    message: error instanceof Error ? error.message : String(error),
+    // The code's details always name the row; an unresolvable draft has none, and
+    // the message is what explains that case.
+    details: { serverName: serverName ?? '' },
+  }
+}
+
+/**
+ * Remove credential values from a text that is about to reach a surface, a log
+ * line, or both. An upstream that echoes the request headers in an error page is
+ * not a reason to pass a third party's token along.
+ * @param text - the endpoint's own message, when there is one.
+ * @param headers - the headers the test carried.
+ * @returns the text with every recognizable header value replaced.
+ */
+function redactSecrets(text: string | undefined, headers: Record<string, string>): string | undefined {
+  if (text === undefined) return undefined
+  let scrubbed = text
+  for (const value of Object.values(headers)) {
+    // Short values would redact incidental text; a credential is not three characters.
+    if (value.length < 6) continue
+    scrubbed = scrubbed.split(value).join('[redacted]')
+  }
+  return scrubbed
 }
 
 /** Resolved Agent model and project-directory defaults consumed by the API implementation. */
@@ -2078,6 +2148,192 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       code: 'provider-registry-unavailable',
       message: 'this deployment mounts no tenant provider registry; provider routes come from the configuration tiers only',
       details: {},
+    }
+  }
+
+  /**
+   * The user in scope for an MCP `My` method, or undefined when the call carries
+   * no user. Never read from the payload: a client names itself, the carrier
+   * proves it.
+   *
+   * Read through the partition seam rather than the tenancy package: the carrier
+   * that authenticated the request is the only thing that knows the subject, and
+   * a deployment that partitions per user registers `partitionScope` for exactly
+   * this question. A single-partition deployment registers no provider, so its
+   * `My` methods answer `user-scope-required` instead of inventing an owner.
+   * @returns the ambient partition's user id, when there is one.
+   */
+  function ambientUserId(): string | undefined {
+    return currentPartition(ctx)?.user
+  }
+
+  /** The refusal every MCP write answers with when no registry is mounted. */
+  function noMcpRegistryError(): RpcError {
+    return {
+      code: 'mcp-registry-unavailable',
+      message: 'this deployment mounts no external MCP registry; MCP servers come from the configuration file only',
+      details: {},
+    }
+  }
+
+  /** The refusal a `My` MCP method answers with outside a user scope. */
+  function userScopeRequiredError(): RpcError {
+    return {
+      code: 'user-scope-required',
+      message: 'this call carries no user scope, so it has no personal MCP register to read or write',
+      details: {},
+    }
+  }
+
+  /**
+   * Map a write failure onto the wire error a surface can act on.
+   * @param error - whatever the registry threw.
+   * @param serverName - the row the caller was writing, repeated back.
+   * @returns the wire error.
+   */
+  function mcpWriteError(error: unknown, serverName: string): RpcError {
+    if (error instanceof McpServerRevisionConflict) {
+      return {
+        code: 'mcp-revision-conflict',
+        message: error.message,
+        details: { serverName, revision: error.actual },
+      }
+    }
+    return {
+      code: 'mcp-server-invalid',
+      message: error instanceof Error ? error.message : String(error),
+      details: { serverName },
+    }
+  }
+
+  /**
+   * The revision guard a write carries, when the caller read one.
+   * @param payload - the write payload.
+   * @returns the option object the registry expects.
+   */
+  function expectedRevisionOf(payload: { expectedRevision?: number }): { expectedRevision?: number } {
+    return payload.expectedRevision === undefined ? {} : { expectedRevision: payload.expectedRevision }
+  }
+
+  /**
+   * Build the row to store from a write payload, keeping stored values the
+   * payload omits. `headers: {}` clears them; omitting the map keeps them — the
+   * same rule as an omitted credential, because a form that cannot show a token
+   * must not have to resend it.
+   * @param store - the registry, read for the existing row.
+   * @param origin - which register the write targets.
+   * @param payload - the write payload.
+   * @param userId - the owner, for a user register.
+   * @returns the row to hand to the registry.
+   */
+  function mcpWriteRow(
+    store: McpServerStore,
+    origin: McpServerOrigin,
+    payload: { serverName: string; url: string; headers?: Record<string, string>; timeoutMs?: number; toolConcurrency?: McpServerView['toolConcurrency']; enabled?: boolean; descr?: string },
+    userId?: string,
+  ): Omit<ExternalMcpServerRecord, 'updatedAt'> {
+    const existing = (origin === 'user' && userId !== undefined ? store.user(userId) : store.system())
+      .find(row => row.serverName === payload.serverName)
+    return {
+      serverName: payload.serverName,
+      url: payload.url,
+      headers: payload.headers ?? existing?.headers ?? {},
+      ...payload.timeoutMs === undefined
+        ? existing?.timeoutMs === undefined ? {} : { timeoutMs: existing.timeoutMs }
+        : { timeoutMs: payload.timeoutMs },
+      ...payload.toolConcurrency === undefined
+        ? existing?.toolConcurrency === undefined ? {} : { toolConcurrency: existing.toolConcurrency }
+        : { toolConcurrency: payload.toolConcurrency },
+      enabled: payload.enabled ?? existing?.enabled ?? true,
+      ...payload.descr === undefined
+        ? existing?.descr === undefined ? {} : { descr: existing.descr }
+        : { descr: payload.descr },
+    }
+  }
+
+  /**
+   * The configuration view of one stored row: headers reduced to their names.
+   * @param row - the stored row.
+   * @param origin - which register it came from.
+   * @param userId - the owner, for a user row.
+   * @returns the view.
+   */
+  function mcpServerView(row: ExternalMcpServerRecord, origin: McpServerOrigin, userId?: string): McpServerView {
+    const headerNames = Object.keys(row.headers)
+    return {
+      serverName: row.serverName,
+      url: row.url,
+      headerNames,
+      hasAuthorization: headerNames.some(name => /^(authorization|api-key|x-api-key|proxy-authorization)$/i.test(name)),
+      ...row.timeoutMs === undefined ? {} : { timeoutMs: row.timeoutMs },
+      ...row.toolConcurrency === undefined ? {} : { toolConcurrency: row.toolConcurrency },
+      enabled: row.enabled,
+      ...row.descr === undefined ? {} : { descr: row.descr },
+      updatedAt: row.updatedAt,
+      origin,
+      mountName: mountNameFor(origin, row.serverName, userId),
+    }
+  }
+
+  /**
+   * One row of the merged set a session would receive.
+   * @param row - the stored row.
+   * @param origin - which register it came from.
+   * @returns the view, with whether it would be mounted.
+   */
+  function mcpEffectiveView(row: ExternalMcpServerRecord, origin: McpServerOrigin, userId?: string): McpEffectiveServerView {
+    return { ...mcpServerView(row, origin, userId), mounted: row.enabled }
+  }
+
+  /**
+   * One register as a write answers with it.
+   * @param rows - the register after the write.
+   * @param revision - its revision.
+   * @param origin - which register it is.
+   * @param userId - the owner, for a user register.
+   * @returns the snapshot.
+   */
+  function mcpRegistrySnapshot(
+    rows: readonly ExternalMcpServerRecord[],
+    revision: number,
+    origin: McpServerOrigin = 'system',
+    userId?: string,
+  ): { servers: McpServerView[]; revision: number } {
+    return { servers: rows.map(row => mcpServerView(row, origin, userId)), revision }
+  }
+
+  /**
+   * Test an endpoint's connectivity without storing it. A refusal to reach the
+   * address is an answer here, not an RPC error: the caller is asking "would this
+   * work", and "not from here" is one of the answers.
+   *
+   * Whatever the endpoint says goes back to the surface — after any credential the
+   * test carried has been scrubbed out of it, because a service that echoes the
+   * authorization header in a 401 body must not thereby hand it to a browser or a
+   * log line.
+   * @param target - resolved endpoint and headers, from {@link resolveMcpProbeTarget}.
+   * @param allowPrivateHosts - the deployment's address policy, the same one writes obey.
+   * @returns what the test learned.
+   */
+  async function mcpProbe(
+    target: { url: string; headers: Record<string, string>; timeoutMs?: number },
+    allowPrivateHosts: boolean,
+  ): Promise<McpProbeView> {
+    const timeoutMs = Math.min(target.timeoutMs ?? 10_000, 30_000)
+    try {
+      const result = await probeMcpServer(target.url, target.headers, { allowPrivateHosts, timeoutMs })
+      const error = redactSecrets(result.error, target.headers)
+      return { ...result, ...error === undefined ? {} : { error }, addressAllowed: true }
+    } catch (error: unknown) {
+      // Only the address policy throws: the endpoint's own failures are reported
+      // through `ok: false` by the probe itself.
+      return {
+        ok: false,
+        toolsSupported: false,
+        latencyMs: 0,
+        error: redactSecrets(error instanceof Error ? error.message : String(error), target.headers) ?? '',
+        addressAllowed: false,
+      }
     }
   }
 
@@ -3857,6 +4113,114 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         // untouched, so a configured route of the same id starts serving again.
         await store.remove(request.payload.provider)
         return ok(request, {})
+      },
+    },
+
+    // External MCP servers: two registers over one medium. The system methods an
+    // administrator's surface calls; the `My` methods read the ambient (tenant,
+    // user) scope, so no payload can name a user it is not.
+    mcp: {
+      async systemServers(request) {
+        const store = ctx.get('mcpServers')
+        // No registry mounted: an empty register, not a failure. A surface must be
+        // able to render "nothing configured" before anything is configured.
+        if (store === undefined) return ok(request, { servers: [], revision: 0 })
+        return ok(request, mcpRegistrySnapshot(store.system(), store.revision()))
+      },
+
+      async saveServer(request) {
+        const store = ctx.get('mcpServers')
+        if (store === undefined) return err(request, noMcpRegistryError())
+        try {
+          await store.upsertSystem(mcpWriteRow(store, 'system', request.payload), expectedRevisionOf(request.payload))
+          return ok(request, mcpRegistrySnapshot(store.system(), store.revision()))
+        } catch (error: unknown) {
+          return err(request, mcpWriteError(error, request.payload.serverName))
+        }
+      },
+
+      async removeServer(request) {
+        const store = ctx.get('mcpServers')
+        if (store === undefined) return err(request, noMcpRegistryError())
+        try {
+          await store.removeSystem(request.payload.serverName, expectedRevisionOf(request.payload))
+          return ok(request, mcpRegistrySnapshot(store.system(), store.revision()))
+        } catch (error: unknown) {
+          return err(request, mcpWriteError(error, request.payload.serverName))
+        }
+      },
+
+      async myServers(request) {
+        const store = ctx.get('mcpServers')
+        if (store === undefined) return ok(request, { servers: [], system: [], revision: 0 })
+        const userId = ambientUserId()
+        if (userId === undefined) return err(request, userScopeRequiredError())
+        return ok(request, {
+          servers: store.user(userId).map(row => mcpServerView(row, 'user', userId)),
+          // The system rows are part of what this caller receives, so a user
+          // surface shows them read-only rather than pretending they do not exist.
+          system: store.system().map(row => mcpServerView(row, 'system')),
+          revision: store.revision(),
+        })
+      },
+
+      async saveMyServer(request) {
+        const store = ctx.get('mcpServers')
+        if (store === undefined) return err(request, noMcpRegistryError())
+        const userId = ambientUserId()
+        if (userId === undefined) return err(request, userScopeRequiredError())
+        try {
+          await store.upsertUser(userId, mcpWriteRow(store, 'user', request.payload, userId))
+          return ok(request, mcpRegistrySnapshot(store.user(userId), store.revision(), 'user', userId))
+        } catch (error: unknown) {
+          return err(request, mcpWriteError(error, request.payload.serverName))
+        }
+      },
+
+      async removeMyServer(request) {
+        const store = ctx.get('mcpServers')
+        if (store === undefined) return err(request, noMcpRegistryError())
+        const userId = ambientUserId()
+        if (userId === undefined) return err(request, userScopeRequiredError())
+        try {
+          await store.removeUser(userId, request.payload.serverName)
+          return ok(request, mcpRegistrySnapshot(store.user(userId), store.revision(), 'user', userId))
+        } catch (error: unknown) {
+          return err(request, mcpWriteError(error, request.payload.serverName))
+        }
+      },
+
+      async effectiveServers(request) {
+        const store = ctx.get('mcpServers')
+        if (store === undefined) return ok(request, { servers: [] })
+        const userId = ambientUserId()
+        // Disabled rows are listed with `mounted: false`: a surface showing "what
+        // would I get" must be able to explain the row that is missing.
+        const servers: McpEffectiveServerView[] = [
+          ...store.system().map(row => mcpEffectiveView(row, 'system')),
+          ...userId === undefined ? [] : store.user(userId).map(row => mcpEffectiveView(row, 'user', userId)),
+        ]
+        return ok(request, { servers })
+      },
+
+      async testConnection(request) {
+        // One method for both surfaces: the payload is the form (url + headers) or a
+        // saved row by name. Naming a row lets a list re-test it without the caller
+        // ever holding the credential again — the host replays the stored headers.
+        const store = ctx.get('mcpServers')
+        const userId = ambientUserId()
+        const saved = [
+          ...userId === undefined ? [] : store?.user(userId) ?? [],
+          ...store?.system() ?? [],
+        ]
+        try {
+          return ok(request, await mcpProbe(
+            resolveMcpProbeTarget(request.payload, saved),
+            store?.allowPrivateHosts ?? true,
+          ))
+        } catch (error: unknown) {
+          return err(request, mcpProbeError(error, request.payload.serverName))
+        }
       },
     },
 

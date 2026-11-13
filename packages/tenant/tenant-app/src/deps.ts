@@ -123,6 +123,8 @@ import type {} from '@deepseek-ai/dsh-tool-bash-persistent'
 import type {} from '@deepseek-ai/dsh-tool-ask-user'
 import type {} from '@deepseek-ai/dsh-object-store'
 import type {} from '@deepseek-ai/dsh-tenant-questions'
+import type {} from '@deepseek-ai/dsh-mcp-servers-postgres'
+import type {} from '@deepseek-ai/dsh-mcp-external'
 
 /**
  * 组合清单允许出现的全部模块名：与上面的类型导入一一对应，`SpineRow.module` 只能取这里的名字，
