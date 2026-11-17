@@ -51,6 +51,9 @@ export const RECONNECT_DEFAULTS: Required<ReconnectConfig> = Object.freeze({
 // generation is gone; timing out fails closed instead of overlapping children.
 const GENERATION_CLOSE_TIMEOUT_MS = 5_000
 
+/** How many messages of an error's cause chain a reported failure keeps. */
+const MAX_FAILURE_MESSAGES = 4
+
 /** Fully resolved reconnect policy captured at plugin load. */
 export type ResolvedReconnectPolicy = Readonly<Required<ReconnectConfig>>
 
@@ -180,6 +183,42 @@ export function startConnection(
   const liveWaiters = new Set<(generation: Client | undefined) => void>()
   /** The in-flight session recovery, shared by every call that lost the same generation. */
   let recovery: Promise<Client | undefined> | undefined
+
+  /**
+   * Collapse an error and its causes into one line. The HTTP client reports a
+   * refused socket as `fetch failed` and keeps the reason in `cause`, which is
+   * the part an operator needs to tell a refusal from a timeout or a bad host.
+   * @param error - the error a connection attempt threw.
+   * @returns the distinct messages along the cause chain, joined by `: `.
+   */
+  function describeFailure(error: unknown): string {
+    const parts: string[] = []
+    let current: unknown = error
+    while (parts.length < MAX_FAILURE_MESSAGES) {
+      if (current instanceof Error) {
+        if (current.message !== '' && !parts.includes(current.message)) parts.push(current.message)
+        current = current.cause
+        continue
+      }
+      if (typeof current === 'string' && current !== '' && !parts.includes(current)) parts.push(current)
+      break
+    }
+    return parts.length === 0 ? String(error) : parts.join(': ')
+  }
+
+  /**
+   * Publish this server's connection state so a consumer that did not open the
+   * connection can report reachability without opening a second one.
+   * @param state - whether the server's tools are live.
+   * @param error - the failure being reported; ignored for `up`.
+   */
+  function publishState(state: 'up' | 'down', error?: unknown): void {
+    ctx.emit('mcp/client-state', {
+      serverName: config.serverName,
+      state,
+      ...(state === 'down' && error !== undefined ? { error: describeFailure(error) } : {}),
+    })
+  }
 
   /** A generation may act only while it is the current one on a live plugin. */
   const isCurrent = (generation: Client): boolean => !disposed && client === generation
@@ -382,9 +421,11 @@ export function startConnection(
       if (!quiesced) {
         client = undefined
         clientClosed = undefined
+        publishState('down', error)
         ctx.logger.error(`${label}: failed generation did not close within ${GENERATION_CLOSE_TIMEOUT_MS}ms — reconnect stopped to avoid overlapping server processes; reload the plugin or restart the Host to retry`)
         return
       }
+      publishState('down', error)
       generationDown(generation)
       return
     }
@@ -395,6 +436,7 @@ export function startConnection(
     }
     if (!isCurrent(generation)) return
     connectedAt = Date.now()
+    publishState('up')
     settleWaiters(generation)
     if (failedAttempts > 0) ctx.logger.info(`${label}: reconnected and re-synced tools (attempt ${failedAttempts}/${policy.maxAttempts})`)
   }

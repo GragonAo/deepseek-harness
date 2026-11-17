@@ -457,6 +457,25 @@ describe('McpServerStore', () => {
     await expect(store.removeUser('user-1', 'a')).rejects.toThrow(/read-only/)
   })
 
+  it('keeps a reported mount outcome beside the configuration and clears it on request', async () => {
+    const ctx = new Context()
+    await ctx.plugin(MemoryStore)
+    const store = ctx.get('mcpServers')!
+    await store.upsertSystem(input())
+    expect(store.mountReport(mountNameFor('system', 'acme-tools'))).toBeUndefined()
+
+    store.reportMount(mountNameFor('system', 'acme-tools'), { state: 'failed', error: 'ECONNREFUSED', at: 'now' })
+    expect(store.mountReport(mountNameFor('system', 'acme-tools'))).toEqual({
+      state: 'failed', error: 'ECONNREFUSED', at: 'now',
+    })
+
+    // The report is observation, not configuration: the stored row is untouched.
+    expect(store.system()).toHaveLength(1)
+    store.reportMount(mountNameFor('system', 'acme-tools'), undefined)
+    expect(store.mountReport(mountNameFor('system', 'acme-tools'))).toBeUndefined()
+    await ctx.fiber.dispose()
+  })
+
   it('notifies a listener registered after an earlier change only for later changes', async () => {
     const store = await boot()
     await store.upsertSystem(input())

@@ -105,12 +105,25 @@ export interface McpMyServersValue extends McpRegistrySnapshot {
   /** The deployment-wide rows this caller also receives, read-only here. */
   system: McpServerView[]
 }
+/**
+ * What actually happened when the row was mounted, as the host observed it.
+ *
+ * `disabled` is configuration, `unknown` means nothing has attempted this row in
+ * the running process (no session has needed it yet), and `failed` carries the
+ * endpoint's refusal — the case a surface must not render as a working server.
+ */
+export type McpMountState = 'mounted' | 'failed' | 'disabled' | 'unknown'
+
 /** One row of the merged set a session would be given. */
 export interface McpEffectiveServerView extends McpServerView {
   /** Register the row came from. */
   origin: 'system' | 'user'
   /** Whether this caller would receive it (a disabled row is listed as false). */
   mounted: boolean
+  /** What the mount actually did; see {@link McpMountState}. */
+  state: McpMountState
+  /** Why the last mount attempt failed, when `state` is `failed`. */
+  lastError?: string
 }
 
 /** What a live probe learned. */
@@ -140,13 +153,14 @@ export interface McpApi {
 
   /**
    * Store one deployment-wide server, replacing any row of the same name.
-   * Live: a running session picks it up at its next step, without a restart.
+   * Live: the host starts connecting as soon as the row is stored, so a session
+   * already in flight sees the tools on its next request without a restart.
    */
   saveServer(request: RpcRequest<McpServerWrite>): Promise<RpcResponse<McpRegistrySnapshot>>
 
   /**
    * Delete one deployment-wide server; an absent name is refused, not ignored.
-   * Live: a running session drops the server's tools at its next step.
+   * Live: the tools go as soon as the row is gone, without waiting for a step.
    */
   removeServer(request: RpcRequest<{ serverName: string; expectedRevision?: number }>): Promise<RpcResponse<McpRegistrySnapshot>>
 
@@ -164,8 +178,10 @@ export interface McpApi {
 
   /**
    * The merged set this caller would be given in a new session: the system
-   * register plus their own, each row marked with where it came from and whether
-   * it would be mounted.
+   * register plus their own, each row marked with where it came from, whether it
+   * is enabled, and what the last mount attempt actually did. A row whose
+   * endpoint refuses the host reports `state: 'failed'` with the reason, so a
+   * surface never presents an unreachable server as working.
    */
   effectiveServers(request: RpcRequest<{}>): Promise<RpcResponse<{ servers: McpEffectiveServerView[] }>>
 

@@ -62,6 +62,21 @@ export interface EffectiveMcpServer extends ExternalMcpServerRecord {
   mountName: string
 }
 
+/**
+ * Outcome of the most recent mount attempt for one server, as the mounting
+ * plugin observed it. Process-local and never persisted: it describes a live
+ * connection, not stored configuration, so it is cleared when the row is removed
+ * and absent before the first attempt.
+ */
+export interface McpMountReport {
+  /** What the attempt did: the connection is up, or it was refused/failed. */
+  state: 'mounted' | 'failed'
+  /** Why the attempt failed; absent when `state` is `mounted`. */
+  error?: string
+  /** When the attempt settled, ISO-8601. */
+  at: string
+}
+
 /** Validation and quota limits a store enforces on writes. */
 export interface McpServerLimits {
   /** Maximum number of `system` rows. */

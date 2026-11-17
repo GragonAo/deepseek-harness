@@ -14,7 +14,7 @@
 import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
 import { mountNameFor, serverNameBudget } from './naming.ts'
-import type { EffectiveMcpServer, ExternalMcpServerRecord, McpServerLimits, McpServerOrigin } from './types.ts'
+import type { EffectiveMcpServer, ExternalMcpServerRecord, McpMountReport, McpServerLimits, McpServerOrigin } from './types.ts'
 import { parseServerRecord } from './validate.ts'
 
 export type * from './types.ts'
@@ -155,6 +155,39 @@ export abstract class McpServerStore extends Service {
     } finally {
       this.notifying = false
     }
+  }
+
+  /**
+   * Live mount outcomes the mounting plugin reported, keyed by mount name.
+   *
+   * This is process-local observation, not configuration: it never reaches a
+   * medium, is absent before the first attempt, and is cleared when a row goes
+   * away. It exists so a surface can tell "configured and connected" from
+   * "configured, but the endpoint refuses us" instead of offering both as
+   * mounted.
+   */
+  private readonly mountReports = new Map<string, McpMountReport>()
+
+  /**
+   * Record what the most recent mount attempt for one server did.
+   * @param mountName - the name the row mounts under, as `EffectiveMcpServer` carries it.
+   * @param report - the outcome, or undefined to forget a row that is gone.
+   */
+  reportMount(mountName: string, report: McpMountReport | undefined): void {
+    if (report === undefined) {
+      this.mountReports.delete(mountName)
+      return
+    }
+    this.mountReports.set(mountName, report)
+  }
+
+  /**
+   * What the most recent mount attempt for one server did.
+   * @param mountName - the name the row mounts under.
+   * @returns the reported outcome, or undefined when nothing mounted it yet.
+   */
+  mountReport(mountName: string): McpMountReport | undefined {
+    return this.mountReports.get(mountName)
   }
 
   /** Load one registry from the medium. */

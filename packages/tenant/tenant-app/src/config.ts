@@ -337,7 +337,7 @@ function readMcp(reader: Reader | undefined): TenantAppConfig['mcp'] {
   if (external === undefined) return {}
   external.rejectUnknown([
     'enabled', 'seedFromConfig', 'systemMaxServers', 'userMaxServers',
-    'allowPrivateHosts', 'firstStepWaitMs', 'maxServersPerAgent',
+    'allowPrivateHosts', 'toolCallTimeoutMs', 'maxServersPerAgent',
   ])
   return {
     external: {
@@ -348,7 +348,9 @@ function readMcp(reader: Reader | undefined): TenantAppConfig['mcp'] {
       // 内网地址是配 MCP 的常态（警方内网的服务几乎都在内网），所以默认放行；两份清单和
       // "测试连接"用同一个值，不会出现"测通了却存不进去"。要只许公网的部署把它关掉。
       allowPrivateHosts: external.optionalBoolean('allowPrivateHosts') ?? true,
-      firstStepWaitMs: external.optionalNonNegativeInteger('firstStepWaitMs') ?? 5000,
+      // 外部服务器按"启动时连、写库时重连、连不上就跳过"处理，回合里不等任何一次连接，
+      // 所以这里没有"第一步等多久"这种旋钮——等待本身就是要被去掉的东西。
+      toolCallTimeoutMs: external.optionalPositiveInteger('toolCallTimeoutMs') ?? 60000,
       maxServersPerAgent: external.optionalPositiveInteger('maxServersPerAgent') ?? 16,
     },
   }

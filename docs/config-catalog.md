@@ -1992,7 +1992,7 @@ export type ToolConcurrencyPolicy = 'annotations' | 'parallel' | 'exclusive'
 export type ToolConcurrencyMode = 'fixed' | 'adaptive'
 ```
 
-Source: [`packages/mcp/mcp-client/src/index.ts:136`](../packages/mcp/mcp-client/src/index.ts)
+Source: [`packages/mcp/mcp-client/src/index.ts:161`](../packages/mcp/mcp-client/src/index.ts)
 
 <a id="deepseek-aidsh-mcp-external"></a>
 
@@ -2004,16 +2004,10 @@ Requires: `mcpServers`
 /** Mounting configuration. */
 export interface Config {
   /**
-   * How long a session's first step may wait for its servers to connect before
-   * the request goes out without them (milliseconds). Keeps a slow third-party
-   * endpoint from stalling a conversation. A reconcile waits under the same
-   * budget.
-   */
-  firstStepWaitMs?: number
-  /**
-   * Maximum servers mounted into one session. A model-facing tool list is a
-   * context budget, so the tail of the effective set is dropped (with a warning)
-   * rather than silently crowding out everything else.
+   * Maximum servers one tier contributes to a session's tool list: the system
+   * list, and separately a user's own list. A model-facing tool list is a
+   * context budget, so the tail of each tier is dropped (with a warning) rather
+   * than silently crowding out everything else.
    */
   maxServersPerAgent?: number
   /** Per-tool-call timeout applied to a row that does not set its own (milliseconds). */
@@ -2021,22 +2015,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/tenant/mcp-external/src/index.ts:71`](../packages/tenant/mcp-external/src/index.ts)
-
-<a id="deepseek-aidsh-mcp-servers-postgres"></a>
-
-## `@deepseek-ai/dsh-mcp-servers-postgres`
-
-Requires: `storage` · `storageBackendServiceKey('postgres')`
-
-```ts config-catalog
-/** Plugin configuration: quotas and host policy for writes. */
-export interface Config extends McpServerLimits {}
-```
-
-Depends on: [`McpServerLimits`](../packages/mcp/mcp-servers/src/index.ts)
-
-Source: [`packages/mcp/mcp-servers-postgres/src/index.ts:56`](../packages/mcp/mcp-servers-postgres/src/index.ts)
+Source: [`packages/tenant/mcp-external/src/index.ts:79`](../packages/tenant/mcp-external/src/index.ts)
 
 <a id="deepseek-aidsh-message-feedback"></a>
 
@@ -4464,6 +4443,7 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 - `@deepseek-ai/dsh-llm` ([`packages/llm/llm/src/index.ts`](../packages/llm/llm/src/index.ts))
 - `@deepseek-ai/dsh-llm-providers-postgres` — requires `storage` · `storageBackendServiceKey('postgres')` ([`packages/llm/llm-providers-postgres/src/index.ts`](../packages/llm/llm-providers-postgres/src/index.ts))
 - `@deepseek-ai/dsh-lsp` ([`packages/lsp/lsp/src/index.ts`](../packages/lsp/lsp/src/index.ts))
+- `@deepseek-ai/dsh-mcp-servers-postgres` — requires `storage` · `storageBackendServiceKey('postgres')` ([`packages/mcp/mcp-servers-postgres/src/index.ts`](../packages/mcp/mcp-servers-postgres/src/index.ts))
 - `@deepseek-ai/dsh-schedule` — requires `agents` · `sessions` · `tools` · `sessionPersistence` ([`packages/schedule/schedule/src/index.ts`](../packages/schedule/schedule/src/index.ts))
 - `@deepseek-ai/dsh-session` ([`packages/core/session/src/index.ts`](../packages/core/session/src/index.ts))
 - `@deepseek-ai/dsh-session-checkpoint-policy` — requires `llm` · `sessionPersistence` · `sessions` · `tools` ([`packages/session/session-checkpoint-policy/src/index.ts`](../packages/session/session-checkpoint-policy/src/index.ts))

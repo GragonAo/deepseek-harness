@@ -39,7 +39,7 @@ Indirectly, through dsh-mcp-external, which mounts the rows this medium persists
 
 #### KV Cache effect
 
-No direct cost. A write changes which servers every running session mounts at its next step, and that prefix effect is described by `dsh-mcp-external`.
+No direct cost. A write re-mounts the affected servers at once, so the next request every running session assembles carries the change; that prefix effect is described by `dsh-mcp-external`.
 
 ## Known Limitations and Deferred Work
 

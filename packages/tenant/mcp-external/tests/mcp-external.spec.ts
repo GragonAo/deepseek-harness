@@ -1,6 +1,8 @@
-// External MCP mounting: which servers a session is given, under which
-// namespace, and into which scope. The connector is a test double, so these
-// cases assert the mounting decision itself without opening connections.
+// External MCP mounting: which servers are mounted, into which scope, and when.
+// The tier split is the behavior under test — the deployment-wide list connects
+// once at startup and reaches every session through the scope chain, while a
+// user's own rows mount into that session alone. The connector is a test double,
+// so these cases assert the mounting decision without opening connections.
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
@@ -9,15 +11,27 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRegistry, { defineTool } from '@deepseek-ai/dsh-tools'
-import { createScope, scopeOf } from '@deepseek-ai/dsh-scope'
-import type { Scope, ScopeKey } from '@deepseek-ai/dsh-scope'
+import { createScope } from '@deepseek-ai/dsh-scope'
+import type { Scope } from '@deepseek-ai/dsh-scope'
 import { McpServerStore, mountNameFor } from '@deepseek-ai/dsh-mcp-servers'
-import type { ExternalMcpServerRecord, StoredRegistry } from '@deepseek-ai/dsh-mcp-servers'
+import type { EffectiveMcpServer, ExternalMcpServerRecord, StoredRegistry } from '@deepseek-ai/dsh-mcp-servers'
 import type { StreamableHttpConfig } from '@deepseek-ai/dsh-mcp-client'
 import { TenantId, UserId, runWithTenant, runWithUser } from '@deepseek-ai/dsh-tenant'
 import type { Tenant } from '@deepseek-ai/dsh-tenant'
-import { apply as applyExternal, awaitMount, mountAgent, resolveConfig } from '../src/index.ts'
+import {
+  apply as applyExternal,
+  mountAgent,
+  resolveConfig,
+  systemServers,
+  toClientConfig,
+  userServers,
+} from '../src/index.ts'
 import type { MountedConnection } from '../src/index.ts'
+
+/** The tool name the real MCP client would publish for one mount. */
+function toolName(mountName: string): string {
+  return 'mcp__' + mountName + '__ping'
+}
 
 /** A registry row an operator or a user would have stored. */
 function row(overrides: Partial<ExternalMcpServerRecord> = {}): ExternalMcpServerRecord {
@@ -66,9 +80,42 @@ class MemoryStore extends McpServerStore {
   protected override async writeUser(userId: string, records: readonly ExternalMcpServerRecord[]): Promise<void> {
     this.userRecords.set(userId, [...records])
   }
+
+  /** Seed the system list before the plugin starts, the way a warm database would. */
+  seedSystem(records: ExternalMcpServerRecord[]): void {
+    this.systemRecords = [...records]
+    this.revisionCount += 1
+  }
+
+  /** Seed one user's list before the plugin starts. */
+  seedUser(userId: string, records: ExternalMcpServerRecord[]): void {
+    this.userRecords.set(userId, [...records])
+  }
+
+  /** A durable write followed by the announcement the plugin listens for. */
+  async setSystem(records: ExternalMcpServerRecord[]): Promise<void> {
+    await this.writeSystem(records)
+    this.publish()
+  }
+
+  /** A durable user write followed by the announcement. */
+  async setUser(userId: string, records: ExternalMcpServerRecord[]): Promise<void> {
+    await this.writeUser(userId, records)
+    this.publish()
+  }
+
+  /** Announce a write without changing anything. */
+  publish(): void {
+    this.notify()
+  }
 }
 
-const tenant = (id: string): Tenant => ({ id: TenantId(id), name: id, dataRoot: `/data/${id}`, workspaceRoot: `/workspace/${id}` })
+const tenant = (id: string): Tenant => ({
+  id: TenantId(id),
+  name: id,
+  dataRoot: '/data/' + id,
+  workspaceRoot: '/workspace/' + id,
+})
 
 /** Enter the ambient (tenant, user) scope session creation runs under. */
 function scoped<T>(user: string, fn: () => T): T {
@@ -78,12 +125,35 @@ function scoped<T>(user: string, fn: () => T): T {
 const cleanups: Array<() => Promise<void>> = []
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   while (cleanups.length > 0) await cleanups.pop()!()
 })
+
+/**
+ * Poll until the predicate holds.
+ *
+ * Every mount is background work by design, so a test cannot await it
+ * directly; it waits for the observable effect instead.
+ */
+async function until(predicate: () => boolean, what: string): Promise<void> {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    if (predicate()) return
+    await new Promise((resolve) => { setTimeout(resolve, 2) })
+  }
+  throw new Error('timed out waiting for ' + what)
+}
+
+/** Let already-queued background work run, without a target condition. */
+async function flush(): Promise<void> {
+  for (let tick = 0; tick < 12; tick += 1) {
+    await new Promise((resolve) => { setTimeout(resolve, 1) })
+  }
+}
 
 async function harness(
   config: Record<string, unknown> = {},
   internals: Record<string, unknown> = {},
+  seed?: (store: MemoryStore) => void,
 ): Promise<{ ctx: Context; store: MemoryStore }> {
   const ctx = new Context()
   await ctx.plugin(SessionStore)
@@ -91,14 +161,15 @@ async function harness(
   await ctx.plugin(ToolRegistry)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(MemoryStore)
-  // Cordis calls a plugin with `(ctx, config)` only, so the non-serializable
-  // connector hook is passed by invoking the plugin the way its own package's
-  // tests do: directly, on an already-active context.
+  const store = ctx.mcpServers as MemoryStore
+  seed?.(store)
+  // Cordis calls a plugin with (ctx, config) only, so the non-serializable
+  // connector hook is passed by invoking the plugin directly on an active context.
   applyExternal(ctx, config, internals)
   cleanups.push(async () => {
     await ctx.fiber.dispose()
   })
-  return { ctx, store: ctx.mcpServers as MemoryStore }
+  return { ctx, store }
 }
 
 let sessionCounter = 0
@@ -106,15 +177,13 @@ let sessionCounter = 0
 /** Register one agent whose context carries its own scope, the way the loop does. */
 function addAgent(ctx: Context): { agent: Agent; scope: Scope; dispose: () => void } {
   sessionCounter += 1
-  const session = ctx.sessions.create(SessionId(`mcp-external-agent-${String(sessionCounter)}`))
-  const scope = createScope(ctx, { externalAgent: sessionCounter })
-  const agent = {
+  const session = ctx.sessions.create(SessionId('mcp-external-agent-' + String(sessionCounter)))
+  const draft = {
     id: session.id,
     options: {},
     session,
     status: 'idle',
     acceptsNextStep: false,
-    ctx: scope.ctx,
     followup() {},
     steer() {},
     inject() {},
@@ -122,7 +191,11 @@ function addAgent(ctx: Context): { agent: Agent; scope: Scope; dispose: () => vo
     updateInbox() { return 'not-found' as const },
     cancel() {},
     whenIdle: () => Promise.resolve(),
-  } as unknown as Agent
+  }
+  // The scope key is the agent itself, exactly as the loop scopes a real session.
+  const agent = draft as unknown as Agent
+  const scope = createScope(ctx, agent)
+  Object.assign(draft, { ctx: scope.ctx })
   const unregister = ctx.agents.register(agent)
   return {
     agent,
@@ -136,26 +209,37 @@ function addAgent(ctx: Context): { agent: Agent; scope: Scope; dispose: () => vo
 
 /**
  * A connector that records what it was asked to mount and registers a tool
- * through the given context — as a plugin declaring `tools`, which is how the
- * real MCP client reaches the registry from an agent scope. It also records
+ * through the given context — as a plugin declaring the tools service, which is
+ * how the real MCP client reaches the registry from a scope. It also records
  * teardown, so a test can tell a reconcile from a fresh mount.
  */
-function recorder(failFor: string[] = []) {
+function recorder(failFor: string[] = [], unreachableFor: string[] = []) {
   const calls: Array<{ target: Context; config: StreamableHttpConfig }> = []
   const disposed: string[] = []
+  const failing = new Set(failFor)
+  const hanging = new Set<string>()
+  /** Servers whose connector activates anyway but publishes a refused connection, like the real client. */
+  const unreachable = new Set(unreachableFor)
+  /** Instance contexts of those mounts, so a test can publish the reconnect later. */
+  const unreachableCtxs = new Map<string, Context>()
   const connect = (target: Context, config: StreamableHttpConfig): MountedConnection => {
     calls.push({ target, config })
-    if (failFor.includes(config.serverName)) {
-      return Object.assign(Promise.reject(new Error(`cannot reach ${config.serverName}`)), {
+    if (failing.has(config.serverName)) {
+      return Object.assign(Promise.reject(new Error('cannot reach ' + config.serverName)), {
         dispose() {},
       })
     }
     const fiber = target.plugin({
-      name: `test-mcp-${config.serverName}`,
+      name: 'test-mcp-' + config.serverName,
       inject: ['tools'],
       apply(tools: Context) {
+        if (unreachable.has(config.serverName)) {
+          unreachableCtxs.set(config.serverName, tools)
+          tools.emit('mcp/client-state', { serverName: config.serverName, state: 'down', error: 'ECONNREFUSED' })
+          return
+        }
         tools.tools.register(defineTool({
-          name: `mcp__${config.serverName}__ping`,
+          name: toolName(config.serverName),
           description: 'ping',
           parameters: {},
           output: { schema: { type: 'string' }, render: () => [{ type: 'text' as const, text: 'pong' }] },
@@ -163,20 +247,20 @@ function recorder(failFor: string[] = []) {
         }))
       },
     })
+    const settled = hanging.has(config.serverName) ? new Promise<void>(() => {}) : fiber
     return {
-      // Thenable over the fiber's own activation, so `await connection` still
-      // means "the mount settled".
-      then: fiber.then.bind(fiber) as MountedConnection['then'],
+      ctx: fiber.ctx,
+      then: settled.then.bind(settled) as MountedConnection['then'],
       dispose: async () => {
         disposed.push(config.serverName)
         await fiber.dispose()
       },
     }
   }
-  return { calls, disposed, connect }
+  return { calls, disposed, failing, hanging, unreachableCtxs, connect }
 }
 
-/** Dispatch one step boundary, which is where a session's mounts reconcile. */
+/** Dispatch one step boundary. Mounting must not be waiting behind it. */
 async function step(ctx: Context, agent: Agent): Promise<void> {
   await agentEvents(ctx, agent).waterfall(
     'agent/pre-step',
@@ -185,316 +269,391 @@ async function step(ctx: Context, agent: Agent): Promise<void> {
   )
 }
 
-describe('mountAgent', () => {
-  it('mounts the system registry plus the session user’s own rows', async () => {
-    const { ctx, store } = await harness()
-    store.systemRecords = [row({ serverName: 'icac-bill', headers: { Authorization: 'Bearer s' }, timeoutMs: 1_000 }), row({ serverName: 'off', enabled: false })]
-    store.userRecords.set('user-1', [row({ serverName: 'mine' })])
-    const { calls, connect } = recorder()
-    const mounted = addAgent(ctx)
-    cleanups.push(async () => { mounted.dispose() })
+/** The single server a one-row registry resolves. */
+function onlyServer(store: McpServerStore): EffectiveMcpServer {
+  const [server] = systemServers(store)
+  if (server === undefined) throw new Error('expected exactly one server')
+  return server
+}
 
-    await scoped('user-1', () => mountAgent(ctx, mounted.agent, store, resolveConfig(), { connect }))
+/** The tool registry of one scope, read through the service store (no inject needed). */
+const toolsOf = (scope: Context) => scope.get('tools')!
 
-    expect(calls.map(call => call.config.serverName)).toEqual(['icac-bill', mountNameFor('user', 'mine', 'user-1')])
-    expect(calls[0]!.config).toMatchObject({
-      transport: 'streamable-http',
-      url: 'https://mcp.acme.example/rpc',
-      headers: { Authorization: 'Bearer s' },
-      toolCallTimeoutMs: 1_000,
-      failOnStartupError: false,
+const callsInto = (rec: ReturnType<typeof recorder>, target: Context): StreamableHttpConfig[] =>
+  rec.calls.filter(call => call.target === target).map(call => call.config)
+
+describe('startup mounting', () => {
+  it('mounts the system list once, in the plugin scope, not in a session', async () => {
+    const rec = recorder()
+    const { ctx } = await harness({}, { connect: rec.connect }, (store) => {
+      store.seedSystem([row({ serverName: 'alpha' }), row({ serverName: 'beta' })])
     })
-    expect(calls[0]!.target).toBe(mounted.agent.ctx)
+    await until(() => rec.calls.length === 2, 'the system tier to mount')
+    expect(rec.calls.every(call => call.target === ctx)).toBe(true)
+    expect(rec.calls.map(call => call.config.serverName).sort())
+      .toEqual([mountNameFor('system', 'alpha'), mountNameFor('system', 'beta')])
   })
 
-  it('applies the configured default timeout to a row that sets none', async () => {
-    const { ctx, store } = await harness()
-    store.systemRecords = [row()]
-    const { calls, connect } = recorder()
-    const mounted = addAgent(ctx)
-    cleanups.push(async () => { mounted.dispose() })
-
-    await scoped('user-1', () => mountAgent(ctx, mounted.agent, store, resolveConfig({ toolCallTimeoutMs: 7_000 }), { connect }))
-    expect(calls[0]!.config.toolCallTimeoutMs).toBe(7_000)
+  it('starts the mount during plugin activation instead of waiting for a session', async () => {
+    const rec = recorder()
+    const { ctx } = await harness({}, { connect: rec.connect }, (store) => {
+      store.seedSystem([row({ serverName: 'alpha' })])
+    })
+    await until(() => rec.calls.length === 1, 'the startup connection attempt')
+    expect(ctx.agents.list()).toHaveLength(0)
   })
 
-  it('carries a row’s concurrency policy through to the client', async () => {
-    const { ctx, store } = await harness()
-    store.systemRecords = [row({ toolConcurrency: { policy: 'exclusive', maxConcurrentCalls: 2 } })]
-    const { calls, connect } = recorder()
-    const mounted = addAgent(ctx)
-    cleanups.push(async () => { mounted.dispose() })
-
-    await scoped('user-1', () => mountAgent(ctx, mounted.agent, store, resolveConfig(), { connect }))
-    expect(calls[0]!.config.toolConcurrency).toEqual({ policy: 'exclusive', maxConcurrentCalls: 2 })
-  })
-
-  it('mounts only the system rows outside a user scope', async () => {
-    const { ctx, store } = await harness()
-    store.systemRecords = [row({ serverName: 'icac-bill' })]
-    store.userRecords.set('user-1', [row({ serverName: 'mine' })])
-    const { calls, connect } = recorder()
-    const mounted = addAgent(ctx)
-    cleanups.push(async () => { mounted.dispose() })
-
-    await mountAgent(ctx, mounted.agent, store, resolveConfig(), { connect })
-    expect(calls.map(call => call.config.serverName)).toEqual(['icac-bill'])
+  it('registers system tools a later session resolves through the scope chain', async () => {
+    const rec = recorder()
+    const { ctx } = await harness({}, { connect: rec.connect }, (store) => {
+      store.seedSystem([row({ serverName: 'alpha' })])
+    })
+    await until(() => rec.calls.length === 1, 'the system tier to mount')
+    await flush()
+    const session = addAgent(ctx)
+    expect(callsInto(rec, session.agent.ctx)).toHaveLength(0)
+    expect(toolsOf(session.agent.ctx).get(toolName(mountNameFor('system', 'alpha')))).toBeDefined()
+    session.dispose()
   })
 
   it('keeps one unreachable server from stopping the others', async () => {
-    const { ctx, store } = await harness()
-    store.systemRecords = [row({ serverName: 'broken' }), row({ serverName: 'working' })]
-    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
-    const { calls, connect } = recorder(['broken'])
-    const mounted = addAgent(ctx)
-    cleanups.push(async () => { mounted.dispose() })
-
-    const state = await scoped('user-1', () => mountAgent(ctx, mounted.agent, store, resolveConfig(), { connect }))
-    expect(calls.map(call => call.config.serverName)).toEqual(['broken', 'working'])
-    // The failed mount is not recorded, so a later reconcile tries it again.
-    expect([...state.mounted.keys()]).toEqual(['working'])
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('could not be mounted'))
+    const rec = recorder([mountNameFor('system', 'broken')])
+    await harness({}, { connect: rec.connect }, (store) => {
+      store.seedSystem([
+        row({ serverName: 'broken', url: 'https://broken.example/rpc' }),
+        row({ serverName: 'alpha' }),
+      ])
+    })
+    await until(() => rec.calls.length === 2, 'both servers to be attempted')
+    await flush()
+    expect(rec.calls).toHaveLength(2)
   })
 
-  it('caps the servers mounted into one session and says so', async () => {
-    const { ctx, store } = await harness()
-    store.systemRecords = [row({ serverName: 'first' }), row({ serverName: 'second' })]
-    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
-    const { calls, connect } = recorder()
-    const mounted = addAgent(ctx)
-    cleanups.push(async () => { mounted.dispose() })
+  it('publishes what each mount actually did, and forgets a row that goes away', async () => {
+    const rec = recorder([mountNameFor('system', 'broken')])
+    const { store } = await harness({}, { connect: rec.connect }, (seed) => {
+      seed.seedSystem([
+        row({ serverName: 'alpha' }),
+        row({ serverName: 'broken', url: 'https://broken.example/rpc' }),
+      ])
+    })
+    // A surface reads this to tell a connected server from one that refused us.
+    await until(() => store.mountReport(mountNameFor('system', 'alpha'))?.state === 'mounted', 'the mounted report')
+    await until(() => store.mountReport(mountNameFor('system', 'broken'))?.state === 'failed', 'the failed report')
+    expect(store.mountReport(mountNameFor('system', 'broken'))?.error).toContain('cannot reach')
 
-    await scoped('user-1', () => mountAgent(ctx, mounted.agent, store, resolveConfig({ maxServersPerAgent: 1 }), { connect }))
-    expect(calls.map(call => call.config.serverName)).toEqual(['first'])
+    await store.setSystem([row({ serverName: 'alpha' })])
+    await until(() => store.mountReport(mountNameFor('system', 'broken')) === undefined, 'the stale report to clear')
+    expect(store.mountReport(mountNameFor('system', 'alpha'))?.state).toBe('mounted')
+  })
+
+  it('reports a server that activates without connecting as failed, then follows it back up', async () => {
+    const rec = recorder([], [mountNameFor('system', 'refused')])
+    const { store } = await harness({}, { connect: rec.connect }, (seed) => {
+      seed.seedSystem([row({ serverName: 'refused', url: 'https://refused.example/rpc' })])
+    })
+    // Activation succeeds — failOnStartupError is false — so the connector's own
+    // report is the only thing that can tell this row from a live one.
+    await until(() => store.mountReport(mountNameFor('system', 'refused'))?.state === 'failed', 'the refused report')
+    expect(store.mountReport(mountNameFor('system', 'refused'))?.error).toBe('ECONNREFUSED')
+
+    rec.unreachableCtxs.get(mountNameFor('system', 'refused'))?.emit('mcp/client-state', {
+      serverName: mountNameFor('system', 'refused'),
+      state: 'up',
+    })
+    await until(() => store.mountReport(mountNameFor('system', 'refused'))?.state === 'mounted', 'the recovery report')
+    expect(store.mountReport(mountNameFor('system', 'refused'))?.error).toBeUndefined()
+  })
+
+  it('caps the system tier and says so', async () => {
+    const rec = recorder()
+    const { ctx, store } = await harness({ maxServersPerAgent: 2 }, { connect: rec.connect }, (seed) => {
+      seed.seedSystem([row({ serverName: 'alpha' }), row({ serverName: 'beta' })])
+    })
+    await until(() => rec.calls.length === 2, 'the tier to mount')
+    const warn = vi.spyOn(ctx.logger, 'warn')
+    // The cap is applied on every reconcile, so a third row reports it here even
+    // though the startup mount ran before the spy existed.
+    await store.setSystem([
+      row({ serverName: 'alpha' }),
+      row({ serverName: 'beta' }),
+      row({ serverName: 'gamma' }),
+    ])
+    await until(() => warn.mock.calls.length > 0, 'the cap warning')
+    expect(rec.calls).toHaveLength(2)
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('maxServersPerAgent'))
   })
-})
 
-describe('apply', () => {
-  it('mounts into the created agent’s own scope, invisible to another session', async () => {
-    const { calls, connect } = recorder()
-    const { ctx, store } = await harness({}, { connect })
-    store.systemRecords = [row({ serverName: 'icac-bill' })]
-    const first = scoped('user-1', () => addAgent(ctx))
-    const second = scoped('user-1', () => addAgent(ctx))
+  it('fails loud when no registry provider is loaded', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SystemPrompt, { persona: '' })
+    await ctx.plugin(ToolRegistry)
     cleanups.push(async () => {
-      first.dispose()
-      second.dispose()
+      await ctx.fiber.dispose()
     })
-
-    await vi.waitFor(() => {
-      expect(calls).toHaveLength(2)
-    })
-    const firstScope = scopeOf(first.agent.ctx)!
-    const secondScope = scopeOf(second.agent.ctx)!
-    expect(ctx.tools.get('mcp__icac-bill__ping', firstScope)).toBeDefined()
-    expect(ctx.tools.get('mcp__icac-bill__ping', secondScope)).toBeDefined()
-    // Neither agent's registration is context-global, so nothing leaks to a
-    // session that never mounted it.
-    expect(ctx.tools.get('mcp__icac-bill__ping')).toBeUndefined()
-    expect(calls[0]!.target).toBe(first.agent.ctx)
-    expect(calls[1]!.target).toBe(second.agent.ctx)
-  })
-
-  it('gives one user’s own server to that user and not to another', async () => {
-    const { calls, connect } = recorder()
-    const { ctx, store } = await harness({}, { connect })
-    store.userRecords.set('user-1', [row({ serverName: 'mine' })])
-    const mine = scoped('user-1', () => addAgent(ctx))
-    const theirs = scoped('user-2', () => addAgent(ctx))
-    cleanups.push(async () => {
-      mine.dispose()
-      theirs.dispose()
-    })
-
-    await vi.waitFor(() => {
-      expect(calls).toHaveLength(1)
-    })
-    expect(calls[0]!.config.serverName).toBe(mountNameFor('user', 'mine', 'user-1'))
-    expect(ctx.tools.get(`mcp__${mountNameFor('user', 'mine', 'user-1')}__ping`, scopeOf(mine.agent.ctx))).toBeDefined()
-    expect(ctx.tools.get(`mcp__${mountNameFor('user', 'mine', 'user-1')}__ping`, scopeOf(theirs.agent.ctx))).toBeUndefined()
-  })
-
-  it('picks up a registry change on the next session', async () => {
-    const { calls, connect } = recorder()
-    const { ctx, store } = await harness({}, { connect })
-    store.systemRecords = [row({ serverName: 'before' })]
-    const first = scoped('user-1', () => addAgent(ctx))
-    await vi.waitFor(() => {
-      expect(calls).toHaveLength(1)
-    })
-
-    store.systemRecords = [row({ serverName: 'after' })]
-    const second = scoped('user-1', () => addAgent(ctx))
-    cleanups.push(async () => {
-      first.dispose()
-      second.dispose()
-    })
-    await vi.waitFor(() => {
-      expect(calls).toHaveLength(2)
-    })
-    expect(calls.map(call => call.config.serverName)).toEqual(['before', 'after'])
+    expect(() => { applyExternal(ctx) }).toThrow(/requires ctx\.mcpServers/u)
   })
 })
 
-describe('live reconcile', () => {
-  /** One session, one mounted server, ready for a registry write. */
-  async function live(): Promise<{
-    ctx: Context
-    store: MemoryStore
-    calls: Array<{ target: Context; config: StreamableHttpConfig }>
-    disposed: string[]
-    agent: Agent
-    scope: ScopeKey
-  }> {
-    const { calls, disposed, connect } = recorder()
-    const { ctx, store } = await harness({ firstStepWaitMs: 50 }, { connect })
-    await store.upsertSystem({ serverName: 'acme-tools', url: 'https://mcp.acme.example/rpc', enabled: true })
-    const mounted = scoped('user-1', () => addAgent(ctx))
-    cleanups.push(async () => { mounted.dispose() })
-    // The first step waits for the initial mount, exactly like a real turn.
-    await step(ctx, mounted.agent)
-    return { ctx, store, calls, disposed, agent: mounted.agent, scope: scopeOf(mounted.agent.ctx)! }
-  }
+describe('per-session mounting', () => {
+  it('mounts only the session user own rows, never the system tier', async () => {
+    const rec = recorder()
+    const { ctx } = await harness({}, { connect: rec.connect }, (store) => {
+      store.seedSystem([row({ serverName: 'alpha' })])
+      store.seedUser('user-1', [row({ serverName: 'mine' })])
+    })
+    await until(() => rec.calls.length === 1, 'the system tier to mount')
+    const session = scoped('user-1', () => addAgent(ctx))
+    await until(() => callsInto(rec, session.agent.ctx).length > 0, 'the session to mount its own row')
+    expect(callsInto(rec, session.agent.ctx).map(config => config.serverName))
+      .toEqual([mountNameFor('user', 'mine', 'user-1')])
+    session.dispose()
+  })
 
-  it('adds a newly registered server to a session that is already running', async () => {
-    const { ctx, store, calls, agent, scope } = await live()
-    expect(calls.map(call => call.config.serverName)).toEqual(['acme-tools'])
+  it('mounts nothing at all for a session whose user owns no servers', async () => {
+    const rec = recorder()
+    const { ctx } = await harness({}, { connect: rec.connect }, (store) => {
+      store.seedSystem([row({ serverName: 'alpha' })])
+    })
+    await until(() => rec.calls.length === 1, 'the system tier to mount')
+    const session = scoped('user-1', () => addAgent(ctx))
+    await flush()
+    expect(callsInto(rec, session.agent.ctx)).toHaveLength(0)
+    session.dispose()
+  })
 
-    await store.upsertSystem({ serverName: 'fresh', url: 'https://mcp.fresh.example/rpc', enabled: true })
-    await step(ctx, agent)
+  it('gives one user own server to that user and not to another', async () => {
+    const rec = recorder()
+    const { ctx } = await harness({}, { connect: rec.connect }, (store) => {
+      store.seedUser('user-1', [row({ serverName: 'mine' })])
+    })
+    const first = scoped('user-1', () => addAgent(ctx))
+    await until(() => callsInto(rec, first.agent.ctx).length === 1, 'user-1 to mount its row')
+    const second = scoped('user-2', () => addAgent(ctx))
+    await flush()
+    expect(callsInto(rec, second.agent.ctx)).toHaveLength(0)
+    first.dispose()
+    second.dispose()
+  })
+})
 
-    expect(calls.map(call => call.config.serverName)).toEqual(['acme-tools', 'fresh'])
-    expect(ctx.tools.get('mcp__fresh__ping', scope)).toBeDefined()
-    // The point of reconciling at the step boundary: the next assembled request
-    // already carries the new tool.
-    const assembly = await ctx.systemPrompt.assemble({ scope })
-    expect(assembly.tools.map(tool => tool.name)).toEqual(expect.arrayContaining(['mcp__fresh__ping']))
-    // The server that was already there was not disturbed.
-    expect(ctx.tools.get('mcp__acme-tools__ping', scope)).toBeDefined()
+
+describe('no wait in the turn', () => {
+  it('does not hold the step boundary behind a server that never answers', async () => {
+    const rec = recorder()
+    rec.hanging.add(mountNameFor('system', 'slow'))
+    const { ctx } = await harness({}, { connect: rec.connect }, (store) => {
+      store.seedSystem([row({ serverName: 'slow' })])
+    })
+    const session = scoped('user-1', () => addAgent(ctx))
+    const started = Date.now()
+    await step(ctx, session.agent)
+    expect(Date.now() - started).toBeLessThan(1000)
+    session.dispose()
+  })
+
+  it('does not mount anything on a step boundary', async () => {
+    const rec = recorder()
+    const { ctx } = await harness({}, { connect: rec.connect }, (store) => {
+      store.seedSystem([row({ serverName: 'alpha' })])
+      store.seedUser('user-1', [row({ serverName: 'mine' })])
+    })
+    const session = scoped('user-1', () => addAgent(ctx))
+    await flush()
+    const before = rec.calls.length
+    await step(ctx, session.agent)
+    await step(ctx, session.agent)
+    await flush()
+    expect(rec.calls).toHaveLength(before)
+    session.dispose()
+  })
+})
+
+describe('registry writes', () => {
+  it('adds a newly registered system server without waiting for a session', async () => {
+    const rec = recorder()
+    const { ctx, store } = await harness({}, { connect: rec.connect }, (seed) => {
+      seed.seedSystem([row({ serverName: 'alpha' })])
+    })
+    await until(() => rec.calls.length === 1, 'the initial tier to mount')
+    const session = scoped('user-1', () => addAgent(ctx))
+    await store.setSystem([row({ serverName: 'alpha' }), row({ serverName: 'beta' })])
+    // No step is dispatched: the write alone must mount the new server, so the
+    // tool is there for the next request the session assembles.
+    await until(() => rec.calls.length === 2, 'the new system server to mount')
+    await until(
+      () => toolsOf(session.agent.ctx).get(toolName(mountNameFor('system', 'beta'))) !== undefined,
+      'the new tool to resolve in a live session',
+    )
+    session.dispose()
   })
 
   it('unmounts a server that is removed from the registry', async () => {
-    const { ctx, store, disposed, agent, scope } = await live()
-
-    await store.removeSystem('acme-tools')
-    await step(ctx, agent)
-
-    expect(disposed).toEqual(['acme-tools'])
-    expect(ctx.tools.get('mcp__acme-tools__ping', scope)).toBeUndefined()
+    const rec = recorder()
+    const { store } = await harness({}, { connect: rec.connect }, (seed) => {
+      seed.seedSystem([row({ serverName: 'alpha' }), row({ serverName: 'beta' })])
+    })
+    await until(() => rec.calls.length === 2, 'both servers to mount')
+    await store.setSystem([row({ serverName: 'alpha' })])
+    await until(
+      () => rec.disposed.includes(mountNameFor('system', 'beta')),
+      'the removed server to unmount',
+    )
+    expect(rec.disposed).not.toContain(mountNameFor('system', 'alpha'))
   })
 
   it('unmounts a server that an operator disables', async () => {
-    const { ctx, store, disposed, agent, scope } = await live()
-
-    await store.upsertSystem({ serverName: 'acme-tools', url: 'https://mcp.acme.example/rpc', enabled: false })
-    await step(ctx, agent)
-
-    expect(disposed).toEqual(['acme-tools'])
-    expect(ctx.tools.get('mcp__acme-tools__ping', scope)).toBeUndefined()
+    const rec = recorder()
+    const { store } = await harness({}, { connect: rec.connect }, (seed) => {
+      seed.seedSystem([row({ serverName: 'alpha' })])
+    })
+    await until(() => rec.calls.length === 1, 'the tier to mount')
+    await store.setSystem([row({ serverName: 'alpha', enabled: false })])
+    await until(
+      () => rec.disposed.includes(mountNameFor('system', 'alpha')),
+      'the disabled server to unmount',
+    )
   })
 
   it('reconnects a server whose endpoint changed, and only that one', async () => {
-    const { ctx, store, calls, disposed, agent, scope } = await live()
-    await store.upsertSystem({ serverName: 'other', url: 'https://mcp.other.example/rpc', enabled: true })
-    await step(ctx, agent)
-    const before = calls.length
-
-    await store.upsertSystem({ serverName: 'acme-tools', url: 'https://moved.acme.example/rpc', enabled: true })
-    await step(ctx, agent)
-
-    expect(disposed).toEqual(['acme-tools'])
-    expect(calls).toHaveLength(before + 1)
-    expect(calls.at(-1)!.config).toMatchObject({ serverName: 'acme-tools', url: 'https://moved.acme.example/rpc' })
-    // The untouched server kept its original mount.
-    expect(calls.filter(call => call.config.serverName === 'other')).toHaveLength(1)
-    expect(ctx.tools.get('mcp__acme-tools__ping', scope)).toBeDefined()
-  })
-
-  it('does nothing on a step with no registry write behind it', async () => {
-    const { ctx, calls, agent } = await live()
-    const before = calls.length
-    await step(ctx, agent)
-    await step(ctx, agent)
-    expect(calls).toHaveLength(before)
-  })
-
-  it('keeps a failed remount from breaking the session', async () => {
-    const { calls, disposed, connect } = recorder(['flaky'])
-    const { ctx, store } = await harness({ firstStepWaitMs: 50 }, { connect })
-    store.systemRecords = [row({ serverName: 'steady' })]
-    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
-    const mounted = scoped('user-1', () => addAgent(ctx))
-    cleanups.push(async () => { mounted.dispose() })
-    await step(ctx, mounted.agent)
-    const scope = scopeOf(mounted.agent.ctx)!
-
-    await store.upsertSystem({ serverName: 'flaky', url: 'https://mcp.flaky.example/rpc', enabled: true })
-    await step(ctx, mounted.agent)
-
-    expect(calls.map(call => call.config.serverName)).toEqual(['steady', 'flaky'])
-    expect(disposed).toEqual([])
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('could not be mounted'))
-    expect(ctx.tools.get('mcp__steady__ping', scope)).toBeDefined()
-    expect(ctx.tools.get('mcp__flaky__ping', scope)).toBeUndefined()
-  })
-
-  it('reconciles a user’s own server without touching another session', async () => {
-    const { calls, connect } = recorder()
-    const { ctx, store } = await harness({ firstStepWaitMs: 50 }, { connect })
-    const mine = scoped('user-1', () => addAgent(ctx))
-    const theirs = scoped('user-2', () => addAgent(ctx))
-    cleanups.push(async () => {
-      mine.dispose()
-      theirs.dispose()
+    const rec = recorder()
+    const { store } = await harness({}, { connect: rec.connect }, (seed) => {
+      seed.seedSystem([row({ serverName: 'alpha' }), row({ serverName: 'beta' })])
     })
-    await step(ctx, mine.agent)
-    await step(ctx, theirs.agent)
-    expect(calls).toHaveLength(0)
-
-    await store.upsertUser('user-1', { serverName: 'mine', url: 'https://mcp.mine.example/rpc', enabled: true })
-    await step(ctx, mine.agent)
-    await step(ctx, theirs.agent)
-
-    expect(calls.map(call => call.config.serverName)).toEqual([mountNameFor('user', 'mine', 'user-1')])
-    expect(calls[0]!.target).toBe(mine.agent.ctx)
-    expect(ctx.tools.get(`mcp__${mountNameFor('user', 'mine', 'user-1')}__ping`, scopeOf(theirs.agent.ctx))).toBeUndefined()
+    await until(() => rec.calls.length === 2, 'both servers to mount')
+    await store.setSystem([
+      row({ serverName: 'alpha', url: 'https://moved.acme.example/rpc' }),
+      row({ serverName: 'beta' }),
+    ])
+    await until(() => rec.disposed.includes(mountNameFor('system', 'alpha')), 'the changed server to unmount')
+    await until(() => rec.calls.length === 3, 'the changed server to remount')
+    expect(rec.disposed).not.toContain(mountNameFor('system', 'beta'))
+    expect(rec.calls.filter(call => call.config.serverName === mountNameFor('system', 'beta'))).toHaveLength(1)
   })
 
-  it('stops tracking a session once it is disposed', async () => {
-    const { ctx, store, calls, agent } = await live()
-    agentEvents(ctx, agent).emit('agent/disposed', { agent })
-    const before = calls.length
+  it('leaves every mount alone when nothing changed', async () => {
+    const rec = recorder()
+    const { store } = await harness({}, { connect: rec.connect }, (seed) => {
+      seed.seedSystem([row({ serverName: 'alpha' })])
+    })
+    await until(() => rec.calls.length === 1, 'the tier to mount')
+    await store.setSystem([row({ serverName: 'alpha' })])
+    await flush()
+    expect(rec.calls).toHaveLength(1)
+    expect(rec.disposed).toHaveLength(0)
+  })
 
-    await store.upsertSystem({ serverName: 'after-dispose', url: 'https://mcp.after.example/rpc', enabled: true })
-    await step(ctx, agent)
+  it('retries a server that failed once it is reachable again', async () => {
+    const rec = recorder([mountNameFor('system', 'alpha')])
+    const { store } = await harness({}, { connect: rec.connect }, (seed) => {
+      seed.seedSystem([row({ serverName: 'alpha' })])
+    })
+    await until(() => rec.calls.length === 1, 'the first attempt')
+    await flush()
+    rec.failing.clear()
+    await store.setSystem([row({ serverName: 'alpha' })])
+    await until(() => rec.calls.length === 2, 'the retry after the server recovered')
+  })
 
-    expect(calls).toHaveLength(before)
+  it('reconciles a user own server without touching another session', async () => {
+    const rec = recorder()
+    const { ctx, store } = await harness({}, { connect: rec.connect }, (seed) => {
+      seed.seedUser('user-1', [row({ serverName: 'mine' })])
+    })
+    const first = scoped('user-1', () => addAgent(ctx))
+    await until(() => callsInto(rec, first.agent.ctx).length === 1, 'the first session to mount')
+    const second = scoped('user-2', () => addAgent(ctx))
+    await flush()
+    await store.setUser('user-1', [row({ serverName: 'mine' }), row({ serverName: 'extra' })])
+    await until(() => callsInto(rec, first.agent.ctx).length === 2, 'the first session to pick up the new row')
+    expect(callsInto(rec, second.agent.ctx)).toHaveLength(0)
+    first.dispose()
+    second.dispose()
   })
 })
 
-describe('awaitMount', () => {
-  it('returns as soon as the mount settles', async () => {
-    let settled = false
-    await awaitMount(Promise.resolve().then(() => {
-      settled = true
-    }), 5_000)
-    expect(settled).toBe(true)
+describe('lifecycle', () => {
+  it('closes its mounts when the plugin is disposed', async () => {
+    const rec = recorder()
+    const { ctx } = await harness({}, { connect: rec.connect }, (seed) => {
+      seed.seedSystem([row({ serverName: 'alpha' })])
+    })
+    await until(() => rec.calls.length === 1, 'the tier to mount')
+    await ctx.fiber.dispose()
+    await until(
+      () => rec.disposed.includes(mountNameFor('system', 'alpha')),
+      'disposal to close the mount',
+    )
   })
 
-  it('gives up after the budget instead of stalling the step', async () => {
-    const started = Date.now()
-    await awaitMount(new Promise<void>(() => {}), 10)
-    expect(Date.now() - started).toBeGreaterThanOrEqual(9)
+  it('stops tracking a session once it is disposed', async () => {
+    const rec = recorder()
+    const { ctx, store } = await harness({}, { connect: rec.connect }, (seed) => {
+      seed.seedUser('user-1', [row({ serverName: 'mine' })])
+    })
+    const session = scoped('user-1', () => addAgent(ctx))
+    await until(() => callsInto(rec, session.agent.ctx).length === 1, 'the session to mount')
+    agentEvents(ctx, session.agent).emit('agent/disposed', { agent: session.agent })
+    await flush()
+    const before = rec.calls.length
+    await store.setUser('user-1', [row({ serverName: 'mine' }), row({ serverName: 'extra' })])
+    await flush()
+    expect(rec.calls).toHaveLength(before)
+    session.dispose()
+  })
+})
+
+describe('configuration', () => {
+  it('resolves defaults', () => {
+    expect(resolveConfig()).toEqual({ maxServersPerAgent: 16, toolCallTimeoutMs: 60_000 })
   })
 
-  it('does not leave the budget timer armed', async () => {
-    vi.useFakeTimers()
-    try {
-      await awaitMount(Promise.resolve(), 60_000)
-      expect(vi.getTimerCount()).toBe(0)
-    } finally {
-      vi.useRealTimers()
-    }
+  it('never lets a row fail an agent activation', () => {
+    const config = resolveConfig()
+    const store = { system: () => [row()] } as unknown as McpServerStore
+    expect(toClientConfig(onlyServer(store), config)).toMatchObject({
+      transport: 'streamable-http',
+      serverName: mountNameFor('system', 'acme-tools'),
+      failOnStartupError: false,
+      toolCallTimeoutMs: 60_000,
+    })
+  })
+
+  it('applies the configured default only to a row that sets no timeout', () => {
+    const config = resolveConfig({ toolCallTimeoutMs: 1234 })
+    const plain = { system: () => [row()] } as unknown as McpServerStore
+    expect(toClientConfig(onlyServer(plain), config).toolCallTimeoutMs).toBe(1234)
+    const explicit = { system: () => [row({ timeoutMs: 99 })] } as unknown as McpServerStore
+    expect(toClientConfig(onlyServer(explicit), config).toolCallTimeoutMs).toBe(99)
+  })
+
+  it('carries a row concurrency policy through to the client', () => {
+    const config = resolveConfig()
+    const store = {
+      system: () => [{ ...row(), toolConcurrency: { maxConcurrent: 3 } }],
+    } as unknown as McpServerStore
+    expect(toClientConfig(onlyServer(store), config).toolConcurrency).toEqual({ maxConcurrent: 3 })
+  })
+
+  it('gives a session nothing outside a user scope', () => {
+    const store = { user: () => [row()] } as unknown as McpServerStore
+    expect(userServers(store, undefined)).toEqual([])
+  })
+})
+
+describe('mountAgent', () => {
+  it('mounts a session own rows into that session scope', async () => {
+    const rec = recorder()
+    const { ctx } = await harness({}, { connect: rec.connect }, (seed) => {
+      seed.seedUser('user-1', [row({ serverName: 'mine' })])
+    })
+    const session = scoped('user-1', () => addAgent(ctx))
+    const state = await scoped('user-1', () => mountAgent(
+      ctx, session.agent, ctx.mcpServers, resolveConfig(), { connect: rec.connect },
+    ))
+    expect(state.userId).toBe('user-1')
+    expect([...state.book.mounted.keys()]).toEqual([mountNameFor('user', 'mine', 'user-1')])
+    session.dispose()
   })
 })

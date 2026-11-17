@@ -115,8 +115,6 @@ Requires: `tenantAuth` · `tenants` · `apiProxy`
 export interface Config {
   /** Maximum buffered request body bytes before the route answers 413. */
   maxRequestBodyBytes?: number
-  /** OIDC scope admitted to the administrative surface (skips tenant membership). */
-  adminScope?: string
   /** Serve `GET /openapi.json` and the `/swagger` UI when a `webServer` is present. */
   openapi?: boolean
   /** Serve the `/console` operator page when a `webServer` is present. */
@@ -540,7 +538,7 @@ export interface CompactionPolicyConfig {
   summarizationModel?: string
   /** Provider generation cap for summarization. Defaults to `8192`. */
   maxTokens?: number
-  /** Extra attempts after the first compaction when pressure remains above threshold. Defaults to `1`. */
+  /** Extra attempts after the first when pressure remains above threshold or a summary truncated at `maxTokens`. Defaults to `1`. */
   compactionRetries?: number
   /** Maximum retries after canonical context overflow; `0` disables recovery. Defaults to `1`. */
   maxOverflowRetries?: number
@@ -590,7 +588,13 @@ export interface Config {
   network?: string
   /** In-container tool-exec image run as each (tenant, user)'s execution world. */
   toolExecImage?: string
-  /** Container port the tool-exec server binds (published to a random host port). */
+  /**
+   * Container port the tool-exec server binds (published to a random host port).
+   *
+   * 本 provider 把它同时用在两处：`-p` 发布的容器端口，以及镜像 entrypoint 的第一个位置参数
+   * （契约是 `entry.mjs <port> [host]`，见 `docker/entry.mjs`）。命令参数由本 provider 显式传下去，
+   * 不再依赖镜像 `CMD` 里那个 8642，因此改这个值真的会改沙箱内的监听端口。
+   */
   toolExecPort?: number
   /**
    * Host address the tool-exec port is published on. Defaults to the host
@@ -613,6 +617,21 @@ export interface Config {
    * mount is skipped (single-user deployments without a cross-case directory).
    */
   usersRoot?: string
+  /**
+   * `/case`（案件工作目录）是否对沙箱只读，默认只读。
+   *
+   * 它由一个案件下的所有用户共用，业务侧通过管理接口写入；沙箱可写就意味着任何用户的沙箱都能
+   * 改到别人的输入。案件级的 `config`、`skills`、`tools` 三棵树与它平级、各自只读挂载，
+   * 松开它只松开工作目录本身。
+   */
+  caseReadOnly?: boolean
+  /**
+   * `/global`（该 subject 的跨案件目录）是否对沙箱只读，默认只读。
+   *
+   * 它盛放用户全局提交上来的文件，由业务侧写入；用户全局技能树是它的同级目录、单独只读
+   * 挂载，松开它只松开工作目录本身。
+   */
+  usersReadOnly?: boolean
   /**
    * Host directory holding the system-wide skill tree, bind-mounted read-only at
    * the same absolute path. A skill's instructions reference companion files
@@ -646,6 +665,12 @@ export interface Config {
    */
   pythonRoot?: string
   /**
+   * `/tools` 挂载的来源，供租户记录里没有 `toolsRoot` 的租户使用。来源规则是租户记录优先：
+   * `tenant.toolsRoot` 存在时用它，缺省才回落到这里。省略本字段则这类租户的沙箱没有
+   * `/tools` 挂载。（`container-k8s` 的同名字段逐字同义。）
+   */
+  toolsRoot?: string
+  /**
    * `PATH` the tool-exec image gives its commands, used when `pythonRoot` puts
    * a mounted interpreter's `bin` directory first: `docker run -e PATH=`
    * replaces the image's value instead of extending it, so the rest of PATH has
@@ -655,8 +680,32 @@ export interface Config {
    * or the directories it adds disappear from every sandbox command.
    */
   toolExecImagePath?: string
-  /** Milliseconds of exec idleness before the container is reaped. Omit to keep. */
+  /**
+   * 空闲多久后让该主体的沙箱容器自己退出，单位毫秒：provider 把它作为 `DSH_TOOL_EXEC_IDLE_MS`
+   * 注入容器，容器据此判定「没有在途请求、且距上一次请求已超过预算」后自行退出，留下一个终态
+   * 容器由下一次启动的收尸清掉（见 `tool-exec.ts`）。宿主不自己计时：它看不见别的副本对这个
+   * 沙箱的使用，而每一个请求都要到达容器。正在执行的命令不算空闲。省略则容器永不自行退出
+   * （长期不用的主体会一直占着一份容器资源）。粒度是这个主体，不是全局。
+   */
   idleTimeoutMs?: number
+  /**
+   * 沙箱内每次 exec 里**每条输出流**最多保留多少字节：provider 把它作为
+   * `DSH_TOOL_EXEC_MAX_OUTPUT_BYTES` 注入容器，容器超过上界后继续读完这条流（停止读会让子进程
+   * 在写满管道时阻塞），只保留末尾一段，并在结果里把该流标成已截断（见 `tool-exec.ts`）。
+   * 上界只需高于宿主自己的结果上界（`ctx.subprocess` 的每条流预算），它的用处是保护沙箱自己：
+   * 原始流是容器先攒满、宿主才轮得到加界的，所以一条大输出命令能撑死沙箱。调低它会连带截断那些
+   * 本来整段读得回来的大结果（整份文件读取、`run_code` 自己 64 MiB 的载荷上界），所以它要留在
+   * 部署里那些上界之上。与 `container-k8s` 的同名字段逐字同义。默认 67108864。
+   */
+  maxOutputBytes?: number
+  /**
+   * 一个已解析的沙箱句柄在多少毫秒内可以直接复用，过后先用一次 `docker port` 向运行时确认它，
+   * 并顺手刷新发布端口（容器被 OOM 杀掉、被运维删掉、daemon 重启时句柄都会失效）。
+   * 沙箱自行退出后句柄也留在缓存里，所以这个上限是唯一约束「过期端口还能用多久」的地方：
+   * 过期后第一次 exec 会失败一次，由 exec 的重试路径重建。
+   * 与 `container-k8s` 的同名字段逐字同义。默认 5000。
+   */
+  sandboxCacheTtlMs?: number
   /**
    * Milliseconds allowed for one `docker`/`podman` invocation — the same-name
    * clear, `run`, `port`, and removal all pass through it. The CLI blocks for as
@@ -914,12 +963,13 @@ Source: [`packages/extensions/cordis-host-runner/src/index.ts:88`](../packages/e
 /** Plugin config: file location and hot-reload behavior. */
 export interface Config {
   /**
-   * Credentials document path; defaults to `<tenant.dataRoot>/.credentials.yaml`
-   * inside a tenant scope, otherwise `.credentials.yaml` under the harness home.
-   * An explicit path is one fixed global document with no tenant scoping.
+   * Credentials document path; defaults to `<partition.dataRoot>/.credentials.yaml`
+   * inside an ambient request partition, otherwise `.credentials.yaml` under the
+   * harness home. An explicit path is one fixed global document with no
+   * partitioning.
    */
   path?: string
-  /** Harness home used when `path` is omitted and no tenant is in scope; defaults to `$DSH_HOME` or `~/.dsh`. */
+  /** Harness home used when `path` is omitted and no partition is ambient; defaults to `$DSH_HOME` or `~/.dsh`. */
   dshHome?: string
   /** Watch the document and hot-publish external edits; defaults to true. */
   watch?: boolean
@@ -1019,7 +1069,10 @@ Requires: `containerRuntime`
 ```ts config-catalog
 /** Plugin configuration. */
 export interface Config {
-  /** Container path relative requests resolve against (the tenant workspace mount). */
+  /**
+   * Container path relative requests resolve against when no ambient session
+   * supplies one (the tenant workspace mount).
+   */
   root?: string
 }
 ```
@@ -1203,7 +1256,9 @@ export interface Config {
    * Default project directory for sessions created without a workspace or
    * `cwd`. Absent, the Host process cwd is used. A container-backed carrier
    * (e.g. multi-tenant) pins this to the container's workspace path, since
-   * the Host cwd does not exist inside the execution container.
+   * the Host cwd does not exist inside the execution container; `{sessionId}`
+   * in the value becomes the created session's id, which is how a carrier
+   * gives each session its own directory inside that container.
    */
   cwd?: string
   /**
@@ -1234,6 +1289,15 @@ export interface Config {
    * @default true
    */
   userQuestionsProvider?: boolean
+  /**
+   * Whether a new session's project directory is created on this Host before
+   * the session starts. A container-backed carrier sets `false`: that
+   * directory lives inside the execution container, the container's sandbox
+   * creates it on the session's first command, and the Host must not create a
+   * path it does not own.
+   * @default true
+   */
+  createProjectDirectory?: boolean
 }
 ```
 
@@ -1930,7 +1994,7 @@ export type ToolConcurrencyPolicy = 'annotations' | 'parallel' | 'exclusive'
 export type ToolConcurrencyMode = 'fixed' | 'adaptive'
 ```
 
-Source: [`packages/mcp/mcp-client/src/index.ts:114`](../packages/mcp/mcp-client/src/index.ts)
+Source: [`packages/mcp/mcp-client/src/index.ts:161`](../packages/mcp/mcp-client/src/index.ts)
 
 <a id="deepseek-aidsh-mcp-external"></a>
 
@@ -1939,39 +2003,21 @@ Source: [`packages/mcp/mcp-client/src/index.ts:114`](../packages/mcp/mcp-client/
 Requires: `mcpServers`
 
 ```ts config-catalog
-/** 挂载配置。 */
+/** Mounting configuration. */
 export interface Config {
   /**
-   * 会话的第一步最多等它那些服务器连上多久，超时就先带着已有工具把请求发出去（毫秒）。
-   * 这样一条慢的第三方地址就不会把整轮对话卡住；重新核对（reconcile）用同一份预算。
-   */
-  firstStepWaitMs?: number
-  /**
-   * 单个会话最多挂多少个服务器。对模型可见的工具清单本身就是上下文预算，所以超出的
-   * 尾巴会被丢掉（并记一条警告），而不是悄悄把别的东西全挤出去。
+   * Maximum servers one tier contributes to a session's tool list: the system
+   * list, and separately a user's own list. A model-facing tool list is a
+   * context budget, so the tail of each tier is dropped (with a warning) rather
+   * than silently crowding out everything else.
    */
   maxServersPerAgent?: number
-  /** 某一行没自带超时值时，单次工具调用用的默认超时（毫秒）。 */
+  /** Per-tool-call timeout applied to a row that does not set its own (milliseconds). */
   toolCallTimeoutMs?: number
 }
 ```
 
-Source: [`packages/tenant/mcp-external/src/index.ts:71`](../packages/tenant/mcp-external/src/index.ts)
-
-<a id="deepseek-aidsh-mcp-servers-postgres"></a>
-
-## `@deepseek-ai/dsh-mcp-servers-postgres`
-
-Requires: `storage` · `storageBackendServiceKey('postgres')`
-
-```ts config-catalog
-/** 插件配置：写入时的配额与宿主策略。 */
-export interface Config extends McpServerLimits {}
-```
-
-Depends on: [`McpServerLimits`](../packages/mcp/mcp-servers/src/index.ts)
-
-Source: [`packages/mcp/mcp-servers-postgres/src/index.ts:56`](../packages/mcp/mcp-servers-postgres/src/index.ts)
+Source: [`packages/tenant/mcp-external/src/index.ts:79`](../packages/tenant/mcp-external/src/index.ts)
 
 <a id="deepseek-aidsh-message-feedback"></a>
 
@@ -2416,6 +2462,17 @@ export interface Config {
   writeEveryEvents: number
   /** Longest time (milliseconds) a dirty checkpoint may stay unwritten between mandatory points. */
   writeIntervalMs: number
+  /**
+   * How many request partitions keep their domain loaded at once. A
+   * partitioned deployment loads one table per (tenant, user) on first use —
+   * every stored checkpoint of that partition — so the count is a memory
+   * budget the deployment states: a single-partition deployment needs one, a
+   * multi-tenant host needs as many partitions as it serves concurrently.
+   * Loading another partition evicts the least recently used one and closes
+   * its domain; a later use of an evicted partition reloads it from the
+   * medium (its checkpoints are durable, so nothing is lost).
+   */
+  maxLoadedPartitions: number
 }
 ```
 
@@ -2590,7 +2647,7 @@ Source: [`packages/session/session-title-first-prompt-llm/src/index.ts:15`](../p
 ```ts config-catalog
 /** Plugin config: file location and hot-reload behavior. */
 export interface Config {
-  /** Settings document path; when set this is a fixed global file, tenant-independent. */
+  /** Settings document path; when set this is a fixed global file, independent of any request partition. */
   path?: string
   /** Harness home used when `path` is omitted; defaults to `$DSH_HOME` or `~/.dsh`. */
   dshHome?: string
@@ -3161,6 +3218,10 @@ export interface Config {
   usersRoot?: string
   /** Purge archives dataRoot/workspaceRoot under this root instead of deleting them. */
   archiveRoot?: string
+  /** Deployment-wide root holding the sandbox's shared system skill tree; mounted read-only. */
+  systemRoot?: string
+  /** Deployment-wide root of the Python environment the sandbox runs; mounted read-only. */
+  pythonRoot?: string
 }
 ```
 
@@ -3179,6 +3240,8 @@ export interface Config {
   adminScope?: string
   /** Maximum buffered request-body bytes before the carrier answers 413. */
   maxRequestBodyBytes?: number
+  /** Maximum buffered `skills.upload` request-body bytes, which carry a base64 zip. */
+  maxUploadBodyBytes?: number
   /** Serve `GET /admin/openapi.json` (the management wire reference). */
   openapi?: boolean
 }
@@ -4376,13 +4439,13 @@ Source: [`packages/workflow/workflow-worker-thread/src/index.ts:43`](../packages
 - `@deepseek-ai/dsh-credentials-postgres` — 需要 `storage` · `storageBackendServiceKey('postgres')` ([`packages/credentials/credentials-postgres/src/index.ts`](../packages/credentials/credentials-postgres/src/index.ts))
 - `@deepseek-ai/dsh-fs-e2b` — 需要 `e2b` ([`packages/e2b/fs-e2b/src/index.ts`](../packages/e2b/fs-e2b/src/index.ts))
 - `@deepseek-ai/dsh-fs-observation-policy` ([`packages/fs/fs-observation-policy/src/index.ts`](../packages/fs/fs-observation-policy/src/index.ts))
-- `@deepseek-ai/dsh-goal-round-driver` — 需要 `agents` · `goals` · `sessions` ([`packages/goal/goal-round-driver/src/index.ts`](../packages/goal/goal-round-driver/src/index.ts))
 - `@deepseek-ai/dsh-host-directory-picker-auto` — 需要 `webServer` · `loader` ([`packages/host/directory-picker-auto/src/index.ts`](../packages/host/directory-picker-auto/src/index.ts))
 - `@deepseek-ai/dsh-host-directory-picker-native` ([`packages/host/directory-picker-native/src/index.ts`](../packages/host/directory-picker-native/src/index.ts))
 - `@deepseek-ai/dsh-host-plugin-inventory` — 需要 `loader` ([`packages/host/plugin-inventory/src/index.ts`](../packages/host/plugin-inventory/src/index.ts))
 - `@deepseek-ai/dsh-llm` ([`packages/llm/llm/src/index.ts`](../packages/llm/llm/src/index.ts))
 - `@deepseek-ai/dsh-llm-providers-postgres` — 需要 `storage` · `storageBackendServiceKey('postgres')` ([`packages/llm/llm-providers-postgres/src/index.ts`](../packages/llm/llm-providers-postgres/src/index.ts))
 - `@deepseek-ai/dsh-lsp` ([`packages/lsp/lsp/src/index.ts`](../packages/lsp/lsp/src/index.ts))
+- `@deepseek-ai/dsh-mcp-servers-postgres` — 需要 `storage` · `storageBackendServiceKey('postgres')` ([`packages/mcp/mcp-servers-postgres/src/index.ts`](../packages/mcp/mcp-servers-postgres/src/index.ts))
 - `@deepseek-ai/dsh-schedule` — 需要 `agents` · `sessions` · `tools` · `sessionPersistence` ([`packages/schedule/schedule/src/index.ts`](../packages/schedule/schedule/src/index.ts))
 - `@deepseek-ai/dsh-session` ([`packages/core/session/src/index.ts`](../packages/core/session/src/index.ts))
 - `@deepseek-ai/dsh-session-checkpoint-policy` — 需要 `llm` · `sessionPersistence` · `sessions` · `tools` ([`packages/session/session-checkpoint-policy/src/index.ts`](../packages/session/session-checkpoint-policy/src/index.ts))

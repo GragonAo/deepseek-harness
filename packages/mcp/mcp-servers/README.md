@@ -29,13 +29,17 @@ This is a **static** host check. A hostname that resolves to a private address i
 
 A failed connection is an answer (`ok: false`), not an exception. Only a refused address throws, because that is a policy refusal rather than something the endpoint said. `assertProbeAddress` is exported for callers that want to check an address before any network work.
 
+## Reported mount outcomes
+
+`reportMount(mountName, report)` and `mountReport(mountName)` carry what the mounting plugin observed — `{ state: 'mounted' | 'failed', error?, at }` — beside the stored rows. This is process-local observation, never persisted and never written to a medium: it is absent before the first attempt and cleared once the row goes away. It is what lets a surface tell "configured and connected" from "configured, but the endpoint refuses us" instead of presenting both as mounted.
+
 ## Model Experience
 
 Indirectly, through dsh-mcp-external, which mounts these rows and hands them to dsh-mcp-client.
 
 #### KV Cache effect
 
-No direct cost. A registry write changes the tool list that the next step of every running session assembles, and the one-time prefix invalidation that follows is described by `dsh-mcp-external`.
+No direct cost. A registry write re-mounts the affected servers at once, so the next request every running session assembles carries the new list; the one-time prefix invalidation that follows is described by `dsh-mcp-external`.
 
 ## Known Limitations and Deferred Work
 

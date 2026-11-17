@@ -60,9 +60,34 @@ export interface McpCallMeta {
   entries(): Readonly<Record<string, string>> | undefined
 }
 
+/** One server's connection state, as a consumer outside this plugin observes it. */
+export interface McpClientStateEvent {
+  /**
+   * The mounted server name — the prefix of its tool names
+   * (`mcp__<serverName>__<tool>`).
+   */
+  serverName: string
+  /** Whether the server's tools are registered and its session is live. */
+  state: 'up' | 'down'
+  /** Why the connection is down; absent when `state` is `up`. */
+  error?: string
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     mcpCallMeta: McpCallMeta
+  }
+
+  interface Events {
+    /**
+     * One server's connection changed state. Published after every connection
+     * attempt settles and whenever a live connection is lost, so a consumer that
+     * did not open the connection can still tell reachable from refused — this
+     * is what the mounting plugin reports to a configuration surface.
+     * @param payload - which server, whether its tools are live, and why not.
+     * @mode emit
+     */
+    'mcp/client-state'(payload: McpClientStateEvent): void
   }
 }
 

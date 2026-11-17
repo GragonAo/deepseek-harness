@@ -41,10 +41,12 @@ export const mcpServerViewSchema = z.object({
   mountName: z.string(),
 }) satisfies z.ZodType<Wire<McpServerView>>
 
-/** One row of the merged effective set. */
+/** One row of the merged effective set, including what its mount actually did. */
 export const mcpEffectiveServerViewSchema = mcpServerViewSchema.extend({
   origin: z.enum(['system', 'user']),
   mounted: z.boolean(),
+  state: z.enum(['mounted', 'failed', 'disabled', 'unknown']),
+  lastError: z.string().optional(),
 }) satisfies z.ZodType<Wire<McpEffectiveServerView>>
 
 /** mcp.systemServers / mcp.saveServer / mcp.removeServer response value. */

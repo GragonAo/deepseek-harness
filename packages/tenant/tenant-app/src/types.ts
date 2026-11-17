@@ -346,9 +346,9 @@ export interface McpExternalConfig {
   readonly userMaxServers: number
   /** 系统清单是否允许指向内网/回环地址（用户自己配的永远不允许）。 */
   readonly allowPrivateHosts: boolean
-  /** 会话第一步最多等外部服务器连上多久（毫秒）。 */
-  readonly firstStepWaitMs: number
-  /** 一个会话最多挂几个外部服务器。 */
+  /** 注册表里没写超时的服务器，单次工具调用最多等多久（毫秒）。 */
+  readonly toolCallTimeoutMs: number
+  /** 系统清单、以及用户自己的清单，各最多给一个会话贡献几个服务器。 */
   readonly maxServersPerAgent: number
 }
 

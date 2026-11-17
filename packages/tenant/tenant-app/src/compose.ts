@@ -67,7 +67,7 @@ export async function createTenantApp(config: TenantAppConfig): Promise<TenantAp
     mounted.push({
       what: '组合行 mcp-external（@deepseek-ai/dsh-mcp-external）',
       fiber: await mountModule(ctx, 'mcp-external', '@deepseek-ai/dsh-mcp-external', {
-        firstStepWaitMs: external.firstStepWaitMs,
+        toolCallTimeoutMs: external.toolCallTimeoutMs,
         maxServersPerAgent: external.maxServersPerAgent,
       }),
     })

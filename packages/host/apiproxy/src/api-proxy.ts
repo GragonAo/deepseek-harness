@@ -2277,12 +2277,31 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
   /**
    * One row of the merged set a session would receive.
+   *
+   * `mounted` is configuration — would a session be given this row — while
+   * `state` is what the mount actually did. They disagree exactly when the row is
+   * enabled but its endpoint refused the host, which is the case a surface must
+   * not render as a working server.
+   * @param store - the registry, source of the reported outcome.
    * @param row - the stored row.
    * @param origin - which register it came from.
-   * @returns the view, with whether it would be mounted.
+   * @param userId - the owner, for a user row.
+   * @returns the view, with its configuration and observed mount state.
    */
-  function mcpEffectiveView(row: ExternalMcpServerRecord, origin: McpServerOrigin, userId?: string): McpEffectiveServerView {
-    return { ...mcpServerView(row, origin, userId), mounted: row.enabled }
+  function mcpEffectiveView(
+    store: McpServerStore,
+    row: ExternalMcpServerRecord,
+    origin: McpServerOrigin,
+    userId?: string,
+  ): McpEffectiveServerView {
+    const report = store.mountReport(mountNameFor(origin, row.serverName, userId))
+    const state = !row.enabled ? 'disabled' : report?.state ?? 'unknown'
+    return {
+      ...mcpServerView(row, origin, userId),
+      mounted: row.enabled,
+      state,
+      ...(state === 'failed' && report?.error !== undefined ? { lastError: report.error } : {}),
+    }
   }
 
   /**
@@ -4195,10 +4214,12 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         if (store === undefined) return ok(request, { servers: [] })
         const userId = ambientUserId()
         // Disabled rows are listed with `mounted: false`: a surface showing "what
-        // would I get" must be able to explain the row that is missing.
+        // would I get" must be able to explain the row that is missing. `state`
+        // carries the observed outcome, which disagrees with `mounted` exactly
+        // when the row is enabled but its endpoint refused the host.
         const servers: McpEffectiveServerView[] = [
-          ...store.system().map(row => mcpEffectiveView(row, 'system')),
-          ...userId === undefined ? [] : store.user(userId).map(row => mcpEffectiveView(row, 'user', userId)),
+          ...store.system().map(row => mcpEffectiveView(store, row, 'system')),
+          ...userId === undefined ? [] : store.user(userId).map(row => mcpEffectiveView(store, row, 'user', userId)),
         ]
         return ok(request, { servers })
       },

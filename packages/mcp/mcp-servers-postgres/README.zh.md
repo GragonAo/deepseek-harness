@@ -39,7 +39,7 @@ Indirectly, through dsh-mcp-external, which mounts the rows this medium persists
 
 #### KV Cache effect
 
-没有直接开销。一次写入改变的是每个运行中会话下一步挂哪些服务，那部分前缀影响由 `dsh-mcp-external` 说明。
+没有直接开销。一次写入会立刻重挂受影响的服务器，于是每个运行中会话接下来组装的请求就带着这个改动；那部分前缀影响由 `dsh-mcp-external` 说明。
 
 ## 已知限制与延后项
 

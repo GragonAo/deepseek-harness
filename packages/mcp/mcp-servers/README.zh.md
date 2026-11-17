@@ -29,13 +29,17 @@
 
 连接失败是一个**答案**（`ok: false`），不是异常。只有地址被拒才抛，因为那是策略拒绝，不是端点说的话。想在动网络之前先判地址的调用方可以直接用导出的 `assertProbeAddress`。
 
+## 上报挂载结果
+
+`reportMount(mountName, report)` 与 `mountReport(mountName)` 把挂载插件观察到的事实——`{ state: 'mounted' | 'failed', error?, at }`——记在存储条目旁边。它是进程内观察结果，不落库、不写进任何介质：首次尝试之前不存在，条目消失后清除。有了它，界面才能区分"已配置且已连上"和"已配置但端点拒绝我们"，而不是把两者都显示成已挂载。
+
 ## Model Experience
 
 Indirectly, through dsh-mcp-external, which mounts these rows and hands them to dsh-mcp-client.
 
 #### KV Cache effect
 
-没有直接开销。注册表写入改变的是每个运行中会话下一步要组装的工具清单，随之而来的那一次前缀失效由 `dsh-mcp-external` 说明。
+没有直接开销。一次注册表写入会立刻重挂受影响的服务器，于是每个运行中会话接下来组装的请求就带着新清单；随之而来的那一次前缀失效由 `dsh-mcp-external` 说明。
 
 ## 已知限制与延后项
 

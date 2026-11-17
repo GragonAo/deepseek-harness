@@ -187,9 +187,11 @@ describe('external MCP server routes', () => {
     expect(mine.servers[0]?.mountName).toContain('mine')
 
     const effective = expectOk(await asUser('u2', async () => api.mcp.effectiveServers(request({}))))
-    expect(effective.servers.map(row => [row.serverName, row.origin, row.mounted])).toEqual([
-      ['shared', 'system', true],
-      ['other', 'user', true],
+    // Nothing mounts in this process, so every enabled row is 'unknown': enabled
+    // alone never claims a live connection.
+    expect(effective.servers.map(row => [row.serverName, row.origin, row.mounted, row.state])).toEqual([
+      ['shared', 'system', true, 'unknown'],
+      ['other', 'user', true, 'unknown'],
     ])
   })
 
@@ -197,7 +199,24 @@ describe('external MCP server routes', () => {
     const { api } = await boot()
     expectOk(await api.mcp.saveServer(request({ serverName: 'off', url: 'https://off.example.com/mcp', enabled: false })))
     const value = expectOk(await api.mcp.effectiveServers(request({})))
-    expect(value.servers).toEqual([expect.objectContaining({ serverName: 'off', mounted: false })])
+    expect(value.servers).toEqual([expect.objectContaining({ serverName: 'off', mounted: false, state: 'disabled' })])
+  })
+
+  it('reports a failed mount instead of presenting the row as working', async () => {
+    const { ctx, api } = await boot()
+    expectOk(await api.mcp.saveServer(request({ serverName: 'flaky', url: 'https://flaky.example.com/mcp' })))
+    // What the mounting plugin publishes when the endpoint refuses the handshake:
+    // the row stays enabled, so 'mounted' alone would read as a working server.
+    ctx.mcpServers.reportMount('flaky', { state: 'failed', error: 'ECONNREFUSED', at: new Date().toISOString() })
+    const failed = expectOk(await api.mcp.effectiveServers(request({})))
+    expect(failed.servers).toEqual([expect.objectContaining({
+      serverName: 'flaky', mounted: true, state: 'failed', lastError: 'ECONNREFUSED',
+    })])
+
+    ctx.mcpServers.reportMount('flaky', { state: 'mounted', at: new Date().toISOString() })
+    const recovered = expectOk(await api.mcp.effectiveServers(request({})))
+    expect(recovered.servers).toEqual([expect.objectContaining({ serverName: 'flaky', state: 'mounted' })])
+    expect(recovered.servers[0]).not.toHaveProperty('lastError')
   })
 
   it('removes a row and reports the register without it', async () => {
