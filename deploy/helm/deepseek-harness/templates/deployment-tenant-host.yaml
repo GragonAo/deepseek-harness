@@ -69,12 +69,14 @@ spec:
           securityContext:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           volumeMounts:
+            {{- if .Values.config.mcpClientPatch.mount }}
             # mcp-client 补丁：把 ConfigMap 的 index.js 顶掉镜像里那一份。
             # subPath 挂单个文件，所以 ConfigMap 缺这个键时 Pod 直接起不来（不是静默跳过）。
             - name: mcp-client-patch
               mountPath: /opt/work/deepseek-harness/packages/mcp/mcp-client/lib/index.js
               subPath: index.js
               readOnly: true
+            {{- end }}
             # 工作区数据卷的宿主根。租户配置里的 /opt/dsh/* 全部基于它，改一边要改另一边。
             - name: dsh
               mountPath: /opt/dsh
@@ -103,10 +105,12 @@ spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
       terminationGracePeriodSeconds: 30
       volumes:
+        {{- if .Values.config.mcpClientPatch.mount }}
         - name: mcp-client-patch
           configMap:
             name: {{ .Values.config.mcpClientPatchConfigMap }}
             defaultMode: 420
+        {{- end }}
         - name: dsh
           persistentVolumeClaim:
             claimName: {{ .Values.persistence.workspace.name }}

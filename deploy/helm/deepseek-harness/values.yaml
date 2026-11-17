@@ -100,6 +100,14 @@ dependencies:
   # 只会把取不到的链接交给模型。
   dshPublicBaseUrl: ""
 
+  # jeecg MCP 后端的集群内基址，12 组 MCP 入口共用它（只有路径不同）。
+  # 走 Service 而不是宿主 IP NodePort：少一跳 kube-proxy，也不依赖站点对外地址。
+  mcpServerBaseUrl: http://jeecg-boot-mcp-server.jeecg.svc.cluster.local:19830
+
+  # 技能入库回调地址，tool-skill-publish 插件把技能记录 POST 到这里。
+  # token 从 DSH_SKILL_INGEST_TOKEN 环境变量取，不写进配置正文。
+  skillIngestUrl: http://jeecg-boot-system.jeecg.svc.cluster.local:8080/jeecg-boot/dsh/inner/skill/ingest
+
 # -----------------------------------------------------------------------------
 # Secret
 #
@@ -176,6 +184,10 @@ config:
     # 单仓独立部署（没有 up.sh）时置 true 并给 indexJs 全文，见 README。
     create: false
     indexJs: ""
+    # 是否把补丁挂进容器顶掉镜像自带的 mcp-client/lib/index.js。
+    # 默认 false：130 线上不挂它，用镜像里那一份。置 true 前必须确保 ConfigMap 已存在
+    # 且有 index.js 键 —— subPath 挂载缺键时 Pod 卡在 ContainerCreating，不是静默跳过。
+    mount: false
 
   tenantConfig:
     # 租户配置正文挂成 ConfigMap 还是 Secret。
@@ -195,14 +207,37 @@ config:
 # 改一半会让下发 prompt 以 model-unavailable 拒绝。
 # -----------------------------------------------------------------------------
 tenantConfig:
+  # OIDC 校验密钥。正文里是占位，Deployment 的 DSH_TENANT_OIDC_SECRET 会覆盖它；
+  # 真值放站点取值文件（gitignore），不要写进仓库。
+  auth:
+    oidcSecret: placeholder-overridden-by-env
+
   model:
     provider: newapi
     providerDisplayName: newapi
     baseUrl: https://coding.300188.cn/v1
-    id: qwen3.8-flash
-    name: Qwen3.8 Flash
-    maxTokens: 8192
-    contextWindow: 131072
+    id: deepseek-v4.1-flash
+    name: DeepSeek V4.1 Flash
+    maxTokens: 32768
+    contextWindow: 1000000
+    # 这条共享通道实测首字节 1.5-4.2 秒、抖动时 >10 秒；SDK 默认 10 秒会误判为超时。
+    timeoutMs: 180000
+    streamIdleTimeoutMs: 180000
+
+  web:
+    # 联网搜索用哪个环境变量里的 key。本站点走 newapi 通道，所以是 NEWAPI_API_KEY。
+    searchApiKeyEnv: NEWAPI_API_KEY
+
+  tools:
+    # native 只给原生 schema；both 再加 run_code 与 SDK 声明；code 只留 run_code。
+    mode: native
+    # 单个 run_code 程序在途子调用总数的天花板（按程序算，不是全宿主）。
+    maxParallelSubCalls: 30
+
+  files:
+    # 业务侧文件面能写（并能删）哪些作用域。global 放开是为了主体自己维护的跨案件资产
+    # （报告模板）；jeecg 侧 DSH_FILES_WRITABLE_SCOPES 必须是同一份清单。
+    writableScopes: [session, user, global]
 
 # -----------------------------------------------------------------------------
 # 探针

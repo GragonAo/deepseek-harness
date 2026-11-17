@@ -117,11 +117,21 @@
     "dependencies": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["dshPublicBaseUrl"],
+      "required": ["dshPublicBaseUrl", "mcpServerBaseUrl", "skillIngestUrl"],
       "properties": {
         "dshPublicBaseUrl": {
           "type": "string",
           "description": "浏览器可达的宿主地址；写进租户配置的 object-store.publicBaseUrl"
+        },
+        "mcpServerBaseUrl": {
+          "type": "string",
+          "minLength": 1,
+          "description": "jeecg MCP 后端集群内基址，12 组入口共用"
+        },
+        "skillIngestUrl": {
+          "type": "string",
+          "minLength": 1,
+          "description": "技能入库回调地址；token 走 DSH_SKILL_INGEST_TOKEN 环境变量"
         }
       }
     },
@@ -209,10 +219,11 @@
         "mcpClientPatch": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["create", "indexJs"],
+          "required": ["create", "indexJs", "mount"],
           "properties": {
             "create": { "type": "boolean" },
-            "indexJs": { "type": "string" }
+            "indexJs": { "type": "string" },
+            "mount": { "type": "boolean", "description": "是否挂进容器顶掉镜像自带 index.js；置 true 前 ConfigMap 必须已存在" }
           }
         },
         "tenantConfig": {
@@ -232,12 +243,20 @@
     "tenantConfig": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["model"],
+      "required": ["auth", "model", "web", "tools", "files"],
       "properties": {
+        "auth": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["oidcSecret"],
+          "properties": {
+            "oidcSecret": { "type": "string", "minLength": 1, "description": "正文占位；真值由 DSH_TENANT_OIDC_SECRET 覆盖" }
+          }
+        },
         "model": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["provider", "providerDisplayName", "baseUrl", "id", "name", "maxTokens", "contextWindow"],
+          "required": ["provider", "providerDisplayName", "baseUrl", "id", "name", "maxTokens", "contextWindow", "timeoutMs", "streamIdleTimeoutMs"],
           "properties": {
             "provider": { "type": "string", "minLength": 1, "description": "同时是 providers 映射的键名与 model.provider" },
             "providerDisplayName": { "type": "string", "minLength": 1 },
@@ -245,7 +264,38 @@
             "id": { "type": "string", "minLength": 1 },
             "name": { "type": "string", "minLength": 1 },
             "maxTokens": { "type": "integer", "minimum": 1 },
-            "contextWindow": { "type": "integer", "minimum": 1 }
+            "contextWindow": { "type": "integer", "minimum": 1 },
+            "timeoutMs": { "type": "integer", "minimum": 1, "description": "共享通道首字节抖动 >10 秒，SDK 默认会误判超时" },
+            "streamIdleTimeoutMs": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "web": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["searchApiKeyEnv"],
+          "properties": {
+            "searchApiKeyEnv": { "type": "string", "minLength": 1, "description": "联网搜索取哪个环境变量里的 key" }
+          }
+        },
+        "tools": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "maxParallelSubCalls"],
+          "properties": {
+            "mode": { "type": "string", "enum": ["native", "both", "code"] },
+            "maxParallelSubCalls": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "files": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["writableScopes"],
+          "properties": {
+            "writableScopes": {
+              "type": "array",
+              "items": { "type": "string", "enum": ["session", "user", "case", "global", "system"] },
+              "description": "业务侧文件面可写作用域；须与 jeecg 侧 DSH_FILES_WRITABLE_SCOPES 一致"
+            }
           }
         }
       }
