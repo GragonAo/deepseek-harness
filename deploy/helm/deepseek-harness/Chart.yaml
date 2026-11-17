@@ -1,0 +1,20 @@
+apiVersion: v2
+name: deepseek-harness
+description: DSH 多租户宿主（tenant host + 沙箱 RBAC + 工作区数据卷）—— 单仓可独立部署
+type: application
+version: 1.0.0
+appVersion: "1.0.23"
+kubeVersion: ">=1.24.0-0"
+keywords:
+  - deepseek
+  - agent
+  - harness
+  - multi-tenant
+  - sandbox
+home: https://github.com/
+maintainers:
+  - name: icac-platform
+annotations:
+  # 双轨制：本 chart 与 docker/k8s/manifests + render.sh 渲染同一批对象，
+  # 由 deploy-kit/scripts/helm-parity.sh 校验语义一致。规范见 deploy-kit/docs/helm-standard.md。
+  parity-with: docker/k8s/manifests

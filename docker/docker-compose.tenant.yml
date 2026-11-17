@@ -53,7 +53,10 @@ services:
       # CLI 在镜像里（Dockerfile.tenant 的 dockercli 阶段），socket 在这里进来。
       - /var/run/docker.sock:/var/run/docker.sock
       # 硬约束 3。
-      - ${TENANT_CONFIG_FILE:-tenant.config.yaml}:/etc/dsh/tenant.config.yaml:ro
+      # 默认值必须是 ./ 开头：Compose 把不带 ./ 或 / 的相对路径当成【命名卷】，
+      # 于是 `docker compose config` 会以 "refers to undefined volume" 失败，
+      # 而不是像预期那样挂 bind mount。./ 相对的是项目目录（本文件所在目录 docker/）。
+      - ${TENANT_CONFIG_FILE:-./tenant.config.yaml}:/etc/dsh/tenant.config.yaml:ro
       # 硬约束 2：租户数据、用户全局层、工具目录与 Python 运行时都在这棵树里。
       # 只读挂 Python 运行时不够：宿主还要按同一路径探测它，所以整棵树一起挂。
       - /opt/dsh-dev:/opt/dsh-dev

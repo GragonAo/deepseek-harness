@@ -74,6 +74,14 @@ spec:
           readOnly: true
           subPath: tenant.config.yaml
       dnsPolicy: ClusterFirst
+      # 2026-11-16：集群默认 options ndots:5，而 jeecg-boot-mcp-server.jeecg.svc.cluster.local
+      # 只有 4 个点，于是每次解析都先拼 4 个 search 域去撞 NXDOMAIN 才回退到全名。
+      # 实测单次解析 6 秒（并发 12 个时最长 31 秒），是"提问转圈没有回复"的真正原因。
+      # ndots:1 让带点的名字直接按全名查，解析降到 1-2 毫秒。
+      dnsConfig:
+        options:
+        - name: ndots
+          value: "1"
       restartPolicy: Always
       schedulerName: default-scheduler
       securityContext: {}

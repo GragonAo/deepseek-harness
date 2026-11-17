@@ -1,0 +1,130 @@
+{{- $c := .Values.names.tenantHost }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $c }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "dsh.labels" (dict "root" . "component" $c) | nindent 4 }}
+spec:
+  progressDeadlineSeconds: 600
+  replicas: {{ .Values.replicaCount.host }}
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      {{- include "dsh.selectorLabels" (dict "component" $c) | nindent 6 }}
+  strategy:
+    type: {{ .Values.strategy.type }}
+    {{- with .Values.strategy.rollingUpdate }}
+    rollingUpdate:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+  template:
+    metadata:
+      labels:
+        {{- include "dsh.labels" (dict "root" . "component" $c) | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      containers:
+        - name: tenant
+          image: {{ include "dsh.image" (dict "root" . "repo" .Values.image.tenant) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.tenant.port }}
+              name: {{ .Values.names.portName }}
+              protocol: TCP
+          env:
+            # 宿主只显式注入这一项；其余凭据整份走 envFrom。
+            # 变量名必须与租户配置里的 web.searchApiKeyEnv 一致（files/tenant-config.yaml），
+            # 改名会让 web 搜索在运行时拿不到 key。
+            - name: DEEPSEEK_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: {{ .Values.secrets.llm.key }}
+                  name: {{ .Values.secrets.llm.existingSecret }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.secrets.tenant.existingSecret }}
+          readinessProbe:
+            {{- toYaml .Values.probes.readiness | nindent 12 }}
+          {{- if .Values.probes.enabled.startup }}
+          startupProbe:
+            {{- toYaml .Values.probes.startup | nindent 12 }}
+          {{- end }}
+          {{- if .Values.probes.enabled.liveness }}
+          livenessProbe:
+            {{- toYaml .Values.probes.liveness | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources.tenant | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            # mcp-client 补丁：把 ConfigMap 的 index.js 顶掉镜像里那一份。
+            # subPath 挂单个文件，所以 ConfigMap 缺这个键时 Pod 直接起不来（不是静默跳过）。
+            - name: mcp-client-patch
+              mountPath: /opt/work/deepseek-harness/packages/mcp/mcp-client/lib/index.js
+              subPath: index.js
+              readOnly: true
+            # 工作区数据卷的宿主根。租户配置里的 /opt/dsh/* 全部基于它，改一边要改另一边。
+            - name: dsh
+              mountPath: /opt/dsh
+            - name: config
+              mountPath: /etc/dsh/tenant.config.yaml
+              subPath: tenant.config.yaml
+              readOnly: true
+      dnsPolicy: ClusterFirst
+      # 2026-11-16：集群默认 options ndots:5，而 jeecg-boot-mcp-server.jeecg.svc.cluster.local
+      # 只有 4 个点，于是每次解析都先拼 4 个 search 域去撞 NXDOMAIN 才回退到全名。
+      # 实测单次解析 6 秒（并发 12 个时最长 31 秒），是"提问转圈没有回复"的真正原因。
+      # ndots:1 让带点的名字直接按全名查，解析降到 1-2 毫秒。
+      {{- if .Values.dnsConfig.enabled }}
+      dnsConfig:
+        options:
+          - name: ndots
+            value: {{ .Values.dnsConfig.ndots | quote }}
+      {{- end }}
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # 原清单同时写了 serviceAccount 与 serviceAccountName（前者是已废弃的别名），
+      # 两个都渲染，避免双轨比对出现差异。
+      serviceAccount: {{ .Values.serviceAccount.name }}
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      terminationGracePeriodSeconds: 30
+      volumes:
+        - name: mcp-client-patch
+          configMap:
+            name: {{ .Values.config.mcpClientPatchConfigMap }}
+            defaultMode: 420
+        - name: dsh
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.workspace.name }}
+        - name: config
+          {{- include "dsh.tenantConfigVolumeSource" . | nindent 10 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

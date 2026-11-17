@@ -1,0 +1,365 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "deepseek-harness values",
+  "description": "严格模式：主要分组都关掉 additionalProperties，拼错的键在 helm template/lint 阶段就报错，而不是静默变成空值。",
+  "type": "object",
+  "required": [
+    "namespace",
+    "names",
+    "serviceAccount",
+    "image",
+    "replicaCount",
+    "middleware",
+    "sandbox",
+    "dependencies",
+    "secrets",
+    "service",
+    "persistence",
+    "config",
+    "tenantConfig",
+    "probes",
+    "resources",
+    "strategy",
+    "dnsConfig",
+    "validation"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "namespace": {
+      "type": "string",
+      "minLength": 1,
+      "description": "目标命名空间；对应站点 env 的 NS_DSH"
+    },
+    "releaseVersion": {
+      "type": "string",
+      "description": "写进 app.kubernetes.io/version；留空用 Chart.appVersion"
+    },
+    "site": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "host": { "type": "string", "description": "站点 IP/域名，只用于 NOTES 里的可点地址" }
+      }
+    },
+    "names": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tenantHost", "tenantService", "portName"],
+      "properties": {
+        "tenantHost": { "type": "string", "minLength": 1, "description": "Deployment 名，也是 app 标签值" },
+        "tenantService": { "type": "string", "minLength": 1, "description": "Service 名，被 hermes 按固定 DNS 引用" },
+        "portName": { "type": "string", "minLength": 1, "description": "端口名；probes 的 httpGet.port 指向它" }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "create"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "description": "SA/Role/RoleBinding 三者同名" },
+        "create": { "type": "boolean" }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pullPolicy", "tag", "tenant", "toolExec"],
+      "properties": {
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] },
+        "tag": { "type": "string", "description": "留空用 Chart.appVersion" },
+        "tenant": { "type": "string", "minLength": 1, "description": "宿主镜像仓库" },
+        "toolExec": { "type": "string", "minLength": 1, "description": "沙箱执行层镜像仓库（写在租户配置里）" }
+      }
+    },
+    "replicaCount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host"],
+      "properties": {
+        "host": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1,
+          "description": "多副本会互相收掉对方正在用的沙箱，只允许 1"
+        }
+      }
+    },
+    "middleware": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["database"],
+      "properties": {
+        "database": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["host", "port", "name", "user", "password"],
+          "properties": {
+            "host": { "type": "string", "minLength": 1 },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "name": { "type": "string", "minLength": 1 },
+            "user": { "type": "string", "minLength": 1 },
+            "password": { "type": "string", "description": "站点 env 的 DSH_PG_PASSWORD；空值仍可渲染" }
+          }
+        }
+      }
+    },
+    "sandbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["memoryLimit", "idleTimeoutMs", "startTimeoutMs", "toolTimeoutMs"],
+      "properties": {
+        "memoryLimit": { "type": "string", "pattern": "^[0-9]+(Mi|Gi)$" },
+        "idleTimeoutMs": { "type": "integer", "minimum": 1 },
+        "startTimeoutMs": { "type": "integer", "minimum": 1 },
+        "toolTimeoutMs": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "dependencies": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dshPublicBaseUrl"],
+      "properties": {
+        "dshPublicBaseUrl": {
+          "type": "string",
+          "description": "浏览器可达的宿主地址；写进租户配置的 object-store.publicBaseUrl"
+        }
+      }
+    },
+    "secrets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["llm", "tenant", "tenantConfig"],
+      "properties": {
+        "llm": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["existingSecret", "key", "create", "data"],
+          "properties": {
+            "existingSecret": { "type": "string", "minLength": 1 },
+            "key": { "type": "string", "minLength": 1, "description": "只取这一个 key，变量名固定 DEEPSEEK_API_KEY" },
+            "create": { "type": "boolean" },
+            "data": { "type": "object" }
+          }
+        },
+        "tenant": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["existingSecret", "create", "data"],
+          "properties": {
+            "existingSecret": { "type": "string", "minLength": 1 },
+            "create": { "type": "boolean" },
+            "data": { "type": "object" }
+          }
+        },
+        "tenantConfig": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["existingSecret", "create"],
+          "properties": {
+            "existingSecret": { "type": "string", "minLength": 1 },
+            "create": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tenant"],
+      "properties": {
+        "tenant": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "port", "nodePort"],
+          "properties": {
+            "type": { "type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "nodePort": { "type": "integer", "minimum": 30000, "maximum": 32767 }
+          }
+        }
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspace"],
+      "properties": {
+        "workspace": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "name", "accessMode", "size", "storageClass", "keepOnDelete"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "name": { "type": "string", "minLength": 1 },
+            "accessMode": { "type": "string", "enum": ["ReadWriteOnce", "ReadWriteMany", "ReadOnlyMany"] },
+            "size": { "type": "string", "pattern": "^[0-9]+(Mi|Gi|Ti)$" },
+            "storageClass": { "type": "string" },
+            "keepOnDelete": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cephRgwEndpoint", "mcpClientPatchConfigMap", "mcpClientPatch", "tenantConfig"],
+      "properties": {
+        "cephRgwEndpoint": { "type": "string" },
+        "mcpClientPatchConfigMap": { "type": "string", "minLength": 1 },
+        "mcpClientPatch": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["create", "indexJs"],
+          "properties": {
+            "create": { "type": "boolean" },
+            "indexJs": { "type": "string" }
+          }
+        },
+        "tenantConfig": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["volumeKind"],
+          "properties": {
+            "volumeKind": {
+              "type": "string",
+              "enum": ["configMap", "secret"],
+              "description": "configMap 是原清单的历史缺陷；新环境用 secret"
+            }
+          }
+        }
+      }
+    },
+    "tenantConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model"],
+      "properties": {
+        "model": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["provider", "providerDisplayName", "baseUrl", "id", "name", "maxTokens", "contextWindow"],
+          "properties": {
+            "provider": { "type": "string", "minLength": 1, "description": "同时是 providers 映射的键名与 model.provider" },
+            "providerDisplayName": { "type": "string", "minLength": 1 },
+            "baseUrl": { "type": "string", "minLength": 1 },
+            "id": { "type": "string", "minLength": 1 },
+            "name": { "type": "string", "minLength": 1 },
+            "maxTokens": { "type": "integer", "minimum": 1 },
+            "contextWindow": { "type": "integer", "minimum": 1 }
+          }
+        }
+      }
+    },
+    "probes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "readiness", "liveness", "startup"],
+      "properties": {
+        "enabled": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["startup", "liveness"],
+          "properties": {
+            "startup": { "type": "boolean" },
+            "liveness": { "type": "boolean" }
+          }
+        },
+        "readiness": { "$ref": "#/$defs/probe" },
+        "liveness": { "$ref": "#/$defs/probe" },
+        "startup": { "$ref": "#/$defs/probe" }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "description": "requests.cpu + requests.memory + limits.memory 必填；limits.cpu 刻意不配",
+      "additionalProperties": false,
+      "required": ["tenant"],
+      "properties": {
+        "tenant": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["requests", "limits"],
+          "properties": {
+            "requests": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["cpu", "memory"],
+              "properties": {
+                "cpu": { "type": ["string", "number"] },
+                "memory": { "type": "string" }
+              }
+            },
+            "limits": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["memory"],
+              "properties": {
+                "cpu": { "type": ["string", "number"] },
+                "memory": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "podSecurityContext": { "type": "object" },
+    "containerSecurityContext": { "type": "object" },
+    "strategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "rollingUpdate"],
+      "properties": {
+        "type": { "type": "string", "enum": ["RollingUpdate", "Recreate"] },
+        "rollingUpdate": { "type": "object" }
+      }
+    },
+    "dnsConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "ndots"],
+      "properties": {
+        "enabled": { "type": "boolean", "description": "关掉等于把 2026-11-16 修掉的 DNS bug 装回去" },
+        "ndots": { "type": "string", "pattern": "^[0-9]+$", "description": "必须是字符串；默认 \"1\"" }
+      }
+    },
+    "nodeSelector": { "type": "object" },
+    "tolerations": { "type": "array" },
+    "affinity": { "type": "object" },
+    "topologySpreadConstraints": { "type": "array" },
+    "podAnnotations": { "type": "object" },
+    "podLabels": { "type": "object" },
+    "extraEnv": { "type": "array" },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["failOnMissing"],
+      "properties": {
+        "failOnMissing": { "type": "boolean" }
+      }
+    }
+  },
+  "$defs": {
+    "probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["httpGet"],
+      "properties": {
+        "httpGet": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "port", "scheme"],
+          "properties": {
+            "path": { "type": "string", "minLength": 1 },
+            "port": { "type": ["string", "integer"] },
+            "scheme": { "type": "string", "enum": ["HTTP", "HTTPS"] }
+          }
+        },
+        "initialDelaySeconds": { "type": "integer", "minimum": 0 },
+        "periodSeconds": { "type": "integer", "minimum": 1 },
+        "timeoutSeconds": { "type": "integer", "minimum": 1 },
+        "successThreshold": { "type": "integer", "minimum": 1 },
+        "failureThreshold": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

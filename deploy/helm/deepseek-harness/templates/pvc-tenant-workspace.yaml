@@ -1,0 +1,23 @@
+{{- if .Values.persistence.workspace.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.persistence.workspace.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "dsh.labels" (dict "root" . "component" .Values.names.tenantHost) | nindent 4 }}
+  {{- if .Values.persistence.workspace.keepOnDelete }}
+  annotations:
+    # 案件数据不在 helm 的删除范围内：uninstall 不回收这块盘。
+    helm.sh/resource-policy: keep
+  {{- end }}
+spec:
+  accessModes:
+    - {{ .Values.persistence.workspace.accessMode }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.workspace.size }}
+  {{- with .Values.persistence.workspace.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+{{- end }}

@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.names.tenantService }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "dsh.labels" (dict "root" . "component" .Values.names.tenantHost) | nindent 4 }}
+spec:
+  type: {{ .Values.service.tenant.type }}
+  selector:
+    {{- include "dsh.selectorLabels" (dict "component" .Values.names.tenantHost) | nindent 4 }}
+  ports:
+    # 业务面 POST /api/<method>，管理面 POST /admin/<method>，接口清单在 /openapi.json。
+    - name: {{ .Values.names.portName }}
+      port: {{ .Values.service.tenant.port }}
+      {{- if and (eq .Values.service.tenant.type "NodePort") .Values.service.tenant.nodePort }}
+      nodePort: {{ .Values.service.tenant.nodePort }}
+      {{- end }}
+      targetPort: {{ .Values.names.portName }}

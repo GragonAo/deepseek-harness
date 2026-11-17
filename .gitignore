@@ -44,3 +44,11 @@ worktrees/
 .typert-*/
 # 渲染产物（render.sh 的输出）
 docker/k8s/build/
+
+# 站点真实取值（含密钥），不入库
+deploy/values/site-*.yaml
+# 样例必须入库 —— 别人靠它知道该改哪些值
+!deploy/values/site.example.yaml
+
+# 本地临时工作目录与覆盖率产物，不入库
+_work/

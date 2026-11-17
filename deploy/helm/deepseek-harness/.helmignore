@@ -1,0 +1,12 @@
+# 不进 chart 包的东西
+.DS_Store
+*.swp
+*.tmp
+.git/
+.gitignore
+# 本地站点覆盖值（含凭据，不进 git）
+site-values*.yaml
+secrets*.yaml
+# parity 与 lint 的临时产物
+build/
+tests/output/

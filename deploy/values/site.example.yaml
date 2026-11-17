@@ -1,0 +1,121 @@
+# ============================================================
+# deepseek-harness 站点取值样例
+#
+# 用法：
+#   cp deploy/values/site.example.yaml deploy/values/site-130.yaml
+#   helm upgrade --install deepseek-harness ./deploy/helm/deepseek-harness -n dsh \
+#     -f deploy/values/site-130.yaml \
+#     --set config.tenantConfig.volumeKind=secret \
+#     --set secrets.llm.data.DEEPSEEK_API_KEY=<值>
+#
+# 真实文件已被 .gitignore 排除，不要提交。
+#
+# ！！本 chart 带 values.schema.json 强校验，下面 4 个空值不填，
+# ！！helm 会在渲染前直接报错（不是等 Pod 起来才炸）：
+#      middleware.database.host
+#      tenantConfig.model.baseUrl / id / name
+#    有意为之 —— 宁可装之前失败，也别装完才发现连不上。
+# ============================================================
+
+# --- 身份 ---------------------------------------------------------
+# 独立部署时通常用自己的命名空间 dsh；与 jeecg 混布时才改成 jeecg
+namespace: "dsh"
+# 对外 IP 或域名，不含协议
+site:
+  host: ""
+
+# --- 镜像 ---------------------------------------------------------
+image:
+  # 租户宿主进程
+  tenant: dsh-tenant
+  # 沙箱里执行工具的子进程
+  toolExec: dsh-tool-exec
+  # 留空 = 用 Chart.yaml 的 appVersion
+  tag: ""
+
+replicaCount:
+  # 沙箱在本地文件系统上跑，必须 1；>1 会导致会话状态分裂
+  host: 1
+
+# --- 数据库（平台层，必须已就绪）--------------------------------
+middleware:
+  database:
+    host: ""            # 例：dsh-pg
+    port: 5432
+    name: dsh           # 库名，必须已存在
+    user: dsh
+    # password 用 --set 传
+
+# --- 沙箱 ---------------------------------------------------------
+sandbox:
+  # 单个沙箱容器的内存上限，超了会被 OOM kill
+  memoryLimit: 6Gi
+  # 会话空闲多久回收（毫秒）；15 分钟
+  idleTimeoutMs: 900000
+  # 启动超时；3 分钟
+  startTimeoutMs: 180000
+  # 单次工具调用超时；10 分钟
+  toolTimeoutMs: 600000
+
+# --- 密钥（全部用 --set 传，不写在这）----------------------------
+secrets:
+  llm:
+    # 大模型 API Key 所在 Secret；chart 只引用不创建
+    existingSecret: dsh-llm-secret
+    key: DEEPSEEK_API_KEY
+  tenant:
+    existingSecret: dsh-tenant-secret
+  tenantConfig:
+    # 租户配置文件；chart 会创建，内容来自 tenantConfig.*
+    existingSecret: dsh-tenant-config
+    create: true
+
+# --- 服务 ---------------------------------------------------------
+service:
+  tenant:
+    # ClusterIP = 只给 jeecg 后端调；NodePort = 也允许浏览器直连
+    type: ClusterIP
+    port: 8788
+    # type=NodePort 时生效，30000-32767
+    nodePort: 30788
+
+# --- 工作区存储 ---------------------------------------------------
+persistence:
+  workspace:
+    enabled: true
+    name: dsh-workspace
+    # 必须 ReadWriteMany：多个 Pod 要同时挂同一个工作区
+    # 只支持 RWO 的存储类（如 rook-ceph-block）不能用，要换成 rook-cephfs
+    accessMode: ReadWriteMany
+    size: 30Gi
+    storageClass: ""        # 例：rook-cephfs
+    # true = helm uninstall 不会删用户工作区
+    keepOnDelete: true
+
+# --- 平台对接 -----------------------------------------------------
+config:
+  # 对象存储网关地址，供大文件上传下载
+  cephRgwEndpoint: ""       # 例：http://rook-ceph-rgw-dsh-objectstore.dsh:80
+  # ！！独立部署必须设成 secret（默认 configMap 是历史遗留，会把密钥写进 ConfigMap）
+  # ！！改这一行，不要只在命令行传 —— 记在文件里才不会被忘掉
+  tenantConfig:
+    volumeKind: secret
+
+# --- 租户默认模型 ------------------------------------------------
+tenantConfig:
+  model:
+    provider: newapi
+    providerDisplayName: newapi
+    # 模型服务地址，必须能从集群内访问
+    baseUrl: ""
+    id: ""                  # 例：qwen3.8-flash
+    name: ""                # 展示名，例：Qwen3.8 Flash
+    # 单次回复上限；超过服务端限制会被截断
+    maxTokens: 8192
+    # 上下文窗口；填大了模型会报超长
+    contextWindow: 131072
+
+# --- 跨仓依赖 -----------------------------------------------------
+dependencies:
+  # DSH 自身的对外地址，用于生成回链
+  dshPublicBaseUrl: ""      # 例：http://192.168.138.130:30788

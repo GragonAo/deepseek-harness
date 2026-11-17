@@ -1,0 +1,315 @@
+# =============================================================================
+# deepseek-harness —— 租户宿主 chart
+#
+# 默认值来源：本仓 docker/k8s/vars.env + docker/k8s/manifests/ 里原清单的显式取值。
+# 站点差异不由本文件承担：deploy-kit/scripts/helm-site-map.txt 会把
+# deploy-kit/machines/<站点>.env 里的 16 个键注入到下面这些路径（清单见 README「站点注入键」）。
+#
+# 空值不等于失败：不带任何 -f / --set 也能 helm template 与 helm lint 通过
+# （helm-standard.md §三-1），缺项由 NOTES.txt 在装完后点名。
+# 想在渲染期就拒绝空值，加 --set validation.failOnMissing=true。
+# =============================================================================
+
+# 目标命名空间。原清单里所有对象都在 NS_DSH；沙箱 Pod 也落在这里（Role 是命名空间级的）。
+namespace: dsh
+
+# 写进 app.kubernetes.io/version；留空用 Chart.appVersion。
+releaseVersion: ""
+
+site:
+  # 站点 IP / 域名。只用于 NOTES 里的可点地址，不参与任何对象字段。
+  host: ""
+
+# -----------------------------------------------------------------------------
+# 资源名
+#
+# 刻意不跟随 release 名，也不提供 fullnameOverride：
+#   dsh-tenant 这个名字被 hermes-jeecg-ai 按固定 DNS 引用（<svc>.dsh.svc.cluster.local:8788），
+#   dsh-tenant-host 是 Service 的 selector 值，而 Deployment.spec.selector 不可变。
+# 改名等于换一套部署。
+# -----------------------------------------------------------------------------
+names:
+  tenantHost: dsh-tenant-host
+  tenantService: dsh-tenant
+  # Service 端口名。probes 的 httpGet.port 与 Service/containerPort 都指向它。
+  portName: api
+
+# -----------------------------------------------------------------------------
+# ServiceAccount 与 RBAC
+#
+# 宿主得自己起/收沙箱 Pod（每次会话一个），所以必须有 pods 的 create/delete。
+# 原清单里 SA / Role / RoleBinding 三者同名。create: false 时假定集群里已有同名三者。
+# -----------------------------------------------------------------------------
+serviceAccount:
+  name: dsh-host
+  create: true
+
+# -----------------------------------------------------------------------------
+# 镜像
+# -----------------------------------------------------------------------------
+image:
+  pullPolicy: IfNotPresent
+  # 留空用 Chart.appVersion。注意本仓镜像的真实 tag 形态是 ai-icac-dsh-v<版本>，
+  # 独立部署请显式给 --set image.tag=ai-icac-dsh-v1.0.23（站点部署由 TAG 注入）。
+  tag: ""
+  # 宿主进程镜像（Deployment 的容器镜像）。
+  tenant: dsh-tenant
+  # 沙箱执行层镜像。不在 Deployment 里，而是写进租户配置的 sandbox.image，
+  # 由宿主 Pod 起沙箱 Pod 时引用 —— 所以宿主的 ServiceAccount 需要 pods create/delete。
+  toolExec: dsh-tool-exec
+
+replicaCount:
+  # 宿主只跑一份。多副本会互相删对方正在用的沙箱 Pod（见 files/tenant-config.yaml 里
+  # idleTimeoutMs 的注释），所以 2 以上没有意义；schema 里限死 1。
+  host: 1
+
+# -----------------------------------------------------------------------------
+# 中间件（集群里已有，本 chart 不自建，也不建数据库）
+# -----------------------------------------------------------------------------
+middleware:
+  database:
+    # 与宿主同命名空间时用短名即可；跨命名空间写 <svc>.<ns>.svc.cluster.local。
+    host: dsh-pg
+    port: 5432
+    name: dsh
+    user: dsh
+    # 站点 env 的 DSH_PG_PASSWORD（不在 git 里）。空值仍可渲染，装上后连库失败。
+    password: ""
+
+# -----------------------------------------------------------------------------
+# 沙箱（宿主为每次会话起的执行 Pod）
+#
+# 这些值写进租户配置，由宿主在创建沙箱 Pod 时使用；宿主的 requests/limits 在 resources 段。
+# -----------------------------------------------------------------------------
+sandbox:
+  # 沙箱容器的内存上界（落成沙箱 Pod 的 limits.memory）。不配 = 无上界 = Pod 落在 BestEffort。
+  memoryLimit: 6Gi
+  # 空闲预算：注入沙箱的 DSH_TOOL_EXEC_IDLE_MS，空闲超时后由沙箱自己退出。
+  idleTimeoutMs: 900000
+  # 冷启动预算：沙箱镜像拉取 + 解释器加载。30Gi 的 RWX CephFS 首次挂载慢时这一项是瓶颈。
+  startTimeoutMs: 180000
+  # 单次工具调用预算：长任务（装依赖、跑测试）要留够。
+  toolTimeoutMs: 600000
+
+# -----------------------------------------------------------------------------
+# 跨仓 / 对外地址
+# -----------------------------------------------------------------------------
+dependencies:
+  # 浏览器可达的宿主地址，形如 http://<SITE_HOST>:<NP_TENANT>。
+  # 写进租户配置的 object-store.publicBaseUrl：生成的下载链接就是它，写错不会报错，
+  # 只会把取不到的链接交给模型。
+  dshPublicBaseUrl: ""
+
+# -----------------------------------------------------------------------------
+# Secret
+#
+# 默认都不由本 chart 创建：凭据由 deploy-kit/scripts/up.sh 在集群外建，跨仓共用一把，
+# 多个 chart 各建一份同名 Secret 会互相覆盖。例外是 tenantConfig（见下）。
+# -----------------------------------------------------------------------------
+secrets:
+  llm:
+    # 宿主只从这份 Secret 显式注入一个 key（模型 API key）。
+    existingSecret: dsh-llm-secret
+    key: DEEPSEEK_API_KEY
+    # 单仓独立部署时置 true 并给 data（键名同上）。
+    create: false
+    data: {}
+  tenant:
+    # 其余凭据整份以 envFrom 注入。
+    existingSecret: dsh-tenant-secret
+    create: false
+    data: {}
+  tenantConfig:
+    # 租户配置正文（tenant.config.yaml）挂在同名对象里。正文来自 files/tenant-config.yaml，
+    # 所以这一份默认由 chart 创建 —— 原清单也是这么做的。
+    #
+    # ⚠ 生产环境请置 create: false：正文里的 mcpServers 段要填真实 token，
+    #   每次 helm upgrade 用仓库里的正文重渲染会把它按占位内容覆盖掉。
+    existingSecret: dsh-tenant-config
+    create: true
+
+# -----------------------------------------------------------------------------
+# Service
+# -----------------------------------------------------------------------------
+service:
+  tenant:
+    # 原清单是 ClusterIP：render.sh 在渲染时会把 ClusterIP 下的 nodePort 行整段删掉
+    # （render.sh:142-143），所以 130/171 两个站点的基线 Service 没有 nodePort。
+    # 注意 deploy-kit/machines/*.env 里写的是 TENANT_SVC_TYPE（拼写与原清单的
+    # SVC_TENANT_TYPE 不同，没有任何地方消费它），因此这里保持 ClusterIP 才是基线形态。
+    # 要真开 NodePort：先把这个键在 helm-site-map.txt 里补上 SVC_TENANT_TYPE 那一行，
+    # 或直接 --set service.tenant.type=NodePort。
+    type: ClusterIP
+    port: 8788
+    # 仅当 type=NodePort 时渲染。
+    nodePort: 30788
+
+# -----------------------------------------------------------------------------
+# 工作区数据卷
+#
+# 宿主与沙箱共用一棵树：宿主的 /opt/dsh 就是沙箱的 /workspace 的宿主侧。
+# ReadWriteMany 是硬要求（同一租户的多个沙箱 Pod 同时挂）。
+# -----------------------------------------------------------------------------
+persistence:
+  workspace:
+    enabled: true
+    name: dsh-workspace
+    accessMode: ReadWriteMany
+    size: 30Gi
+    storageClass: rook-cephfs
+    # PVC 不随 helm uninstall 删除：里面是用户案件数据，删了不可恢复。
+    keepOnDelete: true
+
+# -----------------------------------------------------------------------------
+# 配置挂载
+# -----------------------------------------------------------------------------
+config:
+  # Ceph RGW（S3）端点，宿主集群内地址。
+  cephRgwEndpoint: http://rook-ceph-rgw-dsh-objectstore.rook-ceph.svc:80
+
+  # mcp-client 补丁 ConfigMap。原清单只挂不建：它由 deploy-kit/scripts/up.sh
+  # 在 MCP_CLIENT_PATCH_SRC 非空时创建（mount 成 mcp-client 的 lib/index.js）。
+  # 这个对象不存在时 Pod 会卡在 ContainerCreating（报 references non-existent config key）。
+  mcpClientPatchConfigMap: dsh-mcp-client-patch
+  mcpClientPatch:
+    # 默认 false：原清单不建它，本 chart 建了会被 helm-parity 记为多余对象。
+    # 单仓独立部署（没有 up.sh）时置 true 并给 indexJs 全文，见 README。
+    create: false
+    indexJs: ""
+
+  tenantConfig:
+    # 租户配置正文挂成 ConfigMap 还是 Secret。
+    #
+    # 默认 configMap 是**原清单的历史缺陷**，不是设计：manifests/secret-tenant-config.yaml
+    # 建的是 Secret dsh-tenant-config，而 deploy-tenant-host.yaml 的卷却写成 configMap
+    # dsh-tenant-config（130 上确实存在一份历史 ConfigMap）。两边同名不同 kind，
+    # 所以清单自带的 Secret 从来没被挂过。
+    # 为了双轨一致，默认值照抄这个缺陷；单仓独立部署必须改成 secret，
+    # 否则 Pod 起不来（找不到 ConfigMap）。详见 README「已知缺陷」。
+    volumeKind: configMap
+
+# -----------------------------------------------------------------------------
+# 租户配置正文里的模型通道（files/tenant-config.yaml）
+#
+# provider 同时是 providers 映射的键名与 model.provider 的取值，两处由同一个值渲染，
+# 改一半会让下发 prompt 以 model-unavailable 拒绝。
+# -----------------------------------------------------------------------------
+tenantConfig:
+  model:
+    provider: newapi
+    providerDisplayName: newapi
+    baseUrl: https://coding.300188.cn/v1
+    id: qwen3.8-flash
+    name: Qwen3.8 Flash
+    maxTokens: 8192
+    contextWindow: 131072
+
+# -----------------------------------------------------------------------------
+# 探针
+#
+# readiness/liveness 的取值与原清单逐字一致（helm-parity 会比对），别随手改数字。
+# startupProbe 是新增的：原清单靠 liveness 的 initialDelaySeconds: 60 兜冷启动，
+# 那意味着第 60 秒就开始判死；换成 30×10s 的启动预算，冷启动慢（RWX 首次挂载）不会被杀。
+# -----------------------------------------------------------------------------
+probes:
+  enabled:
+    startup: true
+    liveness: true
+  readiness:
+    httpGet:
+      path: /openapi.json
+      port: api
+      scheme: HTTP
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  liveness:
+    httpGet:
+      path: /openapi.json
+      port: api
+      scheme: HTTP
+    initialDelaySeconds: 60
+    periodSeconds: 30
+    timeoutSeconds: 3
+    failureThreshold: 3
+  startup:
+    httpGet:
+      path: /openapi.json
+      port: api
+      scheme: HTTP
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 30
+
+# -----------------------------------------------------------------------------
+# 资源
+#
+# 原清单是 resources: {}（等于 BestEffort，节点压力下第一批被驱逐）。
+# 下面的数字是同类 Node 服务的保守估值，**不是现网实测**：上线后用 kubectl top 校准。
+# 不配 limits.cpu：CPU 是压缩型资源，给上限只会让运行时被限流（GC 停顿被放大）。
+# -----------------------------------------------------------------------------
+resources:
+  tenant:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      memory: 2Gi
+
+# -----------------------------------------------------------------------------
+# 安全上下文
+#
+# 原清单 pod 级是 securityContext: {}。这里补的是「不加就默认更宽」的那几项；
+# 刻意不设 runAsUser/runAsNonRoot/fsGroup —— 镜像以什么用户跑、PVC 目录归谁所有
+# 都没在本仓里声明，猜一个值会让容器直接起不来或写不进 /opt/dsh。
+# readOnlyRootFilesystem 保持 false：宿主会把 sqlite、缓存写到镜像里的临时目录。
+# -----------------------------------------------------------------------------
+podSecurityContext:
+  seccompProfile:
+    type: RuntimeDefault
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  privileged: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
+# -----------------------------------------------------------------------------
+# 更新策略
+# -----------------------------------------------------------------------------
+strategy:
+  # 原清单就是 Recreate：单副本宿主不允许新旧并存（新宿主会收掉旧的沙箱），
+  # 而且 130/171 的节点 requests 接近打满，RollingUpdate 的 maxSurge 会卡在 Pending。
+  type: Recreate
+  # Recreate 下 k8s 不接受 rollingUpdate；要切 RollingUpdate 时再填这里。
+  rollingUpdate: {}
+
+# -----------------------------------------------------------------------------
+# DNS
+#
+# ⚠ ndots 必须是 "1"，这是 2026-11-16 修掉的真 bug：集群默认 ndots:5 时，
+#   postgres://dsh-pg:5432 这类型短名会先被拼成 dsh-pg.<ns>.svc.cluster.local.<ns>.svc.cluster.local…
+#   试完一圈才回落，单次解析 6–31 秒；表现是「提问转圈没有回复」，日志里看不到错误。
+#   值是字符串 "1"，不是数字 1 —— k8s 的 dnsConfig.options[].value 必须是字符串。
+# 关掉这个开关等于把那个 bug 装回去，只给「临时对比排查」用，别留在站点覆盖值里。
+# -----------------------------------------------------------------------------
+dnsConfig:
+  enabled: true
+  ndots: "1"
+
+# -----------------------------------------------------------------------------
+# 调度与额外环境变量
+# -----------------------------------------------------------------------------
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+podAnnotations: {}
+podLabels: {}
+extraEnv: []
+
+validation:
+  # true 时渲染期就因必填项为空而失败（生产流水线建议开）。
+  failOnMissing: false

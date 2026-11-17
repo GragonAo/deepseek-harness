@@ -1,0 +1,20 @@
+{{- /*
+可选：让本 chart 也建 mcp-client 补丁 ConfigMap（默认不建）。
+
+原清单只挂不建，由 deploy-kit/scripts/up.sh 在 MCP_CLIENT_PATCH_SRC 非空时创建。
+单仓独立部署（没有 up.sh）时用：
+  helm upgrade ... --set config.mcpClientPatch.create=true \
+                   --set-file config.mcpClientPatch.indexJs=/path/to/index.js
+*/}}
+{{- if and .Values.config.mcpClientPatch.create .Values.config.mcpClientPatch.indexJs }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.config.mcpClientPatchConfigMap }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "dsh.labels" (dict "root" . "component" .Values.names.tenantHost) | nindent 4 }}
+data:
+  index.js: |
+    {{- .Values.config.mcpClientPatch.indexJs | nindent 4 }}
+{{- end }}
