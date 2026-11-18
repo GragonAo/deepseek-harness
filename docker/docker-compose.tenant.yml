@@ -1,5 +1,5 @@
 # 本地开发：租户服务宿主（dsh-tenant:latest）+ 按 (租户,用户) 分区的 Postgres 后端。
-# 生产形态是 k8s，走 docker/k8s/tenant-host.yaml；这份 compose 只服务本地联调。
+# 生产形态是 k8s，走 deploy/helm/deepseek-harness/ 的 chart；这份 compose 只服务本地联调。
 #
 # 前置：先在宿主机上把两个镜像构建好，compose 自己不构建镜像。
 #

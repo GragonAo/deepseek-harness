@@ -6,7 +6,7 @@
 # 见 packages/tenant/tenant-app/src/config.ts 的覆盖表），compose 就是用这个机制给密钥的，
 # 所以这里不写真实密钥。
 #
-# 生产形态是 k8s（backend: k8s），配置随 ConfigMap 走，见 docker/k8s/tenant-host.yaml。
+# 生产形态是 k8s（backend: k8s），配置随 Secret 走，见 deploy/helm/deepseek-harness/ 的 chart。
 http:
   host: 0.0.0.0
   port: 8787

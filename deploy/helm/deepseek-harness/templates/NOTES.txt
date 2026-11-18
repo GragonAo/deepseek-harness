@@ -1,91 +1,41 @@
 {{- $missing := include "dsh.missingRequired" . -}}
-deepseek-harness 已部署到命名空间 {{ .Values.namespace }}
-镜像 tag: {{ default .Chart.AppVersion .Values.image.tag }}
-沙箱执行层镜像: {{ include "dsh.image" (dict "root" . "repo" .Values.image.toolExec) }}（写在租户配置里，不是 Deployment 的镜像）
-
+deepseek-harness 已部署到 {{ .Values.namespace }}；镜像 {{ include "dsh.image" (dict "root" . "repo" .Values.image.tenant) }}，沙箱镜像 {{ include "dsh.image" (dict "root" . "repo" .Values.image.toolExec) }}（写在租户配置里）
 {{- if $missing }}
 
-⚠ 以下必填项为空。**安装不会失败，是运行到那条路径时才暴露**：
-
+⚠ 以下必填项为空。安装不会失败，是运行到那条路径时才暴露：
 {{- range (splitList "、" $missing) }}
    · {{ . }}
 {{- end }}
 
-   填写方式（任选其一）：
-     helm upgrade {{ .Release.Name }} {{ .Chart.Name }} -n {{ .Values.namespace }} --reuse-values \
-       --set middleware.database.password='<PG 密码>' \
-       --set dependencies.dshPublicBaseUrl={{ .Values.site.host | default "<SITE_HOST>" }}
-     或把凭据放进 Secret（推荐，见下方「Secret 清单」）后置 secrets.*.existingSecret
-   想在渲染期就拒绝空值，加 --set validation.failOnMissing=true
+   补法：helm upgrade {{ .Release.Name }} {{ .Chart.Name }} -n {{ .Values.namespace }} --reuse-values \
+     --set middleware.database.password='<PG 密码>' --set dependencies.dshPublicBaseUrl='http://<站点地址>:<端口>'
+   或把凭据放进 Secret（见末尾清单）后置 secrets.*.existingSecret；渲染期就拒绝空值：--set validation.failOnMissing=true
 {{- end }}
-
 {{- if and (eq .Values.config.tenantConfig.volumeKind "configMap") .Values.secrets.tenantConfig.create }}
 
-⚠ 租户配置的挂载来源是 **ConfigMap**，但本 chart 建的是同名的 **Secret**。
-   这是原清单的历史缺陷（两份清单同名不同 kind），chart 默认照抄以保持双轨一致。
-   本集群里若没有 ConfigMap {{ .Values.namespace }}/{{ .Values.secrets.tenantConfig.existingSecret }}，
-   Pod 会卡在 ContainerCreating（报 references non-existent config key）。
-   新环境正确做法：--set config.tenantConfig.volumeKind=secret
+⚠ 租户配置卷按 **ConfigMap** 挂，但本 chart 建的是同名 **Secret**：集群里没有 ConfigMap {{ .Values.namespace }}/{{ .Values.secrets.tenantConfig.existingSecret }} 时 Pod 卡在 ContainerCreating；新环境请加 --set config.tenantConfig.volumeKind=secret。
 {{- end }}
 
-已创建：
-   Deployment/{{ .Values.names.tenantHost }} (replicas {{ .Values.replicaCount.host }}, strategy {{ .Values.strategy.type }})
-   Service/{{ .Values.names.tenantService }} ({{ .Values.service.tenant.type }}{{ if and (eq .Values.service.tenant.type "NodePort") .Values.service.tenant.nodePort }}:{{ .Values.service.tenant.nodePort }}{{ end }})
+已创建：Deployment/{{ .Values.names.tenantHost }}（replicas {{ .Values.replicaCount.host }}，strategy {{ .Values.strategy.type }}）、Service/{{ .Values.names.tenantService }}（{{ .Values.service.tenant.type }}{{ if and (eq .Values.service.tenant.type "NodePort") .Values.service.tenant.nodePort }}:{{ .Values.service.tenant.nodePort }}{{ end }}）
 {{- if .Values.persistence.workspace.enabled }}
-   PersistentVolumeClaim/{{ .Values.persistence.workspace.name }} ({{ .Values.persistence.workspace.size }}, {{ .Values.persistence.workspace.storageClass }}, {{ .Values.persistence.workspace.accessMode }})
+   PersistentVolumeClaim/{{ .Values.persistence.workspace.name }}（{{ .Values.persistence.workspace.size }}、{{ .Values.persistence.workspace.storageClass }}、{{ .Values.persistence.workspace.accessMode }}）
 {{- end }}
 {{- if .Values.serviceAccount.create }}
-   ServiceAccount / Role / RoleBinding / {{ .Values.serviceAccount.name }}（沙箱 Pod 的 create/delete + pods/exec）
+   ServiceAccount/Role/RoleBinding {{ .Values.serviceAccount.name }}（沙箱 Pod 的 create/delete + pods/exec）
 {{- end }}
 {{- if .Values.secrets.tenantConfig.create }}
-   Secret/{{ .Values.secrets.tenantConfig.existingSecret }}（租户配置正文）
+   Secret/{{ .Values.secrets.tenantConfig.existingSecret }}（租户配置正文，来自 files/tenant-config.yaml）
 {{- end }}
 {{- if .Values.config.mcpClientPatch.create }}
    ConfigMap/{{ .Values.config.mcpClientPatchConfigMap }}（mcp-client 补丁）
 {{- end }}
 
-── 装完请核对 ────────────────────────────────────────────────────────────────
+装完请核对：
+   1) PostgreSQL {{ .Values.middleware.database.host }}:{{ .Values.middleware.database.port }}（库 {{ .Values.middleware.database.name }} / 用户 {{ .Values.middleware.database.user }}）先在集群里可用；启不来先看 kubectl -n {{ .Values.namespace }} get endpoints {{ .Values.middleware.database.host }}
+   2) {{ .Values.namespace }}/{{ .Values.persistence.workspace.name }} 里要有 .dsh/system、.dsh/pyenv、.dsh/tools、.dsh/users、.dsh/tenants、.dsh/archive（chart 只建 PVC；缺 pyenv 时沙箱第一次跑工具才失败）
+   3) 别动 ndots：必须是字符串 "1"（当前 {{ .Values.dnsConfig.ndots }}，开关 dnsConfig.enabled={{ .Values.dnsConfig.enabled }}）
+   看状态：kubectl -n {{ .Values.namespace }} rollout status deploy/{{ .Values.names.tenantHost }}；logs -f deploy/{{ .Values.names.tenantHost }}
 
-1) 中间件与镜像先在集群里可用（本 chart 不自建）：
-     PostgreSQL  {{ .Values.middleware.database.host }}:{{ .Values.middleware.database.port }}（库 {{ .Values.middleware.database.name }} / 用户 {{ .Values.middleware.database.user }}）
-                 启不来时最关键的一条：`kubectl -n {{ .Values.namespace }} get endpoints {{ .Values.middleware.database.host }}`
-     宿主镜像    {{ include "dsh.image" (dict "root" . "repo" .Values.image.tenant) }}
-     沙箱镜像    见上面「沙箱执行层镜像」（k8s 会回退到 Docker Hub，部署网络通常拉不到）
-
-2) 工作区 PVC 里要有沙箱运行时的目录（chart 不建目录，只建 PVC）：
-     {{ .Values.namespace }}/{{ .Values.persistence.workspace.name }} 下的
-       .dsh/system   .dsh/pyenv（宿主的 Python 解释器与依赖，沙箱镜像里没有）
-       .dsh/tools    .dsh/users   .dsh/tenants   .dsh/archive
-     缺 pyenv 时沙箱第一次跑工具才失败，宿主本身是 Running。
-
-3) 沙箱 Pod 与本宿主同命名空间（{{ .Values.namespace }}），靠 ServiceAccount
-   {{ .Values.serviceAccount.name }} 的 Role 授权；Role 是命名空间级的，不能跨 ns。
-
-4) DNS 那条别动：dnsConfig.options 里的 ndots 必须是 "1"。
-   集群默认 ndots:5 时短名解析要 6–31 秒，表现为「提问转圈没有回复」，日志里没有任何错误。
-   当前取值：{{ .Values.dnsConfig.ndots }}（开关 dnsConfig.enabled={{ .Values.dnsConfig.enabled }}）
-
-5) 看状态：
-     kubectl -n {{ .Values.namespace }} rollout status deploy/{{ .Values.names.tenantHost }}
-     kubectl -n {{ .Values.namespace }} logs -f deploy/{{ .Values.names.tenantHost }}
-     kubectl -n {{ .Values.namespace }} get pod -o wide
-
-── Secret 清单 ──────────────────────────────────────────────────────────────
-
-   secrets.tenant.existingSecret = {{ .Values.secrets.tenant.existingSecret }}（envFrom 整份注入）
-     DSH_TENANT_OIDC_SECRET     与签发方共享的 token 密钥；缺失表现为第一次管理面调用 INVALID_TOKEN
-     NEWAPI_API_KEY             模型 key（租户配置里 apiKeyEnv 指向它）
-     DSH_OBJECT_ACCESS_KEY      Ceph RGW 用户 access key
-     DSH_OBJECT_SECRET_KEY      Ceph RGW 用户 secret key
-
-   secrets.llm.existingSecret = {{ .Values.secrets.llm.existingSecret }}（只取一个 key）
-     {{ .Values.secrets.llm.key }}                 模型 key，同时是租户配置里的 web.searchApiKeyEnv
-
-   secrets.tenantConfig.existingSecret = {{ .Values.secrets.tenantConfig.existingSecret }}
-     键 tenant.config.yaml（正文来自本 chart 的 files/tenant-config.yaml）
-
-── 双轨制提醒 ────────────────────────────────────────────────────────────────
-
-本 chart 与 docker/k8s/manifests/ + render.sh 渲染同一批对象。改任一侧都要同步另一侧，
-并用 deploy-kit/scripts/helm-parity.sh 校验：
-     helm-parity.sh --repo deepseek-harness --site {{ .Values.site.host | default "130" }}
+Secret 清单：
+   {{ .Values.secrets.tenant.existingSecret }}（envFrom 整份注入）：DSH_TENANT_OIDC_SECRET、NEWAPI_API_KEY、DSH_OBJECT_ACCESS_KEY、DSH_OBJECT_SECRET_KEY；{{ .Values.secrets.llm.existingSecret }}：{{ .Values.secrets.llm.key }}
+   {{ .Values.secrets.tenantConfig.existingSecret }}（键 tenant.config.yaml，正文来自 files/tenant-config.yaml；生产置 secrets.tenantConfig.create=false，由部署机维护真 token）

@@ -78,9 +78,9 @@
       "properties": {
         "host": {
           "type": "integer",
-          "minimum": 1,
+          "minimum": 0,
           "maximum": 1,
-          "description": "多副本会互相收掉对方正在用的沙箱，只允许 1"
+          "description": "多副本会互相收掉对方正在用的沙箱，只允许 1；0 用于只装中间件的第一阶段"
         }
       }
     },

@@ -14,7 +14,3 @@ keywords:
 home: https://github.com/
 maintainers:
   - name: icac-platform
-annotations:
-  # 双轨制：本 chart 与 docker/k8s/manifests + render.sh 渲染同一批对象，
-  # 由 deploy-kit/scripts/helm-parity.sh 校验语义一致。规范见 deploy-kit/docs/helm-standard.md。
-  parity-with: docker/k8s/manifests

@@ -42,8 +42,6 @@ apps/web/dist/
 worktrees/
 .agents/worktrees/
 .typert-*/
-# 渲染产物（render.sh 的输出）
-docker/k8s/build/
 
 # 站点真实取值（含密钥），不入库
 deploy/values/site-*.yaml

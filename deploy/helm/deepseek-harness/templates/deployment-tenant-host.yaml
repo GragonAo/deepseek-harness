@@ -99,8 +99,7 @@ spec:
       schedulerName: default-scheduler
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
-      # 原清单同时写了 serviceAccount 与 serviceAccountName（前者是已废弃的别名），
-      # 两个都渲染，避免双轨比对出现差异。
+      # serviceAccount 是 serviceAccountName 的已废弃别名，两个都渲染以兼容旧读者。
       serviceAccount: {{ .Values.serviceAccount.name }}
       serviceAccountName: {{ .Values.serviceAccount.name }}
       terminationGracePeriodSeconds: 30

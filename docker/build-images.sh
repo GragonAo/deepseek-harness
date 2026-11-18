@@ -6,7 +6,7 @@
 #   NODE_IMAGE=node:22-bookworm TOOL_EXEC_NODE_IMAGE=node:22-bookworm-slim docker/build-images.sh
 #
 # dsh-tool-exec 是宿主运行时按 (租户,用户) 拉起的沙箱；dsh-tenant 是租户服务宿主本身，
-# 生产由 k8s 的 Deployment 起（docker/k8s/tenant-host.yaml），本地开发由
+# 生产由 k8s 的 Deployment 起（deploy/helm/deepseek-harness/ 的 chart），本地开发由
 # docker/docker-compose.tenant.yml 起。两个镜像的基座必须不同，所以各用一个变量。
 #
 # dsh-tool-exec 里没有任何 Python 运行时：沙箱用的解释器与全部依赖都来自宿主目录挂载进来的

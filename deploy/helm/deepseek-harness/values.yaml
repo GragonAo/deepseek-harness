@@ -1,7 +1,7 @@
 # =============================================================================
 # deepseek-harness —— 租户宿主 chart
 #
-# 默认值来源：本仓 docker/k8s/vars.env + docker/k8s/manifests/ 里原清单的显式取值。
+# 默认值来源：130/171 两个站点的基线取值，已收进本文件。
 # 站点差异不由本文件承担：deploy-kit/scripts/helm-site-map.txt 会把
 # deploy-kit/machines/<站点>.env 里的 16 个键注入到下面这些路径（清单见 README「站点注入键」）。
 #
@@ -153,10 +153,9 @@ secrets:
 # -----------------------------------------------------------------------------
 service:
   tenant:
-    # 原清单是 ClusterIP：render.sh 在渲染时会把 ClusterIP 下的 nodePort 行整段删掉
-    # （render.sh:142-143），所以 130/171 两个站点的基线 Service 没有 nodePort。
-    # 注意 deploy-kit/machines/*.env 里写的是 TENANT_SVC_TYPE（拼写与原清单的
-    # SVC_TENANT_TYPE 不同，没有任何地方消费它），因此这里保持 ClusterIP 才是基线形态。
+    # 两个站点的基线 Service 是 ClusterIP，没有 nodePort。
+    # 注意 deploy-kit/machines/*.env 里写的是 TENANT_SVC_TYPE，没有任何地方消费它，
+    # 因此这里保持 ClusterIP 才是基线形态。
     # 要真开 NodePort：先把这个键在 helm-site-map.txt 里补上 SVC_TENANT_TYPE 那一行，
     # 或直接 --set service.tenant.type=NodePort。
     type: ClusterIP
@@ -192,7 +191,7 @@ config:
   # 这个对象不存在时 Pod 会卡在 ContainerCreating（报 references non-existent config key）。
   mcpClientPatchConfigMap: dsh-mcp-client-patch
   mcpClientPatch:
-    # 默认 false：原清单不建它，本 chart 建了会被 helm-parity 记为多余对象。
+    # 默认 false：130 线上不建它。
     # 单仓独立部署（没有 up.sh）时置 true 并给 indexJs 全文，见 README。
     create: false
     indexJs: ""
@@ -204,12 +203,10 @@ config:
   tenantConfig:
     # 租户配置正文挂成 ConfigMap 还是 Secret。
     #
-    # 默认 configMap 是**原清单的历史缺陷**，不是设计：manifests/secret-tenant-config.yaml
-    # 建的是 Secret dsh-tenant-config，而 deploy-tenant-host.yaml 的卷却写成 configMap
-    # dsh-tenant-config（130 上确实存在一份历史 ConfigMap）。两边同名不同 kind，
-    # 所以清单自带的 Secret 从来没被挂过。
-    # 为了双轨一致，默认值照抄这个缺陷；单仓独立部署必须改成 secret，
-    # 否则 Pod 起不来（找不到 ConfigMap）。详见 README「已知缺陷」。
+    # 默认 configMap 保留了集群里已有的那份 ConfigMap 的挂载方式，不是设计意图：
+    # chart 自建的租户配置对象是 Secret（同名 dsh-tenant-config），卷按 ConfigMap 挂时
+    # 两者对不上。单仓独立部署必须改成 secret，否则 Pod 起不来（找不到 ConfigMap）。
+    # 详见 README「已知缺陷」。
     volumeKind: configMap
 
 # -----------------------------------------------------------------------------
@@ -254,9 +251,9 @@ tenantConfig:
 # -----------------------------------------------------------------------------
 # 探针
 #
-# readiness/liveness 的取值与原清单逐字一致（helm-parity 会比对），别随手改数字。
-# startupProbe 是新增的：原清单靠 liveness 的 initialDelaySeconds: 60 兜冷启动，
-# 那意味着第 60 秒就开始判死；换成 30×10s 的启动预算，冷启动慢（RWX 首次挂载）不会被杀。
+# readiness/liveness 的取值沿用站点基线，别随手改数字。
+# startupProbe 兜冷启动：只靠 liveness 的 initialDelaySeconds: 60 意味着第 60 秒就开始判死；
+# 换成 30×10s 的启动预算，冷启动慢（RWX 首次挂载）不会被杀。
 # -----------------------------------------------------------------------------
 probes:
   enabled:

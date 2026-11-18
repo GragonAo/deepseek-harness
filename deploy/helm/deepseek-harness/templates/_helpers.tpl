@@ -15,9 +15,8 @@ dsh-tenant-host 是 Service 的 selector 值，Deployment.spec.selector 不可�
 标准标签。
 用法：{{ include "dsh.labels" (dict "root" . "component" .Values.names.tenantHost) }}
 
-`app: <component>` 是历史 selector 用的键，不可改；app.kubernetes.io/* 那套是
-deploy-kit/docs/helm-standard.md §4 要求、而历史清单没落地的，在 Helm 版本里补上。
-helm-parity 把新增标签视为允许差异。
+`app: <component>` 是 selector 用的键，不可改；app.kubernetes.io/* 与 helm.sh/chart 是
+deploy-kit/docs/helm-standard.md §4 要求的标签。
 */}}
 {{- define "dsh.labels" -}}
 {{- $root := .root -}}
@@ -59,8 +58,8 @@ files/tenant-config.yaml 里用 `{{ .Values.* }}` 引值，所以必须过 tpl�
 {{/*
 租户配置卷的来源。
 
-默认 configMap 是原清单的历史缺陷（清单建的 Secret 同名，但卷写的是 configMap），
-为双轨一致照抄；volumeKind=secret 才是设计意图。见 values.yaml 的注释与 README。
+默认 configMap 是刻意保留的默认值，volumeKind=secret 才是设计意图。
+见 values.yaml 的注释与 README。
 */}}
 {{- define "dsh.tenantConfigVolumeSource" -}}
 {{- if eq .Values.config.tenantConfig.volumeKind "secret" -}}
