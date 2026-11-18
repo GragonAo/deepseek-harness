@@ -121,6 +121,18 @@ dependencies:
   skillIngestUrl: http://jeecg-boot-system.jeecg.svc.cluster.local:8080/jeecg-boot/dsh/inner/skill/ingest
 
 # -----------------------------------------------------------------------------
+# 技能入库共享令牌（宿主 skill_publish -> 平台「我的技战法」）
+# 租户配置只写变量名 DSH_SKILL_INGEST_TOKEN，明文值只在这里的 Secret 里。
+# 两个命名空间各一份同名 Secret、同一个令牌，由 deploy-kit/scripts/skill-ingest-secret.sh 创建。
+skillIngest:
+  # Secret 名（已存在则只读引用，不在这里创建）
+  secretName: dsh-skill-ingest
+  # Secret 里的键
+  key: token
+  # 允许 Secret 缺席：缺席时宿主仍能起来，只是 tool-skill-publish 会拒绝启动并报明原因
+  optional: true
+
+# -----------------------------------------------------------------------------
 # Secret
 #
 # 默认都不由本 chart 创建：凭据由 deploy-kit/scripts/up.sh 在集群外建，跨仓共用一把，

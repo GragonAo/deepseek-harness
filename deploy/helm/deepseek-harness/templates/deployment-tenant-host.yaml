@@ -48,6 +48,15 @@ spec:
                 secretKeyRef:
                   key: {{ .Values.secrets.llm.key }}
                   name: {{ .Values.secrets.llm.existingSecret }}
+            # 技能入库共享令牌：租户配置只写变量名（record.tokenEnv），值在这里注入。
+            # 缺席时 tool-skill-publish 会拒绝启动（这是它的设计：宁可起不来也不要每次发布都失败）。
+            # Secret 由 deploy-kit/scripts/skill-ingest-secret.sh 在站点上创建，不在 git 里。
+            - name: DSH_SKILL_INGEST_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.skillIngest.secretName }}
+                  key: {{ .Values.skillIngest.key }}
+                  optional: {{ .Values.skillIngest.optional }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

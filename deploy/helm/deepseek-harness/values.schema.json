@@ -390,6 +390,17 @@
     "topologySpreadConstraints": { "type": "array" },
     "podAnnotations": { "type": "object" },
     "podLabels": { "type": "object" },
+    "skillIngest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["secretName", "key"],
+      "properties": {
+        "secretName": { "type": "string", "minLength": 1 },
+        "key": { "type": "string", "minLength": 1 },
+        "optional": { "type": "boolean" }
+      },
+      "description": "技能入库共享令牌所在的 Secret（键默认 token）。不可省略：缺席时 tool-skill-publish 拒绝启动。"
+    },
     "extraEnv": { "type": "array" },
     "validation": {
       "type": "object",
