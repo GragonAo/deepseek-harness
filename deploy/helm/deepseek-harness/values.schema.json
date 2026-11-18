@@ -98,7 +98,19 @@
             "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
             "name": { "type": "string", "minLength": 1 },
             "user": { "type": "string", "minLength": 1 },
-            "password": { "type": "string", "description": "站点 env 的 DSH_PG_PASSWORD；空值仍可渲染" }
+            "password": { "type": "string", "description": "站点 env 的 DSH_PG_PASSWORD；空值仍可渲染" },
+            "provision": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "create": { "type": "boolean", "description": "true 时本 chart 创建 dsh-pg 与 dsh-pgdata" },
+                "image": { "type": "string", "minLength": 1 },
+                "storage": { "type": "string", "minLength": 1 },
+                "storageClass": { "type": "string" },
+                "existingSecret": { "type": "string", "description": "填了就从该 Secret 取 POSTGRES_PASSWORD" },
+                "resources": { "type": "object" }
+              }
+            }
           }
         }
       }

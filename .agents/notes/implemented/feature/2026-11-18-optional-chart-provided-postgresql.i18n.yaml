@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-11-18-optional-chart-provided-postgresql.md
+2026-11-18-optional-chart-provided-postgresql.md: a8dc9cc4815f773500d9a1898b9275ab054c806a
+2026-11-18-optional-chart-provided-postgresql.zh.md: 6078a85c56c71a5982b4d4f0024c038376fd7d99

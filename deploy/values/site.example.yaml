@@ -37,14 +37,20 @@ replicaCount:
   # 沙箱在本地文件系统上跑，必须 1；>1 会导致会话状态分裂
   host: 1
 
-# --- 数据库（平台层，必须已就绪）--------------------------------
+# --- 数据库 -------------------------------------------------------
+# 默认只接线、不建库。要本 chart 自建 dsh-pg（含 PVC dsh-pgdata）：
+#   middleware.database.provision.create: true，并 --set middleware.database.password
 middleware:
   database:
     host: ""            # 例：dsh-pg
     port: 5432
-    name: dsh           # 库名，必须已存在
+    name: dsh           # 库名；自建时会自动创建
     user: dsh
     # password 用 --set 传
+    # provision:
+    #   create: true
+    #   storage: 10Gi
+    #   storageClass: rook-ceph-block
 
 # --- 沙箱 ---------------------------------------------------------
 sandbox:

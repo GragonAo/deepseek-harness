@@ -1,0 +1,109 @@
+{{- /*
+宿主数据库（PostgreSQL + pgvector 扩展）。
+
+只在 middleware.database.provision.create=true 时渲染。资源名固定为 dsh-pg / dsh-pgdata：
+租户配置的 connectionString 按 middleware.database.host 解析该 Service，改名即断连。
+*/ -}}
+{{- $mw := .Values.middleware.database -}}
+{{- $p := $mw.provision -}}
+{{- if $p.create }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dsh-pg
+  labels:
+    {{- include "dsh.labels" (dict "root" . "component" "dsh-pg") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dsh-pg
+  strategy:
+    type: Recreate                 # RWO 盘不能浮动
+  template:
+    metadata:
+      labels:
+        {{- include "dsh.labels" (dict "root" . "component" "dsh-pg") | nindent 8 }}
+    spec:
+      containers:
+        - name: pg
+          image: {{ $p.image }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: pg
+              containerPort: 5432
+              protocol: TCP
+          env:
+            - name: POSTGRES_USER
+              value: {{ $mw.user | quote }}
+            - name: POSTGRES_DB
+              value: {{ $mw.name | quote }}
+            - name: POSTGRES_PASSWORD
+              {{- if $p.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $p.existingSecret }}
+                  key: POSTGRES_PASSWORD
+              {{- else }}
+              value: {{ required "middleware.database.password 必填（或改用 provision.existingSecret）" $mw.password | quote }}
+              {{- end }}
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: [pg_isready, -U, {{ $mw.user | quote }}]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 30
+          livenessProbe:
+            exec:
+              command: [pg_isready, -U, {{ $mw.user | quote }}]
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 1
+            failureThreshold: 6
+          {{- with $p.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: dsh-pgdata
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dsh-pgdata
+  labels:
+    {{- include "dsh.labels" (dict "root" . "component" "dsh-pg") | nindent 4 }}
+  annotations:
+    # 数据盘不随 helm uninstall 删除
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: {{ $p.storageClass }}
+  resources:
+    requests:
+      storage: {{ $p.storage }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dsh-pg
+  labels:
+    {{- include "dsh.labels" (dict "root" . "component" "dsh-pg") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: dsh-pg
+  ports:
+    - name: pg
+      port: {{ $mw.port }}
+      targetPort: 5432
+      protocol: TCP
+{{- end }}

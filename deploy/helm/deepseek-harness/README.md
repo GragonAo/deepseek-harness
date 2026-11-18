@@ -109,11 +109,11 @@ helm template dsh-tenant ./deploy/helm/deepseek-harness -n dsh | less
 
 ---
 
-## 5. chart 不自建、但缺了跑不起来的东西
+## 5. chart 默认不自建、但缺了跑不起来的东西
 
 | 依赖 | 缺了的表现 |
 | --- | --- |
-| PostgreSQL `dsh-pg:5432`（同命名空间） | 宿主 `CrashLoopBackOff`，日志里是连接拒绝 |
+| PostgreSQL `dsh-pg:5432`（同命名空间） | 宿主 `CrashLoopBackOff`，日志里是连接拒绝。置 `middleware.database.provision.create=true` 可由 chart 自建（含 PVC `dsh-pgdata`），需同时给 `middleware.database.password` 或 `provision.existingSecret` |
 | ConfigMap `dsh-mcp-client-patch`（键 `index.js`） | Pod 卡在 `ContainerCreating`：`references non-existent config key`。它由 `up.sh` 在 `MCP_CLIENT_PATCH_SRC` 非空时建；没有 `up.sh` 时用 `--set config.mcpClientPatch.create=true --set-file config.mcpClientPatch.indexJs=...` 让 chart 建 |
 | 工作区目录树 | 宿主能 Running，但沙箱第一次跑工具才失败。`dsh-workspace` 里需要有 `.dsh/system`、`.dsh/pyenv`（Python 解释器与依赖，沙箱镜像里没有）、`.dsh/tools`、`.dsh/users`、`.dsh/tenants`、`.dsh/archive` |
 | 沙箱镜像 `dsh-tool-exec:<tag>` | 沙箱 Pod `ImagePullBackOff`（k8s 会回退 Docker Hub，部署网络通常拉不到） |

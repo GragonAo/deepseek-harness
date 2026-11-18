@@ -64,7 +64,10 @@ replicaCount:
   host: 1
 
 # -----------------------------------------------------------------------------
-# 中间件（集群里已有，本 chart 不自建，也不建数据库）
+# 中间件
+#
+# 接线（host/port/user/password）与开通（provision）分开：create=false 时本 chart 只连不建，
+# 中间件由外部先行提供；create=true 时本 chart 连同 PVC 与 Service 一并创建。
 # -----------------------------------------------------------------------------
 middleware:
   database:
@@ -75,6 +78,15 @@ middleware:
     user: dsh
     # 站点 env 的 DSH_PG_PASSWORD（不在 git 里）。空值仍可渲染，装上后连库失败。
     password: ""
+    provision:
+      # true 时创建 dsh-pg / dsh-pgdata，需要上面的 password 非空。
+      create: false
+      image: docker.m.daocloud.io/pgvector/pgvector:pg16
+      # 资源名固定为 dsh-pg 与 dsh-pgdata：宿主按 database.host 解析，改名即断连。
+      storage: 10Gi
+      storageClass: rook-ceph-block
+      existingSecret: ""
+      resources: {}
 
 # -----------------------------------------------------------------------------
 # 沙箱（宿主为每次会话起的执行 Pod）
