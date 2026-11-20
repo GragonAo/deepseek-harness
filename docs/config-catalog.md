@@ -803,6 +803,15 @@ export interface Config {
    * 两种模式之间切换时也不需要改任何已配置的根。
    */
   claimRoot?: string
+  /**
+   * 改由另一块 claim 取内容的挂载源，例如长期共享的 Python 运行时与系统层。
+   *
+   * 每个 `source` 必须同时是本次挂载表里的一个来源：命中后该挂载的 claim 与 `subPath` 换成
+   * 这里给的值，路径与只读性不变。命名了一个不是来源的路径时，第一次建沙箱就报错并点名它，
+   * 而不是让部署以为自己已经挪了东西。设置本字段要求同时配置 {@link workspaceClaim} 与
+   * {@link claimRoot}——hostPath 模式下没有 claim 可投影。
+   */
+  assetMounts?: AssetMount[]
   /** 宿主机上按 subject 分目录的根，挂到 `/global`。不设置则跳过该挂载。 */
   usersRoot?: string
   /** 存放全局 skill 树的宿主机目录，以只读方式挂到同一路径。 */
@@ -924,6 +933,22 @@ export interface Config {
   cpuLimit?: number
 }
 
+/**
+ * 一块独立于 {@link Config.workspaceClaim} 的 claim，承载某个挂载源。
+ *
+ * 工作区那棵树随租户创建与删除而增删，而 Python 运行时、系统层这类内容在同一部署的多个租户
+ * 之间共用、并且要跨重建存活。把它们放在另一块 claim 上：沙箱内的路径不变，只是不再由工作区
+ * 那块投影，于是租户删掉自己的数据也不会连带删掉运行时。
+ */
+export interface AssetMount {
+  /** 该源在宿主与沙箱里的绝对路径；它同时是挂载点，且必须落在 {@link Config.claimRoot} 之下。 */
+  source: string
+  /** 承载它的 PersistentVolumeClaim；宿主进程必须挂同一块，否则两侧同路径不同内容。 */
+  claim: string
+  /** 该源在这块 claim 内的相对路径。 */
+  subPath: string
+}
+
 /** 沙箱内 Python 三件套的显式取值；每项各自独立，与 `container-docker` 按标记逐个设置的规则一致。 */
 export interface PythonSandboxEnv {
   /** 前置到 `PATH` 的目录，通常是 `<pythonRoot>/bin`。省略则不前置，`PATH` 保持镜像自己的值。 */
@@ -935,7 +960,7 @@ export interface PythonSandboxEnv {
 }
 ```
 
-Source: [`packages/tenant/container-k8s/src/index.ts:130`](../packages/tenant/container-k8s/src/index.ts)
+Source: [`packages/tenant/container-k8s/src/index.ts:146`](../packages/tenant/container-k8s/src/index.ts)
 
 <a id="deepseek-aidsh-cordis-host-runner"></a>
 
@@ -2637,6 +2662,29 @@ export type Config = SessionTitleLlmConfig
 Depends on: [`SessionTitleLlmConfig`](../packages/session/session-title-llm/src/index.ts)
 
 Source: [`packages/session/session-title-first-prompt-llm/src/index.ts:15`](../packages/session/session-title-first-prompt-llm/src/index.ts)
+
+<a id="deepseek-aidsh-session-uploads"></a>
+
+## `@deepseek-ai/dsh-session-uploads`
+
+Requires: `fs` · `systemPrompt`
+
+```ts config-catalog
+/** Uploads-inventory configuration. */
+export interface Config {
+  /**
+   * Directory inside the session's own directory that holds uploaded files
+   * (default `uploads`). A relative name resolves against the session directory
+   * the filesystem provider exposes, so the same value addresses
+   * `<session>/uploads` on every workspace root.
+   */
+  directory?: string
+  /** Maximum entries the listing prints before it summarizes the rest as a count (default 40). */
+  maxEntries?: number
+}
+```
+
+Source: [`packages/context/session-uploads/src/index.ts:31`](../packages/context/session-uploads/src/index.ts)
 
 <a id="deepseek-aidsh-settings-file"></a>
 

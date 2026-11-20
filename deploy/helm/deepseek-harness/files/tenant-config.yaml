@@ -65,6 +65,17 @@ sandbox:
     binDir: /opt/dsh/.dsh/pyenv/bin
     virtualEnv: /opt/dsh/.dsh/pyenv
     sitePackages: /opt/dsh/.dsh/pyenv/lib/python3.11/site-packages
+  {{- if .Values.persistence.assets.enabled }}
+  # 运行时与系统层由资产卷承载：源路径不变，只是不再投影到工作区 claim，
+  # 因此删掉某个租户不会连带删掉 Python 解释器与字体。source 必须与上面两行逐字相同。
+  assetMounts:
+    - source: /opt/dsh/.dsh/system
+      claim: {{ .Values.persistence.assets.name }}
+      subPath: {{ .Values.persistence.assets.system }}
+    - source: /opt/dsh/.dsh/pyenv
+      claim: {{ .Values.persistence.assets.name }}
+      subPath: {{ .Values.persistence.assets.pyenv }}
+  {{- end }}
   idleTimeoutMs: {{ .Values.sandbox.idleTimeoutMs }}
   startTimeoutMs: {{ .Values.sandbox.startTimeoutMs }}
   toolTimeoutMs: {{ .Values.sandbox.toolTimeoutMs }}

@@ -54,6 +54,9 @@ image:
   tag: ""
   # 宿主进程镜像（Deployment 的容器镜像）。
   tenant: dsh-tenant
+  # 只覆盖宿主镜像的 tag；留空跟随上面的 tag。宿主与沙箱镜像会分别升级
+  # （改宿主代码不必顺带重发沙箱镜像），所以两者各留一个入口。
+  tenantTag: ""
   # 沙箱执行层镜像。不在 Deployment 里，而是写进租户配置的 sandbox.image，
   # 由宿主 Pod 起沙箱 Pod 时引用 —— 所以宿主的 ServiceAccount 需要 pods create/delete。
   toolExec: dsh-tool-exec
@@ -190,6 +193,15 @@ persistence:
     storageClass: rook-cephfs
     # PVC 不随 helm uninstall 删除：里面是用户案件数据，删了不可恢复。
     keepOnDelete: true
+  # 长期共享资产卷：只承接 Python 运行时与系统层（字体、技能、库），不随租户增删。
+  # ← 本 chart 只引用，不创建 PVC/PV：那块卷与它的静态 PV 由中间件发布声明
+  #   （deploy/helm/middleware 的 sharedAssets），因为 fsName/pool/subvolume 是存储侧知识。
+  assets:
+    enabled: true
+    name: shared-assets
+    # 这两条 subPath 是卷内布局，必须与中间件发布写入/种下的位置一致。
+    system: dsh/system
+    pyenv: dsh/pyenv
 
 # -----------------------------------------------------------------------------
 # 配置挂载

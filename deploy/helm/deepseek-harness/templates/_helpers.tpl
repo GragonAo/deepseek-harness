@@ -38,10 +38,12 @@ app: {{ .component }}
 
 {{/*
 镜像引用。
-用法：{{ include "dsh.image" (dict "root" . "repo" .Values.image.tenant) }}
+用法：{{ include "dsh.image" (dict "root" . "repo" .Values.image.tenant "tag" .Values.image.tenantTag) }}
+tag 省略时跟随 image.tag，再为空则用 Chart.appVersion。
 */}}
 {{- define "dsh.image" -}}
-{{- printf "%s:%s" .repo (default .root.Chart.AppVersion .root.Values.image.tag) -}}
+{{- $tag := .tag | default (default .root.Chart.AppVersion .root.Values.image.tag) -}}
+{{- printf "%s:%s" .repo $tag -}}
 {{- end -}}
 
 {{/*

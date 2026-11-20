@@ -1,5 +1,5 @@
 {{- $missing := include "dsh.missingRequired" . -}}
-deepseek-harness 已部署到 {{ .Values.namespace }}；镜像 {{ include "dsh.image" (dict "root" . "repo" .Values.image.tenant) }}，沙箱镜像 {{ include "dsh.image" (dict "root" . "repo" .Values.image.toolExec) }}（写在租户配置里）
+deepseek-harness 已部署到 {{ .Values.namespace }}；镜像 {{ include "dsh.image" (dict "root" . "repo" .Values.image.tenant "tag" .Values.image.tenantTag) }}，沙箱镜像 {{ include "dsh.image" (dict "root" . "repo" .Values.image.toolExec) }}（写在租户配置里）
 {{- if $missing }}
 
 ⚠ 以下必填项为空。安装不会失败，是运行到那条路径时才暴露：
@@ -32,7 +32,8 @@ deepseek-harness 已部署到 {{ .Values.namespace }}；镜像 {{ include "dsh.i
 
 装完请核对：
    1) PostgreSQL {{ .Values.middleware.database.host }}:{{ .Values.middleware.database.port }}（库 {{ .Values.middleware.database.name }} / 用户 {{ .Values.middleware.database.user }}）先在集群里可用；启不来先看 kubectl -n {{ .Values.namespace }} get endpoints {{ .Values.middleware.database.host }}
-   2) {{ .Values.namespace }}/{{ .Values.persistence.workspace.name }} 里要有 .dsh/system、.dsh/pyenv、.dsh/tools、.dsh/users、.dsh/tenants、.dsh/archive（chart 只建 PVC；缺 pyenv 时沙箱第一次跑工具才失败）
+   2) {{ .Values.namespace }}/{{ .Values.persistence.workspace.name }} 里要有 .dsh/tools、.dsh/users、.dsh/tenants、.dsh/archive（chart 只建 PVC）
+   2b) {{ .Values.namespace }}/{{ .Values.persistence.assets.name }} 的 {{ .Values.persistence.assets.system }} 与 {{ .Values.persistence.assets.pyenv }} 下要有系统层与 Python 运行时（缺 pyenv 时沙箱第一次跑工具才失败；assets.enabled={{ .Values.persistence.assets.enabled }}）
    3) 别动 ndots：必须是字符串 "1"（当前 {{ .Values.dnsConfig.ndots }}，开关 dnsConfig.enabled={{ .Values.dnsConfig.enabled }}）
    看状态：kubectl -n {{ .Values.namespace }} rollout status deploy/{{ .Values.names.tenantHost }}；logs -f deploy/{{ .Values.names.tenantHost }}
 

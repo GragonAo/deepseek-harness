@@ -20,7 +20,7 @@ Status: implemented
 
 **目录选择器只留浏览式后端。** 服务端挂 `host-directory-picker-browse`，自适应的 `host-directory-picker-auto` 保持停用：容器里没有原生选择器，业务客户端通过 API 浏览目录。
 
-**一套容器接口、两个 provider、一份配置面。** `container-docker`（本地开发）与 `container-k8s`（生产）满足同一个运行时接口，`tenant-app` 只向各 provider 传它自己声明的字段：k8s 后端要求 claim、宿主根目录与 Python 环境描述（`workspaceClaim`、`claimRoot`、`systemRoot`、`pythonRoot`、`toolsRoot`、`pythonEnv`），而只属于 docker 的资源上限或只属于 k8s 的字段会被配置读取器带着具名诊断拒绝，而不是被丢弃。`container-k8s` 声明 `static Config`，其 schema 因此真正被 cordis 校验。
+**一套容器接口、两个 provider、一份配置面。** `container-docker`（本地开发）与 `container-k8s`（生产）满足同一个运行时接口，`tenant-app` 只向各 provider 传它自己声明的字段：k8s 后端要求 claim、宿主根目录与 Python 环境描述（`workspaceClaim`、`claimRoot`、`systemRoot`、`pythonRoot`、`toolsRoot`、`pythonEnv`、`assetMounts`），而只属于 docker 的资源上限或只属于 k8s 的字段会被配置读取器带着具名诊断拒绝，而不是被丢弃。`container-k8s` 声明 `static Config`，其 schema 因此真正被 cordis 校验。
 
 ## 考虑过的其他方案
 

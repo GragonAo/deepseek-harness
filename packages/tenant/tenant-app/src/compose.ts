@@ -345,6 +345,7 @@ function k8sConfig(config: TenantAppConfig): Record<string, unknown> {
     toolsRoot: sandbox.toolsRoot,
     pythonEnv: sandbox.pythonEnv,
     ...(sandbox.command !== undefined ? { command: [...sandbox.command] } : {}),
+    ...(sandbox.assetMounts !== undefined ? { assetMounts: sandbox.assetMounts.map(entry => ({ ...entry })) } : {}),
     ...(sandbox.env !== undefined ? { env: { ...sandbox.env } } : {}),
     ...(sandbox.kubectlBinary !== undefined ? { kubectlBinary: sandbox.kubectlBinary } : {}),
     ...(sandbox.imagePullPolicy !== undefined ? { imagePullPolicy: sandbox.imagePullPolicy } : {}),

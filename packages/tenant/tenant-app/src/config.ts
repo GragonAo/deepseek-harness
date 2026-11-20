@@ -176,6 +176,11 @@ class Reader {
     return value
   }
 
+  /** 可选的数组。 */
+  optionalArray(key: string): unknown[] | undefined {
+    return this.source[key] === undefined ? undefined : this.array(key)
+  }
+
   /** 字段的全名，用于诊断。 */
   full(key: string): string {
     return `${this.path}.${key}`
@@ -442,7 +447,7 @@ function readSandbox(reader: Reader): TenantAppConfig['sandbox'] {
   reader.rejectUnknown([
     'backend', ...shared,
     'namespace', 'image', 'kubectlBinary', 'imagePullPolicy', 'toolExecPort', 'imagePath',
-    'workspaceClaim', 'claimRoot', 'systemRoot', 'pythonRoot', 'toolsRoot', 'pythonEnv',
+    'workspaceClaim', 'claimRoot', 'systemRoot', 'pythonRoot', 'toolsRoot', 'pythonEnv', 'assetMounts',
     'memoryLimit', 'cpuLimit',
     'cliTimeoutMs', 'statusPollMs', 'readyTimeoutMs', 'readyPollMs', 'command', 'env',
   ])
@@ -460,6 +465,7 @@ function readSandbox(reader: Reader): TenantAppConfig['sandbox'] {
     pythonRoot: reader.string('pythonRoot'),
     toolsRoot: reader.string('toolsRoot'),
     pythonEnv: readPythonEnv(reader.child('pythonEnv')),
+    ...present('assetMounts', readAssetMounts(reader)),
     ...present('command', reader.optionalStringArray('command')),
     ...present('env', reader.optionalStringMap('env')),
     ...present('imagePath', reader.optionalString('imagePath')),
@@ -480,6 +486,27 @@ function readPythonEnv(reader: Reader): { binDir: string; virtualEnv: string; si
     virtualEnv: reader.string('virtualEnv'),
     sitePackages: reader.string('sitePackages'),
   }
+}
+
+/**
+ * 资产卷清单：把某些挂载源改由另一块 claim 承载。每一项的三个字段都是必填的非空字符串，
+ * 与 `container-k8s` 的同名配置逐字同义；本层不判断路径是否真的是某个来源，那是 provider 的事。
+ * @param reader - 沙箱这一层的取值器。
+ * @returns 逐项校验后的清单；没配时为 `undefined`。
+ * @throws `TenantAppConfigError` 项不是对象、缺字段，或写了别的字段名。
+ */
+function readAssetMounts(reader: Reader): { source: string; claim: string; subPath: string }[] | undefined {
+  const entries = reader.optionalArray('assetMounts')
+  if (entries === undefined) return undefined
+  return entries.map((entry, index) => {
+    const path = `${reader.full('assetMounts')}[${index}]`
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      throw new TenantAppConfigError(`${path} 必须是对象`)
+    }
+    const row = new Reader(path, entry as Record<string, unknown>)
+    row.rejectUnknown(['source', 'claim', 'subPath'])
+    return { source: row.string('source'), claim: row.string('claim'), subPath: row.string('subPath') }
+  })
 }
 
 /** 两个后端共有的分层挂载与生命周期字段。 */

@@ -17,6 +17,8 @@ Kubernetes 租户容器运行时：每个 (租户, 用户) 一个裸沙箱 Pod�
 
 每个挂载把一个宿主目录读到一个沙箱内路径。默认该目录是 `hostPath` 卷，其 `path` 为宿主目录、`mountPath` 为沙箱看到它的位置；设置 `workspaceClaim` 与 `claimRoot` 后，同一目录是某个 ReadWriteMany claim 的 `subPath`，因此无需存在任何节点路径，沙箱也不再依赖它落在哪个节点上。两种模式下沙箱内路径完全一致。
 
+`assetMounts` 让指定的源改从另一块 claim 读取：每个条目给出 `source`（它必须同时是本次挂载表里的一个来源）、`claim` 与 `subPath`，命中后该挂载的 claim 与 subPath 换成这三个值，沙箱内路径与只读性不变。它存在的原因是内容寿命与工作区不同——Python 运行时与系统层在同一部署的多个租户之间共用、且要在租户被删除后存活，而工作区那棵树随租户创建与删除。条目按路径精确匹配（结尾斜杠不计），命名一个不是来源的路径会在第一次出挂载表时报错并点名它；设置本字段要求同时配置 `workspaceClaim` 与 `claimRoot`。
+
 **卷以承载存储为键，从不以挂载为键。** 同一个 claim 的多个挂载共用一个 `volumes` 条目、以 `subPath` 区分；被两个卷命名为同一个 claim 则永远起不来。kubelet 按承载卷记录挂载状态，因此第二个条目会永远停在 `unmounted`，每次 pod 同步都以 `context deadline exceeded` 结束——Pod 卡在它的 init 容器之前，而没有任何事件说明原因。因此 `subPath` 属于 `volumeMounts` 条目，那也是 Kubernetes 接受它的地方。
 
 `hostPath.type` 是 `Directory`，因此源缺失时卷挂载失败，而不是产生一个空目录。该失败从不到达沙箱：kubelet 在 init 容器启动前就拒绝该卷，Pod 停在 `Pending`，原因只出现在事件里。provider 在启动超时时读取这些事件（`readEvents`），因为一个光秃秃的 `Pending` 无法告诉运维该创建哪个路径。claim 不给出这种信号：kubelet 会把缺失的 `subPath` 建为空目录，因此 claim 模式的部署依赖租户目录树在 Pod 创建前就已存在。
@@ -31,7 +33,7 @@ Kubernetes 租户容器运行时：每个 (租户, 用户) 一个裸沙箱 Pod�
 
 ## 配置
 
-`namespace` 与 `image` 必填，且在加载时校验。每次 `kubectl` 调用都限定到 `namespace`，provider 不在别处创建、读取或删除沙箱 Pod，因此一个 provider 实例在其整个存活期内只在一个 namespace 中工作。每个集群都拥有的四个 namespace（`default`、`kube-system`、`kube-public`、`kube-node-lease`）在加载时被拒绝：它们在任何集群上都是错的，且仅凭配置即可判定。属于某个集群的名字——业务 namespace、某存储组件的 namespace——被有意排除在外，因为本包无法知道它们；在这些名字上让错误取值无害的是集群：它为宿主 ServiceAccount 准备的 Role 只够到一个 namespace。其余全部可选并带 schema 默认值：`kubectlBinary`、`imagePullPolicy`、`toolExecPort`、`workDir`、`caseReadOnly`、`usersReadOnly`、`usersRoot`、`systemRoot`、`toolsRoot`、`pythonRoot`、`command`、`env`、`idleTimeoutMs`、`maxOutputBytes`、`sandboxCacheTtlMs`、`memoryLimit`、`cpuLimit`，以及 `cliTimeoutMs` / `startTimeoutMs` / `readyPollMs` 三个上限。
+`namespace` 与 `image` 必填，且在加载时校验。每次 `kubectl` 调用都限定到 `namespace`，provider 不在别处创建、读取或删除沙箱 Pod，因此一个 provider 实例在其整个存活期内只在一个 namespace 中工作。每个集群都拥有的四个 namespace（`default`、`kube-system`、`kube-public`、`kube-node-lease`）在加载时被拒绝：它们在任何集群上都是错的，且仅凭配置即可判定。属于某个集群的名字——业务 namespace、某存储组件的 namespace——被有意排除在外，因为本包无法知道它们；在这些名字上让错误取值无害的是集群：它为宿主 ServiceAccount 准备的 Role 只够到一个 namespace。其余全部可选并带 schema 默认值：`kubectlBinary`、`imagePullPolicy`、`toolExecPort`、`workDir`、`caseReadOnly`、`usersReadOnly`、`usersRoot`、`systemRoot`、`toolsRoot`、`pythonRoot`、`assetMounts`、`command`、`env`、`idleTimeoutMs`、`maxOutputBytes`、`sandboxCacheTtlMs`、`memoryLimit`、`cpuLimit`，以及 `cliTimeoutMs` / `startTimeoutMs` / `readyPollMs` 三个上限。
 
 `caseReadOnly` 与 `usersReadOnly` 默认都为真：`/case` 是一个案件下所有用户共用的工作目录，`/global` 是该 subject 的跨案件工作目录，两者都由业务侧写入，沙箱只是读取方。让它们可写意味着一个用户的沙箱能改到同案件其他用户的输入。默认只读时，想改这两棵树的沙箱侧写入会以权限错误失败，这是有意的：产物与技能应当走业务侧的管理接口或工具。`<workspaceRoot>/users/<subject>/work`（`/workspace`）、`<workspaceRoot>/users/<subject>/sessions`（`/sessions`）与容器本地的工作目录仍然可写。
 

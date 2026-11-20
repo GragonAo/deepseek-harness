@@ -126,6 +126,22 @@ export interface PythonSandboxEnv {
   sitePackages?: string
 }
 
+/**
+ * 一块独立于 {@link Config.workspaceClaim} 的 claim，承载某个挂载源。
+ *
+ * 工作区那棵树随租户创建与删除而增删，而 Python 运行时、系统层这类内容在同一部署的多个租户
+ * 之间共用、并且要跨重建存活。把它们放在另一块 claim 上：沙箱内的路径不变，只是不再由工作区
+ * 那块投影，于是租户删掉自己的数据也不会连带删掉运行时。
+ */
+export interface AssetMount {
+  /** 该源在宿主与沙箱里的绝对路径；它同时是挂载点，且必须落在 {@link Config.claimRoot} 之下。 */
+  source: string
+  /** 承载它的 PersistentVolumeClaim；宿主进程必须挂同一块，否则两侧同路径不同内容。 */
+  claim: string
+  /** 该源在这块 claim 内的相对路径。 */
+  subPath: string
+}
+
 /** Kubernetes 沙箱 provider 的配置。 */
 export interface Config {
   /**
@@ -182,6 +198,15 @@ export interface Config {
    * 两种模式之间切换时也不需要改任何已配置的根。
    */
   claimRoot?: string
+  /**
+   * 改由另一块 claim 取内容的挂载源，例如长期共享的 Python 运行时与系统层。
+   *
+   * 每个 `source` 必须同时是本次挂载表里的一个来源：命中后该挂载的 claim 与 `subPath` 换成
+   * 这里给的值，路径与只读性不变。命名了一个不是来源的路径时，第一次建沙箱就报错并点名它，
+   * 而不是让部署以为自己已经挪了东西。设置本字段要求同时配置 {@link workspaceClaim} 与
+   * {@link claimRoot}——hostPath 模式下没有 claim 可投影。
+   */
+  assetMounts?: AssetMount[]
   /** 宿主机上按 subject 分目录的根，挂到 `/global`。不设置则跳过该挂载。 */
   usersRoot?: string
   /** 存放全局 skill 树的宿主机目录，以只读方式挂到同一路径。 */
@@ -328,6 +353,16 @@ interface CachedSandbox {
 }
 
 /**
+ * 挂载源比较前的归一。`posix.normalize` 会保留结尾的 `/`，而 `…/pyenv` 与 `…/pyenv/` 是同一条
+ * 路径：按原文比较会让「同一个源写了两遍」看起来是两条，也让配置里一个多余的斜杠失配。
+ * @param source - 宿主路径。
+ * @returns 无结尾斜杠的归一化路径。
+ */
+function assetKey(source: string): string {
+  return posix.normalize(source).replace(/\/+$/, '')
+}
+
+/**
  * 判断 `candidate` 是 `root` 本身还是它的后代。
  * @param root - 祖先路径。
  * @param candidate - 待判断的路径。
@@ -413,16 +448,42 @@ export function sandboxMounts(config: Config, tenant: Pick<Tenant, 'workspaceRoo
       )
     }
   }
-  return withLocalMountPoint(
-    sources.map(m => ({
-      kind: 'claim',
-      claimName: claim,
-      subPath: posix.relative(claimRoot, m.source),
+  // 资产卷：命中清单的源换一块 claim 与一个 subPath，路径与只读性照旧，因此沙箱内看到的
+  // 仍是同一个位置，只有内容由谁承载变了。
+  const assets = new Map<string, AssetMount>()
+  for (const asset of config.assetMounts ?? []) assets.set(assetKey(asset.source), asset)
+  const applied = new Set<string>()
+  const projected = sources.map((m) => {
+    const key = assetKey(m.source)
+    const asset = assets.get(key)
+    if (!asset) {
+      return {
+        kind: 'claim' as const,
+        claimName: claim,
+        subPath: posix.relative(claimRoot, m.source),
+        mountPath: m.mountPath,
+        readOnly: m.readOnly,
+      }
+    }
+    applied.add(key)
+    return {
+      kind: 'claim' as const,
+      claimName: asset.claim,
+      subPath: asset.subPath,
       mountPath: m.mountPath,
       readOnly: m.readOnly,
-    })),
-    SKILLS_ROOT,
-  )
+    }
+  })
+  // 配了却没有被任何源用上的条目是错配（路径打错、或那一层没配），静默忽略会把问题推到沙箱里。
+  for (const source of assets.keys()) {
+    if (!applied.has(source)) {
+      throw new Error(
+        `container-k8s: Config.assetMounts names '${source}', which is not one of this tenant's mount sources. ` +
+          'It is applied by exact path match; fix the path or drop the entry.',
+      )
+    }
+  }
+  return withLocalMountPoint(projected, SKILLS_ROOT)
 }
 
 /**
@@ -513,6 +574,12 @@ export class K8sContainerRuntime extends ContainerRuntime {
     usersReadOnly: z.boolean().default(true),
     workspaceClaim: z.string(),
     claimRoot: z.string(),
+    // 与 pythonEnv 同一写法：省略必须是 `undefined` 而不是 Schemastery 补出来的 `[]`。
+    assetMounts: z.array(z.object({
+      source: z.string(),
+      claim: z.string(),
+      subPath: z.string(),
+    })).default(undefined as unknown as AssetMount[]),
     usersRoot: z.string(),
     systemRoot: z.string(),
     toolsRoot: z.string(),
@@ -595,6 +662,28 @@ export class K8sContainerRuntime extends ContainerRuntime {
     // 悄悄钉在节点目录上，而这件事只在沙箱起不来时才被发现。
     if ((config.workspaceClaim === undefined) !== (config.claimRoot === undefined)) {
       throw new Error('container-k8s: Config.workspaceClaim and Config.claimRoot must be set together or omitted together')
+    }
+    // 资产卷是「某个源改投影到另一块 claim」，hostPath 模式没有 claim 可投影：写在这里等于没写。
+    const assetMounts = config.assetMounts ?? []
+    if (assetMounts.length > 0 && config.claimRoot === undefined) {
+      throw new Error('container-k8s: Config.assetMounts requires Config.workspaceClaim and Config.claimRoot')
+    }
+    for (const asset of assetMounts) {
+      if (!posix.isAbsolute(asset.source)) {
+        throw new Error(`container-k8s: Config.assetMounts source '${asset.source}' must be an absolute path`)
+      }
+      if (asset.claim.trim() === '') {
+        throw new Error(`container-k8s: Config.assetMounts['${asset.source}'].claim is empty`)
+      }
+      // 绝对 subPath 会被 kubelet 当成另一条路径，`..` 会逃出 claim：两者都在同一次挂载里立刻失败。
+      if (asset.subPath === '' || posix.isAbsolute(asset.subPath) || asset.subPath.split('/').includes('..')) {
+        throw new Error(`container-k8s: Config.assetMounts['${asset.source}'].subPath must be a non-empty path inside that claim, got '${asset.subPath}'`)
+      }
+    }
+    // 同一个源写两条时后一条会覆盖前一条，而两条看起来都生效了：直接拒绝。
+    const assetSources = new Set(assetMounts.map(asset => assetKey(asset.source)))
+    if (assetSources.size !== assetMounts.length) {
+      throw new Error('container-k8s: Config.assetMounts names the same source more than once')
     }
     // 三个值描述的是被挂载的那份运行时：没有 pythonRoot 就没有挂载，写了也无处可指。
     if (config.pythonEnv !== undefined && config.pythonRoot === undefined) {

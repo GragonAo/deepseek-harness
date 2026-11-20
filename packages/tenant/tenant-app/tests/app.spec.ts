@@ -130,6 +130,31 @@ describe('租户服务配置', () => {
     expect(() => configFrom(withoutPythonEnv)).toThrow(/配置\.sandbox\.pythonEnv/)
   })
 
+  it('资产卷逐项按三项读取，路径是否真是某个来源留给 provider 判断', () => {
+    const config = configFrom(`${K8S_MINIMAL}  assetMounts:
+    - source: /srv/system
+      claim: shared-assets
+      subPath: dsh/system
+    - source: /srv/python
+      claim: shared-assets
+      subPath: dsh/pyenv
+`)
+    expect(config.sandbox).toMatchObject({
+      assetMounts: [
+        { source: '/srv/system', claim: 'shared-assets', subPath: 'dsh/system' },
+        { source: '/srv/python', claim: 'shared-assets', subPath: 'dsh/pyenv' },
+      ],
+    })
+  })
+
+  it('资产卷条目也拒绝拼错的字段名', () => {
+    expect(() => configFrom(`${K8S_MINIMAL}  assetMounts:
+    - source: /srv/system
+      claim: shared-assets
+      subpath: dsh/system
+`)).toThrow(/未知字段：subpath/)
+  })
+
   it('k8s 后端的资源上限与 docker 同义，只是内存按 quantity 写', () => {
     const config = configFrom(`${K8S_MINIMAL}  memoryLimit: 8Gi\n  cpuLimit: 2\n`)
     expect(config.sandbox).toMatchObject({ backend: 'k8s', memoryLimit: '8Gi', cpuLimit: 2 })
@@ -299,7 +324,8 @@ describe('租户服务的真实组合', () => {
       const admin = await fetch(`${base}/admin/tenants.list`, { method: 'POST', body: '{}' })
       const adminBody = await admin.json() as { ok: boolean; error?: { code: string } }
       expect(admin.status).toBe(401)
-      expect(adminBody).toMatchObject({ ok: false, error: { code: expect.any(String) } })
+      expect(adminBody.ok).toBe(false)
+      expect(typeof adminBody.error?.code).toBe('string')
 
       // 业务面载体把 apiProxy 声明为注入，网关行停用后它根本不挂载，所以 /api 是 404：
       // 组合里不存在一条不校验权威的业务路由。业务面自己拒绝无凭据请求（401
@@ -676,5 +702,14 @@ describe('租户技能三层根', () => {
     expect(reader?.disabled).toBeUndefined()
     // 项目层与用户层根按宿主的 cwd 与 HOME 解析，在租户宿主里指向与租户无关的目录。
     expect(reader?.config?.(configFrom(MINIMAL))).toMatchObject({ includeDefaultRoots: false })
+  })
+
+  it('上传清单那一行不是停用行，默认指向 fs-http 写盘的 uploads 目录', () => {
+    // 业务前端把文件写到会话目录的 `uploads/` 之后消息里没有文件名，只有这一行列出来模型才看得见。
+    const row = SPINE.find(candidate => candidate.id === 'session-uploads')
+    expect(row?.module).toBe('@deepseek-ai/dsh-session-uploads')
+    expect(row?.disabled).toBeUndefined()
+    // 不覆盖时全部取插件 schema 的默认值：目录名与 fs-http 的上传路由一致。
+    expect(row?.config?.(configFrom(MINIMAL))).toBeUndefined()
   })
 }, BOOT_TIMEOUT_MS)

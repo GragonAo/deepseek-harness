@@ -180,6 +180,15 @@ export interface K8sSandboxConfig extends SandboxLayersConfig {
     readonly virtualEnv: string
     readonly sitePackages: string
   }
+  /**
+   * 改由另一块 claim 承载的挂载源，例如长期共享的 Python 运行时与系统层。
+   * 每项的 `source` / `claim` / `subPath` 与 `container-k8s` 的同名配置逐字同义。
+   */
+  readonly assetMounts?: readonly {
+    readonly source: string
+    readonly claim: string
+    readonly subPath: string
+  }[]
   /** 每个沙箱里启动的容器命令；省略则用镜像 entrypoint 的 `['node', 'entry.mjs']`。 */
   readonly command?: readonly string[]
   /** 沙箱容器的显式环境变量。身份变量（`DSH_CASE_ID`/`DSH_TENANT_ID`/`DSH_USER_ID`）与 Python 三件套由 provider 在此之后写入，覆盖不了它们。 */

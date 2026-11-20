@@ -20,7 +20,7 @@ The tenant stack had been assembled through DeepSeek Harness's own composition s
 
 **One directory picker, the browsing backend.** The server stack mounts `host-directory-picker-browse` and keeps the adaptive `host-directory-picker-auto` disabled: a container has no native chooser, and business clients browse directories over the API.
 
-**One container interface, two providers, one config surface.** `container-docker` (local development) and `container-k8s` (production) satisfy the same runtime interface, and `tenant-app` passes each provider only the fields that provider declares: the k8s backend requires the claim, the host roots, and the Python environment description (`workspaceClaim`, `claimRoot`, `systemRoot`, `pythonRoot`, `toolsRoot`, `pythonEnv`), while a docker-only resource limit or a k8s-only field is refused by the config reader with a named diagnostic instead of being dropped. `container-k8s` declares `static Config`, so cordis validates its schema.
+**One container interface, two providers, one config surface.** `container-docker` (local development) and `container-k8s` (production) satisfy the same runtime interface, and `tenant-app` passes each provider only the fields that provider declares: the k8s backend requires the claim, the host roots, and the Python environment description (`workspaceClaim`, `claimRoot`, `systemRoot`, `pythonRoot`, `toolsRoot`, `pythonEnv`, `assetMounts`), while a docker-only resource limit or a k8s-only field is refused by the config reader with a named diagnostic instead of being dropped. `container-k8s` declares `static Config`, so cordis validates its schema.
 
 ## Alternatives considered
 

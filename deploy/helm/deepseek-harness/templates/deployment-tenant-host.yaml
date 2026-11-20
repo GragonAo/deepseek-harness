@@ -33,7 +33,7 @@ spec:
     spec:
       containers:
         - name: tenant
-          image: {{ include "dsh.image" (dict "root" . "repo" .Values.image.tenant) }}
+          image: {{ include "dsh.image" (dict "root" . "repo" .Values.image.tenant "tag" .Values.image.tenantTag) }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - containerPort: {{ .Values.service.tenant.port }}
@@ -89,6 +89,16 @@ spec:
             # 工作区数据卷的宿主根。租户配置里的 /opt/dsh/* 全部基于它，改一边要改另一边。
             - name: dsh
               mountPath: /opt/dsh
+            {{- if .Values.persistence.assets.enabled }}
+            # 资产卷只挂这两层，不挂 /opt/dsh/.dsh 整层——那会把 tenants/ 一起盖掉。
+            # 宿主必须看到沙箱看到的那份：系统层里的技能目录由宿主侧扫描后下发给会话。
+            - name: assets
+              mountPath: /opt/dsh/.dsh/system
+              subPath: {{ .Values.persistence.assets.system }}
+            - name: assets
+              mountPath: /opt/dsh/.dsh/pyenv
+              subPath: {{ .Values.persistence.assets.pyenv }}
+            {{- end }}
             - name: config
               mountPath: /etc/dsh/tenant.config.yaml
               subPath: tenant.config.yaml
@@ -122,6 +132,11 @@ spec:
         - name: dsh
           persistentVolumeClaim:
             claimName: {{ .Values.persistence.workspace.name }}
+        {{- if .Values.persistence.assets.enabled }}
+        - name: assets
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.assets.name }}
+        {{- end }}
         - name: config
           {{- include "dsh.tenantConfigVolumeSource" . | nindent 10 }}
       {{- with .Values.nodeSelector }}
