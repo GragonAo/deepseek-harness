@@ -267,6 +267,13 @@ export const SPINE: readonly SpineRow[] = [
     // 执行侧是租户容器：二进制由 tool-exec 镜像提供，宿主解析出的打包路径在容器里不存在。
     config: () => ({ sampleOverCapGlobResults: false, ripgrepPath: '/usr/local/bin/rg' }),
   },
+  {
+    id: 'session-uploads',
+    module: '@deepseek-ai/dsh-session-uploads',
+    // 业务前端把文件 PUT 到会话目录的 `uploads/` 之后再发消息，消息正文里没有文件名，模型看不见那
+    // 个目录就只会反问「上传了什么」。这一行在每次装配提示词时列一遍该目录，图片则由模型声明的模态
+    // 交给 `read_image`。目录名是部署约定（见 fs-http 的上传路由），默认 `uploads`。
+  },
   { id: 'agent-instructions', module: '@deepseek-ai/dsh-agent-instructions', config: () => ({ maxBytes: 65536 }) },
   { id: 'skill', module: '@deepseek-ai/dsh-skill' },
   {

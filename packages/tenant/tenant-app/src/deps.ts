@@ -64,6 +64,7 @@ import type {} from '@deepseek-ai/dsh-tool-jobs'
 import type {} from '@deepseek-ai/dsh-fs-observation-policy'
 import type {} from '@deepseek-ai/dsh-tool-fs'
 import type {} from '@deepseek-ai/dsh-tool-fs-search'
+import type {} from '@deepseek-ai/dsh-session-uploads'
 import type {} from '@deepseek-ai/dsh-agent-instructions'
 import type {} from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-skill-filesystem'
@@ -188,6 +189,7 @@ export const SPINE_MODULES = [
   '@deepseek-ai/dsh-fs-observation-policy',
   '@deepseek-ai/dsh-tool-fs',
   '@deepseek-ai/dsh-tool-fs-search',
+  '@deepseek-ai/dsh-session-uploads',
   '@deepseek-ai/dsh-agent-instructions',
   '@deepseek-ai/dsh-skill',
   '@deepseek-ai/dsh-skill-filesystem',

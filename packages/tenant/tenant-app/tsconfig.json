@@ -48,6 +48,9 @@
       "path": "../../context/session-reference/tsconfig.json"
     },
     {
+      "path": "../../context/session-uploads/tsconfig.json"
+    },
+    {
       "path": "../../core/agent-default-model/tsconfig.json"
     },
     {
