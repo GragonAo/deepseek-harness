@@ -24,7 +24,7 @@ DSH 多租户宿主的部署单元：一个 `Deployment`（`dsh-tenant` 宿主�
 | 命名空间 | `namespace` 值，默认 `dsh`；宿主与沙箱 Pod 同命名空间（Role 是命名空间级的，不能跨 ns） |
 | PostgreSQL | `middleware.database.*` 指向的库先可用；`provision.create=true` 时才由 chart 建 `dsh-pg` + PVC `dsh-pgdata` |
 | 工作区 PVC | `persistence.workspace.enabled=true` 时由 chart 建，需要支持 `ReadWriteMany` 的 StorageClass（默认 `rook-cephfs`）；`keepOnDelete=true` 保证卸载不回收数据。chart 只建 PVC 不建目录，里面要有 `.dsh/tools`、`.dsh/users`、`.dsh/tenants`、`.dsh/archive` |
-| 资产 PVC | `persistence.assets.enabled=true`（默认）时，`persistence.assets.name` 那块 RWX PVC 必须先存在：它由中间件发布建，其 `dsh/system`、`dsh/pyenv` 两个 `subPath` 下要已有系统层与 Python 运行时。置 false 则二者退回工作区 claim，删租户时会一起丢 |
+| 资产 PVC | `persistence.assets.enabled=true`（默认）时，`persistence.assets.name` 那块 RWX PVC 必须先存在：它由中间件发布建，整块**只读**挂在 `persistence.assets.mountPath`（默认 `/opt/assets`），卷根下要已有 Python 运行时、系统层与字体（参考布局 `pyenv/`、`system/`、`fonts/`）。唯一可写例外是宿主的 `<mountPath>/system/skills`（平台启用系统技战法时装技能的地方）。置 false 则运行时与系统层退回工作区 claim，删租户时会一起丢 |
 | Secret `dsh-llm-secret` | 键 `DEEPSEEK_API_KEY`；chart 只在 `secrets.llm.create=true` 时创建 |
 | Secret `dsh-tenant-secret` | 整份 `envFrom` 注入，键见下文「Secret 清单」；chart 只在 `secrets.tenant.create=true` 时创建 |
 | 镜像 tag | `image.tag`，形如 `ai-icac-dsh-v1.0.23`；留空回退 `Chart.appVersion`。宿主镜像 `dsh-tenant`，沙箱镜像 `dsh-tool-exec`（后者写进租户配置，不在 Deployment 里）；`image.tenantTag` 只覆盖宿主镜像的 tag，用于「只改了宿主代码」的发布 |
@@ -84,7 +84,7 @@ helm upgrade --install deepseek-harness ./deploy/helm/deepseek-harness -n dsh \
 | `service.tenant.type` | `ClusterIP` | 要浏览器直连改 `NodePort`；`nodePort` 只在 NodePort 下渲染 |
 | `dnsConfig.ndots` | `"1"` | 必须保留：集群默认 `5` 时短名解析 6–31 秒，表现为「提问转圈不回复」且日志无错误 |
 | `persistence.workspace.accessMode` | `ReadWriteMany` | 宿主与沙箱 Pod 同时挂，不支持 RWO |
-| `persistence.assets.*` | `shared-assets` / `dsh/system` / `dsh/pyenv` | 资产卷名与卷内两条 `subPath`；置 `enabled=false` 则运行时与系统层退回工作区 claim |
+| `persistence.assets.*` | `shared-assets` / `/opt/assets` | 资产卷名与它的挂载点（整块只读挂载；卷内布局由程序配置认）；置 `enabled=false` 则运行时与系统层退回工作区 claim |
 | `sandbox.*` | 6Gi / 15min / 3min / 10min | 沙箱内存上界、空闲回收、启动超时、单次工具超时 |
 
 ## 升级、回滚

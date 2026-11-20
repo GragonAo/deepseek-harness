@@ -30,8 +30,13 @@ export type SandboxMount =
     kind: 'claim'
     /** claim 在沙箱自己命名空间里的名字。 */
     claimName: string
-    /** 相对 claim 根的路径；租户与用户的切分就落在这一段上。 */
-    subPath: string
+    /**
+     * 相对 claim 根的路径；租户与用户的切分就落在这一段上。
+     *
+     * 省略表示挂 claim 的根本身：共享资产卷整块挂进来时就是这样——卷里有哪些目录由部署的
+     * 程序配置解释，provider 不切子目录。
+     */
+    subPath?: string
     mountPath: string
     readOnly: boolean
   }
@@ -297,7 +302,8 @@ function mountSite(mount: SandboxMount, readOnly: boolean): Record<string, unkno
     mountPath: mount.mountPath,
     // 本地空目录必须可写：嵌在它下面的挂载点要靠它才建得出来，只读等于把那个故障搬回来。
     readOnly: mount.kind === 'local' ? false : readOnly,
-    ...(mount.kind === 'claim' ? { subPath: mount.subPath } : {}),
+    // 没有 subPath 就是挂 claim 的根：写一个空串进去，kubelet 会当成另一条路径。
+    ...(mount.kind === 'claim' && mount.subPath !== undefined ? { subPath: mount.subPath } : {}),
   }
 }
 

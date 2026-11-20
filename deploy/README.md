@@ -14,7 +14,7 @@ deploy/values/site.example.yaml 站点取值样例
 | 命名空间 | `dsh`（`namespace` 值，沙箱 Pod 也落在这里，Role 是命名空间级的） |
 | PostgreSQL | 同命名空间可达，默认 `dsh-pg:5432`，库/用户 `dsh`；或置 `middleware.database.provision.create=true` 由 chart 建 `dsh-pg` + PVC `dsh-pgdata` |
 | 工作区 PVC | 必须支持 `ReadWriteMany`（默认存储类 `rook-cephfs`，30Gi）；PVC 里的目录树不随 chart 创建：`.dsh/tools`、`.dsh/users`、`.dsh/tenants`、`.dsh/archive` |
-| 资产 PVC | `persistence.assets.name`（默认 `shared-assets`，由中间件发布建在 `dsh` 命名空间）的 `dsh/system`、`dsh/pyenv` 两个 `subPath`：前者是系统层（字体/技能/库），后者是 Python 运行时（沙箱镜像里没有解释器）。置 `persistence.assets.enabled=false` 则二者退回工作区 PVC |
+| 资产 PVC | `persistence.assets.name`（默认 `shared-assets`，由中间件发布建在 `dsh` 命名空间）整块**只读**挂在 `persistence.assets.mountPath`（默认 `/opt/assets`）：卷里放 Python 运行时、系统层与字体（参考布局 `pyenv/`、`system/`、`fonts/`）。卷内布局由程序配置（`files/tenant-config.yaml` 的 `pythonRoot` / `systemRoot`）解释，chart 不切子目录。唯一可写例外是宿主的 `<mountPath>/system/skills`——平台启用系统技战法时往那里装技能。置 `persistence.assets.enabled=false` 则运行时与系统层退回工作区 PVC |
 | Secret `dsh-llm-secret` | 键 `DEEPSEEK_API_KEY`（chart 不建，置 `secrets.llm.create=true` 时才建） |
 | Secret `dsh-tenant-secret` | 键 `DSH_TENANT_OIDC_SECRET`、`NEWAPI_API_KEY`、`DSH_OBJECT_ACCESS_KEY`、`DSH_OBJECT_SECRET_KEY`（整份 `envFrom` 注入） |
 | 镜像 tag | `image.tag`，形如 `ai-icac-dsh-v1.0.23`；留空回退 `Chart.appVersion` |
@@ -84,7 +84,7 @@ curl -s http://<站点IP>:30788/openapi.json | head -c 200   # Service 为 NodeP
 ```
 
 - Pod 卡 `ContainerCreating` 且报 `references non-existent config key`：租户配置卷的 kind 与对象对不上（见上面 `volumeKind`），或 `config.mcpClientPatch.mount=true` 但 ConfigMap 缺 `index.js`。
-- 沙箱 Pod 起不来：看 `kubectl -n dsh get events`，以及资产卷 `shared-assets` 的 `dsh/pyenv` 是否齐全（沙箱镜像不含 Python；`assetMounts` 指的名字与宿主挂的 PVC 不一致时，表现为目录空而不是报错）。
+- 沙箱 Pod 起不来：看 `kubectl -n dsh get events`，以及资产卷 `shared-assets` 根下的 `pyenv/` 是否齐全（沙箱镜像不含 Python；`assetsClaim` 指的名字与宿主挂的 PVC 不一致时，表现为目录空而不是报错）。
 - 「提问转圈没有回复」且日志无错误：`dnsConfig.ndots` 必须是字符串 `"1"`，回落集群默认的 `5` 会让短名解析慢到 6–31 秒。
 
 ## 改 chart 之后

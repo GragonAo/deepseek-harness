@@ -3,7 +3,7 @@ name: deepseek-harness
 description: DSH 多租户宿主（tenant host + 沙箱 RBAC + 工作区数据卷）—— 单仓可独立部署
 type: application
 version: 1.0.0
-appVersion: "ai-icac-dsh-v1.0.24"
+appVersion: "ai-icac-dsh-v1.0.30"
 kubeVersion: ">=1.24.0-0"
 keywords:
   - deepseek

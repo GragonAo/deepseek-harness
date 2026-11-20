@@ -90,14 +90,18 @@ spec:
             - name: dsh
               mountPath: /opt/dsh
             {{- if .Values.persistence.assets.enabled }}
-            # 资产卷只挂这两层，不挂 /opt/dsh/.dsh 整层——那会把 tenants/ 一起盖掉。
-            # 宿主必须看到沙箱看到的那份：系统层里的技能目录由宿主侧扫描后下发给会话。
+            # 资产卷整块只读挂到 mountPath：卷里有什么（pyenv/、system/、fonts/）由程序自己认，
+            # 由 tenant.config.yaml 的 pythonRoot / systemRoot 声明，chart 不再切子目录。
+            # 宿主只读它——Python 运行时与字体都没有写入理由。
             - name: assets
-              mountPath: /opt/dsh/.dsh/system
-              subPath: {{ .Values.persistence.assets.system }}
+              mountPath: {{ .Values.persistence.assets.mountPath }}
+              readOnly: true
+            # 唯一的可写例外：系统技能目录是平台在运行时安装技能的目标（/admin/skills.upload
+            # 落 `<systemRoot>/skills`，见 files/tenant-config.yaml 的 systemRoot），只读会让
+            # 「启用系统技战法」直接 EROFS。沙箱侧这一层仍然只读，模型改不到它。
             - name: assets
-              mountPath: /opt/dsh/.dsh/pyenv
-              subPath: {{ .Values.persistence.assets.pyenv }}
+              mountPath: {{ .Values.persistence.assets.mountPath }}/system/skills
+              subPath: system/skills
             {{- end }}
             - name: config
               mountPath: /etc/dsh/tenant.config.yaml

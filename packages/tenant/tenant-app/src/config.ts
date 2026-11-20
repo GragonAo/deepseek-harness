@@ -448,6 +448,7 @@ function readSandbox(reader: Reader): TenantAppConfig['sandbox'] {
     'backend', ...shared,
     'namespace', 'image', 'kubectlBinary', 'imagePullPolicy', 'toolExecPort', 'imagePath',
     'workspaceClaim', 'claimRoot', 'systemRoot', 'pythonRoot', 'toolsRoot', 'pythonEnv', 'assetMounts',
+    'assetsClaim', 'assetsRoot',
     'memoryLimit', 'cpuLimit',
     'cliTimeoutMs', 'statusPollMs', 'readyTimeoutMs', 'readyPollMs', 'command', 'env',
   ])
@@ -466,6 +467,9 @@ function readSandbox(reader: Reader): TenantAppConfig['sandbox'] {
     toolsRoot: reader.string('toolsRoot'),
     pythonEnv: readPythonEnv(reader.child('pythonEnv')),
     ...present('assetMounts', readAssetMounts(reader)),
+    // 整块资产卷：两个字段成对，provider 在加载时校验配对与路径，本层只照抄。
+    ...present('assetsClaim', reader.optionalString('assetsClaim')),
+    ...present('assetsRoot', reader.optionalString('assetsRoot')),
     ...present('command', reader.optionalStringArray('command')),
     ...present('env', reader.optionalStringMap('env')),
     ...present('imagePath', reader.optionalString('imagePath')),

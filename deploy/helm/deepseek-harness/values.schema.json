@@ -223,12 +223,11 @@
         "assets": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["enabled", "name", "system", "pyenv"],
+          "required": ["enabled", "name", "mountPath"],
           "properties": {
             "enabled": { "type": "boolean" },
             "name": { "type": "string", "minLength": 1 },
-            "system": { "type": "string", "minLength": 1 },
-            "pyenv": { "type": "string", "minLength": 1 }
+            "mountPath": { "type": "string", "pattern": "^/[^/]" }
           }
         }
       }

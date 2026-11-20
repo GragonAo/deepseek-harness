@@ -207,6 +207,23 @@ export interface Config {
    * {@link claimRoot}——hostPath 模式下没有 claim 可投影。
    */
   assetMounts?: AssetMount[]
+  /**
+   * 长期共享资产卷：整块只读挂到 {@link assetsRoot}，provider 不按层切子目录。
+   *
+   * 与 {@link assetMounts} 的分工是概念上的：这里说的是一整份额外的只读卷，卷里有哪些目录
+   * （Python 运行时、系统层、字体……）由部署自己的程序配置解释，因此换布局不用改这份配置，
+   * 卷里缺什么也要等到下游真正去读时才暴露。`assetMounts` 说的是「某一层改由另一块 claim
+   * 承载」，路径由层自己决定。两者可以同时使用。
+   */
+  assetsClaim?: string
+  /**
+   * {@link assetsClaim} 在沙箱里的挂载点；与它必须成对出现。
+   *
+   * 位于它之下的同路径挂载（如 `systemRoot`、`pythonRoot`）不再单独挂载：它们已经随整卷
+   * 可见，再挂一次只会让同一份数据出现在两条路径上。挂载点在卷里不存在时 Pod 起不来，
+   * 这是有意的——静默给一个空目录会把问题推到沙箱内部。
+   */
+  assetsRoot?: string
   /** 宿主机上按 subject 分目录的根，挂到 `/global`。不设置则跳过该挂载。 */
   usersRoot?: string
   /** 存放全局 skill 树的宿主机目录，以只读方式挂到同一路径。 */
@@ -436,10 +453,26 @@ export function sandboxMounts(config: Config, tenant: Pick<Tenant, 'workspaceRoo
   if (toolsRoot !== undefined) sources.push({ source: toolsRoot, mountPath: '/tools', readOnly: true })
   if (config.pythonRoot) sources.push({ source: config.pythonRoot, mountPath: config.pythonRoot, readOnly: true })
 
+  // 资产卷整块挂进来：卷内布局由部署的程序配置解释，provider 只保证「它在那儿、只读」。
+  // 落在它里面的同路径层已经随整卷可见，单独的挂载是重复的，去掉它；
+  // 挂到别处的（例如 `/opt/data/skills/system` 这类聚合根）仍要自己挂，subPath 相对卷根算。
+  const assetsClaim = config.assetsClaim
+  const assetsRoot = config.assetsRoot
+  if ((assetsClaim === undefined) !== (assetsRoot === undefined)) {
+    throw new Error('container-k8s: Config.assetsClaim and Config.assetsRoot must be set together.')
+  }
+  if (assetsRoot !== undefined) {
+    // 卷内的同路径层去掉，整卷那条排在最前：它一旦挂上，下面的层就已经可见。
+    const kept = sources.filter(m => !(m.mountPath === m.source && isWithin(assetsRoot, m.source)))
+    sources.splice(0, sources.length, { source: assetsRoot, mountPath: assetsRoot, readOnly: true }, ...kept)
+  }
+
   const claim = config.workspaceClaim
   const claimRoot = config.claimRoot
   if (!claim || !claimRoot) return withLocalMountPoint(sources.map(m => ({ kind: 'hostPath', ...m })), SKILLS_ROOT)
   for (const m of sources) {
+    // 资产卷里的路径不属于工作区 claim，它们由下面对资产卷的那条分支投影。
+    if (assetsRoot !== undefined && assetsClaim !== undefined && isWithin(assetsRoot, m.source)) continue
     if (!isWithin(claimRoot, m.source)) {
       throw new Error(
         `container-k8s: mount source '${m.source}' is outside claimRoot '${claimRoot}'. ` +
@@ -454,6 +487,17 @@ export function sandboxMounts(config: Config, tenant: Pick<Tenant, 'workspaceRoo
   for (const asset of config.assetMounts ?? []) assets.set(assetKey(asset.source), asset)
   const applied = new Set<string>()
   const projected = sources.map((m) => {
+    // 资产卷里的位置：同一块资产 claim，subPath 相对卷根算；卷根本身不带 subPath。
+    if (assetsRoot !== undefined && assetsClaim !== undefined && isWithin(assetsRoot, m.source)) {
+      const rel = posix.relative(assetsRoot, m.source)
+      return {
+        kind: 'claim' as const,
+        claimName: assetsClaim,
+        ...(rel === '' ? {} : { subPath: rel }),
+        mountPath: m.mountPath,
+        readOnly: m.readOnly,
+      }
+    }
     const key = assetKey(m.source)
     const asset = assets.get(key)
     if (!asset) {
@@ -580,6 +624,8 @@ export class K8sContainerRuntime extends ContainerRuntime {
       claim: z.string(),
       subPath: z.string(),
     })).default(undefined as unknown as AssetMount[]),
+    assetsClaim: z.string(),
+    assetsRoot: z.string(),
     usersRoot: z.string(),
     systemRoot: z.string(),
     toolsRoot: z.string(),
@@ -678,6 +724,30 @@ export class K8sContainerRuntime extends ContainerRuntime {
       // 绝对 subPath 会被 kubelet 当成另一条路径，`..` 会逃出 claim：两者都在同一次挂载里立刻失败。
       if (asset.subPath === '' || posix.isAbsolute(asset.subPath) || asset.subPath.split('/').includes('..')) {
         throw new Error(`container-k8s: Config.assetMounts['${asset.source}'].subPath must be a non-empty path inside that claim, got '${asset.subPath}'`)
+      }
+    }
+    // 资产卷整块挂载同样要求 claim 模式，且两个字段成对：只写挂载点等于挂一块不存在的卷。
+    const assetsClaim = config.assetsClaim
+    const assetsRoot = config.assetsRoot
+    if ((assetsClaim === undefined) !== (assetsRoot === undefined)) {
+      throw new Error('container-k8s: Config.assetsClaim and Config.assetsRoot must be set together or omitted together')
+    }
+    const claimRoot = config.claimRoot
+    if (assetsClaim !== undefined && assetsRoot !== undefined) {
+      if (claimRoot === undefined) {
+        throw new Error('container-k8s: Config.assetsRoot requires Config.workspaceClaim and Config.claimRoot')
+      }
+      if (assetsClaim.trim() === '') {
+        throw new Error('container-k8s: Config.assetsClaim is empty')
+      }
+      if (!posix.isAbsolute(assetsRoot)) {
+        throw new Error(`container-k8s: Config.assetsRoot '${assetsRoot}' must be an absolute path`)
+      }
+      // 资产卷挂在工作区 claim 里面时，删租户会连带删掉整卷：两者的挂载点必须互不包含。
+      if (isWithin(claimRoot, assetsRoot) || isWithin(assetsRoot, claimRoot)) {
+        throw new Error(
+          `container-k8s: Config.assetsRoot '${assetsRoot}' and Config.claimRoot '${claimRoot}' must not contain each other`,
+        )
       }
     }
     // 同一个源写两条时后一条会覆盖前一条，而两条看起来都生效了：直接拒绝。

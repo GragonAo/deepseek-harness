@@ -4,6 +4,8 @@ Status: implemented
 
 English | [中文](2026-11-19-asset-claim-mounts.zh.md)
 
+Partially superseded by [Whole-claim asset mounts](2026-11-20-whole-claim-asset-mount.md): the per-source table below stays as decided, and the pair form it rejects in favor of that table is now used alongside it to mount a claim whole.
+
 ## Problem
 
 A claim-mode `container-k8s` deployment projected every sandbox mount through one claim (`workspaceClaim`) rooted at `claimRoot`. That claim belongs to the workspace tree: tenants create and delete directories in it, and its lifetime follows theirs. Two mount sources do not share that lifetime — the Python runtime (`pythonRoot`) and the global system tree (`systemRoot`) are shared by every tenant of a deployment, run to hundreds of megabytes, and must survive a tenant being deleted. Keeping them in the workspace claim means either seeding a copy per deployment or losing them whenever that claim is replaced.

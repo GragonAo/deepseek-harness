@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-11-19-asset-claim-mounts.md
-2026-11-19-asset-claim-mounts.md: 96623e95ee35be0203a3fa57dafe811a37ea106b
-2026-11-19-asset-claim-mounts.zh.md: fcf314276e520fc21e91454f1819c426cc9cff52
+2026-11-19-asset-claim-mounts.md: b95333b66edb5a7efb0834b7967af098b108ba3d
+2026-11-19-asset-claim-mounts.zh.md: 20cea7e99682043ba66ea360608d14b03d69b8ab

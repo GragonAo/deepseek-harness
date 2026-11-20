@@ -49,6 +49,11 @@ tools:
   mode: {{ .Values.tenantConfig.tools.mode }}
   maxParallelSubCalls: {{ .Values.tenantConfig.tools.maxParallelSubCalls }}
 
+{{- $assets := .Values.persistence.assets }}
+{{- /* 资产卷启用时两层都从卷里认：<mountPath>/pyenv、<mountPath>/system；关掉则退回工作区
+       claim 下的旧位置。卷内布局是程序的知识，因此只在这里出现，chart 只给挂载点。 */}}
+{{- $pythonRoot := ternary (printf "%s/pyenv" $assets.mountPath) "/opt/dsh/.dsh/pyenv" $assets.enabled }}
+{{- $systemRoot := ternary (printf "%s/system" $assets.mountPath) "/opt/dsh/.dsh/system" $assets.enabled }}
 sandbox:
   backend: k8s
   namespace: {{ .Values.namespace }}
@@ -56,25 +61,20 @@ sandbox:
   imagePullPolicy: {{ .Values.image.pullPolicy }}
   workspaceClaim: {{ .Values.persistence.workspace.name }}
   claimRoot: /opt/dsh
-  systemRoot: /opt/dsh/.dsh/system
+  systemRoot: {{ $systemRoot }}
   # 沙箱镜像里没有 Python：解释器与全部依赖来自宿主这个目录。节点上读不到时加载直接失败。
-  pythonRoot: /opt/dsh/.dsh/pyenv
+  pythonRoot: {{ $pythonRoot }}
   toolsRoot: /opt/dsh/tools
   # 沙箱内 Python 的三条路径：节点目录宿主读不到，所以逐项给出。
   pythonEnv:
-    binDir: /opt/dsh/.dsh/pyenv/bin
-    virtualEnv: /opt/dsh/.dsh/pyenv
-    sitePackages: /opt/dsh/.dsh/pyenv/lib/python3.11/site-packages
-  {{- if .Values.persistence.assets.enabled }}
-  # 运行时与系统层由资产卷承载：源路径不变，只是不再投影到工作区 claim，
-  # 因此删掉某个租户不会连带删掉 Python 解释器与字体。source 必须与上面两行逐字相同。
-  assetMounts:
-    - source: /opt/dsh/.dsh/system
-      claim: {{ .Values.persistence.assets.name }}
-      subPath: {{ .Values.persistence.assets.system }}
-    - source: /opt/dsh/.dsh/pyenv
-      claim: {{ .Values.persistence.assets.name }}
-      subPath: {{ .Values.persistence.assets.pyenv }}
+    binDir: {{ $pythonRoot }}/bin
+    virtualEnv: {{ $pythonRoot }}
+    sitePackages: {{ $pythonRoot }}/lib/python3.11/site-packages
+  {{- if $assets.enabled }}
+  # 资产卷整块只读挂进沙箱：卷里有什么（pyenv/、system/、fonts/）由上面两行声明，
+  # provider 不切子目录、也不解释布局。读不读某一层是程序自己的事，但必须都在。
+  assetsClaim: {{ $assets.name }}
+  assetsRoot: {{ $assets.mountPath }}
   {{- end }}
   idleTimeoutMs: {{ .Values.sandbox.idleTimeoutMs }}
   startTimeoutMs: {{ .Values.sandbox.startTimeoutMs }}

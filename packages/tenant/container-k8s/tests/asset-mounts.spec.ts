@@ -144,3 +144,72 @@ describe('资产卷', () => {
       .toThrow(/must be an absolute path/)
   })
 })
+
+/**
+ * 整卷挂载：共享资产卷只按「一整块只读卷」挂进来，卷内有什么由部署的程序配置解释。
+ *
+ * 为什么钉死这几条：卷内布局不再由 chart 决定，因此这里必须固定「挂了几次、带不带 subPath、
+ * 卷内的层会不会被重复挂、以及成对与互不包含两条加载期硬失败」——这些一旦放松，
+ * 换布局就会悄悄变成「同一份数据出现在两条路径上」或「删租户把运行时一起删掉」。
+ */
+describe('资产卷整块挂载', () => {
+  /** 资产卷的挂载点：与工作区 claim 的根互不包含。 */
+  const ASSETS_ROOT = '/opt/assets'
+
+  /** 卷内布局由程序声明：两层都在卷里，因此不再需要 assetMounts 逐层投影。 */
+  const assetsConfig = (overrides: ConfigOverrides = {}): Config => config({
+    assetsClaim: ASSETS,
+    assetsRoot: ASSETS_ROOT,
+    systemRoot: `${ASSETS_ROOT}/system`,
+    pythonRoot: `${ASSETS_ROOT}/pyenv`,
+    ...overrides,
+  })
+
+  it('整卷只读挂一次，且不带 subPath', () => {
+    const mounts = sandboxMounts(assetsConfig(), TENANT, SUBJECT)
+    const root = mounts.filter(m => m.mountPath === ASSETS_ROOT)
+    expect(root).toHaveLength(1)
+    expect(root[0]).toMatchObject({ kind: 'claim', claimName: ASSETS, readOnly: true })
+    // 空串会被 kubelet 当成一条不存在的子目录，所以这里必须是「没有这个字段」。
+    expect(root[0]).not.toHaveProperty('subPath')
+  })
+
+  it('卷内的层不再单独挂载：整卷已经让它们可见', () => {
+    const mounts = sandboxMounts(assetsConfig(), TENANT, SUBJECT)
+    expect(mounts.find(m => m.mountPath === `${ASSETS_ROOT}/system`)).toBeUndefined()
+    expect(mounts.find(m => m.mountPath === `${ASSETS_ROOT}/pyenv`)).toBeUndefined()
+  })
+
+  it('挂到别处的技能聚合根仍单独挂，subPath 相对卷根', () => {
+    const mounts = sandboxMounts(assetsConfig(), TENANT, SUBJECT)
+    expect(mounts.find(m => m.mountPath === '/opt/data/skills/system')).toMatchObject({
+      kind: 'claim',
+      claimName: ASSETS,
+      subPath: 'system/skills',
+      readOnly: true,
+    })
+  })
+
+  it('卷外的层照旧投影到工作区 claim', () => {
+    const mounts = sandboxMounts(assetsConfig(), TENANT, SUBJECT)
+    expect(mounts.find(m => m.mountPath === '/tools'))
+      .toMatchObject({ kind: 'claim', claimName: 'dsh-workspace', subPath: 'tools' })
+  })
+
+  it('claim 与挂载点必须成对给出', () => {
+    expect(() => build({ assetsClaim: ASSETS }))
+      .toThrow(/assetsClaim and Config\.assetsRoot must be set together/)
+    expect(() => build({ assetsRoot: ASSETS_ROOT }))
+      .toThrow(/assetsClaim and Config\.assetsRoot must be set together/)
+  })
+
+  it('拒绝与工作区 claim 互相包含的挂载点：删租户会连带删掉运行时', () => {
+    expect(() => build({ assetsClaim: ASSETS, assetsRoot: `${ROOT}/assets` }))
+      .toThrow(/must not contain each other/)
+  })
+
+  it('没有 claim 模式时拒绝整卷挂载', () => {
+    expect(() => build({ workspaceClaim: undefined, claimRoot: undefined, assetsClaim: ASSETS, assetsRoot: ASSETS_ROOT }))
+      .toThrow(/assetsRoot requires Config\.workspaceClaim and Config\.claimRoot/)
+  })
+})

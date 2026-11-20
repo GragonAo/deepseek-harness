@@ -189,6 +189,14 @@ export interface K8sSandboxConfig extends SandboxLayersConfig {
     readonly claim: string
     readonly subPath: string
   }[]
+  /**
+   * 整块挂进沙箱的共享资产卷：`assetsClaim` 是它的 claim 名，`assetsRoot` 是挂载点。
+   * 两个字段必须成对；卷内布局（例如 `pyenv/`、`system/`）由 `systemRoot` / `pythonRoot` 声明，
+   * provider 不切子目录。与 `assetMounts` 逐字同义于 `container-k8s` 的同名配置。
+   */
+  readonly assetsClaim?: string
+  /** 整块资产卷的挂载点；与 `assetsClaim` 成对出现。 */
+  readonly assetsRoot?: string
   /** 每个沙箱里启动的容器命令；省略则用镜像 entrypoint 的 `['node', 'entry.mjs']`。 */
   readonly command?: readonly string[]
   /** 沙箱容器的显式环境变量。身份变量（`DSH_CASE_ID`/`DSH_TENANT_ID`/`DSH_USER_ID`）与 Python 三件套由 provider 在此之后写入，覆盖不了它们。 */

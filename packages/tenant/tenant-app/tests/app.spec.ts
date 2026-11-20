@@ -155,6 +155,18 @@ describe('租户服务配置', () => {
 `)).toThrow(/未知字段：subpath/)
   })
 
+  it('整块资产卷按两个字段读取，配对与路径留给 provider 判断', () => {
+    const config = configFrom(`${K8S_MINIMAL}  assetsClaim: shared-assets
+  assetsRoot: /opt/assets
+`)
+    expect(config.sandbox).toMatchObject({ assetsClaim: 'shared-assets', assetsRoot: '/opt/assets' })
+  })
+
+  it('整块资产卷也拒绝拼错的字段名', () => {
+    expect(() => configFrom(`${K8S_MINIMAL}  assetsClaims: shared-assets
+`)).toThrow(/未知字段：assetsClaims/)
+  })
+
   it('k8s 后端的资源上限与 docker 同义，只是内存按 quantity 写', () => {
     const config = configFrom(`${K8S_MINIMAL}  memoryLimit: 8Gi\n  cpuLimit: 2\n`)
     expect(config.sandbox).toMatchObject({ backend: 'k8s', memoryLimit: '8Gi', cpuLimit: 2 })

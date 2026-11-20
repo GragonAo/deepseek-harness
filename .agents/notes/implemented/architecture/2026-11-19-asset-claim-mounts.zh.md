@@ -4,6 +4,8 @@ Status: implemented
 
 [English](2026-11-19-asset-claim-mounts.md) | 中文
 
+部分被 [整块资产卷挂载](2026-11-20-whole-claim-asset-mount.md) 取代：下面的逐源清单按原决定保留，而它为了那份清单否掉的「一对 claim + 根」，现在与它并存用于整块挂载一块 claim。
+
 ## Problem
 
 claim 模式的 `container-k8s` 部署把每个沙箱挂载都投影到一块 claim（`workspaceClaim`）上，其根是 `claimRoot`。那块 claim 属于工作区那棵树：租户在里面创建和删除目录，它的寿命跟着租户走。有两个挂载源并不共享这个寿命——Python 运行时（`pythonRoot`）与全局系统层（`systemRoot`）由同一部署的所有租户共用、体量在几百 MB，而且必须在某个租户被删除后继续存在。把它们留在工作区 claim 里，要么每次部署都得再种一份，要么在那块 claim 被替换时一起丢掉。

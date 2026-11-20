@@ -193,15 +193,15 @@ persistence:
     storageClass: rook-cephfs
     # PVC 不随 helm uninstall 删除：里面是用户案件数据，删了不可恢复。
     keepOnDelete: true
-  # 长期共享资产卷：只承接 Python 运行时与系统层（字体、技能、库），不随租户增删。
+  # 长期共享资产卷：只承接 Python 运行时与系统层（技能、库、字体），不随租户增删。
   # ← 本 chart 只引用，不创建 PVC/PV：那块卷与它的静态 PV 由中间件发布声明
   #   （deploy/helm/middleware 的 sharedAssets），因为 fsName/pool/subvolume 是存储侧知识。
   assets:
     enabled: true
     name: shared-assets
-    # 这两条 subPath 是卷内布局，必须与中间件发布写入/种下的位置一致。
-    system: dsh/system
-    pyenv: dsh/pyenv
+    # 卷的挂载点。卷内有什么由程序自己认（files/tenant-config.yaml 的 pythonRoot /
+    # systemRoot），参考布局是 pyenv/、system/、fonts/；换布局只改程序配置，不动 chart。
+    mountPath: /opt/assets
 
 # -----------------------------------------------------------------------------
 # 配置挂载
