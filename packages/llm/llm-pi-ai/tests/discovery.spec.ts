@@ -128,6 +128,29 @@ describe('draft-provider model discovery', () => {
     expect(server.headers[0]?.['user-agent']).toBe(userAgent())
   })
 
+  it('carries the modalities a listing discloses, and only the ones it understands', async () => {
+    const server = await listingServer({
+      body: JSON.stringify({
+        data: [
+          { id: 'acme-vision', architecture: { input_modalities: ['text', 'image'] } },
+          { id: 'acme-flat', input_modalities: ['image'] },
+          { id: 'acme-odd', architecture: { input_modalities: ['audio'] } },
+          { id: 'acme-plain' },
+        ],
+      }),
+    })
+    const ctx = await harness()
+
+    const models = await ctx.llm.discoverModels('llm-pi-ai', { baseURL: server.url })
+
+    expect(models).toEqual([
+      { id: 'acme-vision', inputModalities: ['text', 'image'] },
+      { id: 'acme-flat', inputModalities: ['image'] },
+      { id: 'acme-odd' },
+      { id: 'acme-plain' },
+    ])
+  })
+
   it('keeps a deployment path instead of resolving it away', async () => {
     const server = await listingServer({ body: JSON.stringify({ data: [{ id: 'm' }] }) })
     const ctx = await harness()

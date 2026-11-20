@@ -165,11 +165,15 @@ export const modelReasoningSchema = z.object({
   defaultEffort: z.string().min(1).optional(),
 }) satisfies z.ZodType<Wire<ModelReasoning>>
 
+/** Request modality vocabulary this build's wire carries. */
+export const modelModalitySchema = z.enum(['text', 'image'])
+
 /** One advisory model entry inside a provider group. */
 export const modelCatalogModelSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   description: z.string().optional(),
+  inputModalities: z.array(modelModalitySchema).min(1).optional(),
   reasoning: modelReasoningSchema.optional(),
 }) satisfies z.ZodType<Wire<ModelCatalogModel>>
 

@@ -539,7 +539,7 @@ interface GenerateOptions {
    * map the purpose to model-hidden transport metadata or purpose-specific
    * generation policy. Ordinary conversation requests leave it unset.
    */
-  purpose?: 'compaction' | 'session-title'
+  purpose?: 'compaction' | 'session-title' | 'session-followups'
 }
 ```
 
@@ -627,6 +627,12 @@ interface LlmDiscoveredModel {
   contextWindow?: number
   /** Maximum output tokens, when disclosed. */
   maxTokens?: number
+  /**
+   * Request modalities the endpoint discloses for this model, when it discloses
+   * any. A surface adopting the entry can store them; an entry without them
+   * leaves the modality decision to the adapter.
+   */
+  inputModalities?: readonly ModelModality[]
 }
 ```
 

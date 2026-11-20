@@ -311,6 +311,7 @@ async function buildModelCatalog(ctx: Context): Promise<{
           id: model.id,
           name: model.name,
           ...model.description === undefined ? {} : { description: model.description },
+          ...model.inputModalities === undefined ? {} : { inputModalities: [...model.inputModalities] },
           ...reasoning === undefined ? {} : { reasoning },
         }
       }))
@@ -2128,6 +2129,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       if (model.name !== undefined) view.name = model.name
       if (model.contextWindow !== undefined) view.contextWindow = model.contextWindow
       if (model.maxTokens !== undefined) view.maxTokens = model.maxTokens
+      if (model.inputModalities !== undefined) view.inputModalities = [...model.inputModalities]
       return view
     })
     return {

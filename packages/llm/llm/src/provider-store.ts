@@ -12,6 +12,7 @@
 
 import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
+import type { ModelModality } from './types.ts'
 
 /** One selectable model a stored provider route serves. */
 export interface LlmStoredModel {
@@ -25,6 +26,14 @@ export interface LlmStoredModel {
   maxTokens?: number
   /** Selectable reasoning level to its wire spelling. */
   reasoningEfforts?: Record<string, string>
+  /**
+   * Request modalities this model accepts, when the administrator declared
+   * them. Absent leaves the decision to the serving adapter, which is how a
+   * route that never declared anything keeps the modality set it derives from
+   * its own catalog; a declared list replaces that set, so a vision model a
+   * gateway serves is only image-capable once this says so.
+   */
+  inputModalities?: readonly ModelModality[]
 }
 
 /**
@@ -111,6 +120,35 @@ function optionalCount(source: Record<string, unknown>, field: string, label: st
 }
 
 /**
+ * Read one optional modality list field.
+ *
+ * The spelling is checked here rather than left to a consumer because the value
+ * is durable: a route stored with a modality no adapter understands would fail
+ * on every request until someone edited the record. An empty list is refused
+ * for the same reason — a model that accepts nothing cannot serve a request,
+ * and the way to say "undeclared" is to omit the field.
+ *
+ * @param source - the candidate object.
+ * @param field - field name to read.
+ * @param label - record id used in the error message.
+ * @returns the modalities, or undefined when absent.
+ */
+function optionalModalities(source: Record<string, unknown>, field: string, label: string): ModelModality[] | undefined {
+  const value = source[field]
+  if (value === undefined) return undefined
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new TypeError('llm provider ' + label + ' field "' + field + '" must be a non-empty array when present')
+  }
+  const entries: unknown[] = value
+  return entries.map((entry) => {
+    if (entry !== 'text' && entry !== 'image') {
+      throw new TypeError('llm provider ' + label + ' field "' + field + '" accepts "text" and "image", not ' + JSON.stringify(entry))
+    }
+    return entry
+  })
+}
+
+/**
  * Validate one stored model entry.
  * @param value - the candidate entry.
  * @param label - record id used in error messages.
@@ -137,6 +175,8 @@ function assertStoredModel(value: unknown, label: string): LlmStoredModel {
     }
     model.reasoningEfforts = normalized
   }
+  const inputModalities = optionalModalities(value, 'inputModalities', label)
+  if (inputModalities !== undefined) model.inputModalities = inputModalities
   return model
 }
 

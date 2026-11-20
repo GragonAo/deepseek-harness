@@ -59,6 +59,27 @@ interface ListingEntry {
   context_length?: unknown
   max_tokens?: unknown
   max_output_tokens?: unknown
+  /** OpenRouter-shaped capability disclosure, at the top level or under `architecture`. */
+  input_modalities?: unknown
+  architecture?: unknown
+}
+
+/**
+ * Request modalities a listing entry discloses, or `undefined` when it
+ * discloses none.
+ *
+ * Listings that answer this at all use OpenRouter's spelling,
+ * `architecture.input_modalities`; a few gateways hoist the same list to the top
+ * level. Spellings this build does not know are dropped rather than failing the
+ * entry: the vocabulary is the harness's, and an endpoint that names a modality
+ * this build cannot serve still offers a usable text model.
+ */
+function modalities(entry: ListingEntry): LlmDiscoveredModel['inputModalities'] {
+  const nested = (entry.architecture as { input_modalities?: unknown } | null | undefined)?.input_modalities
+  const disclosed = Array.isArray(nested) ? nested : entry.input_modalities
+  if (!Array.isArray(disclosed)) return undefined
+  const accepted = disclosed.filter((value): value is 'text' | 'image' => value === 'text' || value === 'image')
+  return accepted.length === 0 ? undefined : [...new Set(accepted)]
 }
 
 /** A positive integer field of a listing entry, or `undefined` when absent or unusable. */
@@ -146,16 +167,21 @@ function readListing(body: unknown): LlmDiscoveredModel[] {
   const models: LlmDiscoveredModel[] = []
   for (const raw of data) {
     const entry = raw as ListingEntry | null
-    const id = label(entry?.id)
+    // A listing row can be `null` or carry no id; either way there is no model
+    // to offer, and the rows that follow are unaffected.
+    if (entry === null) continue
+    const id = label(entry.id)
     if (id === undefined) continue
-    const name = label(entry?.name, entry?.display_name)
-    const contextWindow = capacity(entry?.context_window, entry?.context_length)
-    const maxTokens = capacity(entry?.max_output_tokens, entry?.max_tokens)
+    const name = label(entry.name, entry.display_name)
+    const contextWindow = capacity(entry.context_window, entry.context_length)
+    const maxTokens = capacity(entry.max_output_tokens, entry.max_tokens)
+    const inputModalities = modalities(entry)
     models.push({
       id,
       ...name === undefined ? {} : { name },
       ...contextWindow === undefined ? {} : { contextWindow },
       ...maxTokens === undefined ? {} : { maxTokens },
+      ...inputModalities === undefined ? {} : { inputModalities },
     })
   }
   return models

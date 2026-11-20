@@ -125,6 +125,20 @@ describe('tenant provider registry', () => {
     expect((await ctx.llm.listModels('acme-gateway')).map(model => model.id)).toEqual(['config-model'])
   })
 
+  it('serves the modalities a stored model declares', async () => {
+    const { ctx, store } = await boot({})
+    await store.upsert(record({ models: [{ id: 'vision-model', inputModalities: ['text', 'image'] }] }))
+
+    expect((await ctx.llm.listModels('acme-gateway'))[0]?.inputModalities).toEqual(['text', 'image'])
+  })
+
+  it('serves an undeclared model at the text-only wire default', async () => {
+    const { ctx, store } = await boot({})
+    await store.upsert(record())
+
+    expect((await ctx.llm.listModels('acme-gateway'))[0]?.inputModalities).toEqual(['text'])
+  })
+
   it('authenticates a request with the stored credential', async () => {
     const server = await mockServer([{ events: textEvents }])
     const { ctx, store } = await boot({})

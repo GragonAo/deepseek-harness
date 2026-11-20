@@ -8,6 +8,7 @@
  * `settings/document-updated` owner events.
  */
 
+import type { ModelModality } from '@deepseek-ai/dsh-llm'
 import type { RpcRequest, RpcResponse } from './rpc.ts'
 import type { ModelCatalogFailure, ModelProviderGroup } from './sessions.ts'
 
@@ -50,6 +51,13 @@ export interface ManagedProviderModelView {
   contextWindow?: number
   /** Maximum output tokens, when the administrator supplied it. */
   maxTokens?: number
+  /**
+   * Request modalities this model accepts, when the administrator declared
+   * them. Absent means "not declared", which leaves the serving adapter's own
+   * decision in place; a surface therefore shows absence as unknown rather than
+   * as text-only.
+   */
+  inputModalities?: readonly ModelModality[]
 }
 
 /**

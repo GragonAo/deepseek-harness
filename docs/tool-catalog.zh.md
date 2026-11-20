@@ -42,9 +42,10 @@
 | `@deepseek-ai/dsh-tool-jobs` | `job_kill`、`job_list`、`job_output` | `ctx.tools`、`ctx.jobs`、`ctx.systemPrompt` | `tool/call`、`tool/result`、`user/message via agent.inject() for background completion notices` | - | 与任务种类无关的后台任务控制器：后台 bash 命令、PTY 发送和 subagent 都通过相同的 3 个工具读取、列出和终止。加载该插件会挂接控制器，从而启用生产方的 `ctx.jobs.start()`。 |
 | `@deepseek-ai/dsh-experimental-tool-agent-team` | `followup_task`、`interrupt_agent`、`list_agents`、`send_message`、`spawn_teammate`、`team_task_create`、`team_task_get`、`team_task_list`、`team_task_update`、`wait_agent` | `ctx.tools`、`ctx.systemPrompt`、`ctx.agentTeams`、`an exact live Team member Agent` | `tool/call`、`team/member`、`team/message/queued`、`team/message/delivered`、`team/task`、`tool/result` | - | 这 10 个工具限定于隐式 Team Lead 与持久 teammate 作用域。随产品发布的 dsh-base bundle 默认禁用该包；文档中的 Agent Teams profile patch 会启用它，并禁用旧 continuable child 的同名控制工具。 |
 | `@deepseek-ai/dsh-tool-todo` | `todo_write` | `ctx.tools`、`owning Agent session` | `tool/call`、`todo/write`、`tool/result` | - | todo_write 是会话所有的状态；UI 将最新的 todo/write 事件渲染为检查清单。`allowParallelInProgress` 是没有默认值的必填项，因此本目录明确选择 `true`，对应描述允许同时存在多个 `in_progress` 项。选择 `false` 的部署会获得同一工具，但描述会要求只能有 1 个活动任务。 |
+| `@deepseek-ai/dsh-tool-present` | `present` | `ctx.tools`、`ctx.systemPrompt`、`owning Agent session`、`optional ctx.fs` | `tool/call`、`deliverables/presented`、`tool/result` | - | present 是模型对本轮交付哪些文件的声明；deliverables 投影按轮折叠这些声明，于是客户端渲染的是这一轮真正交出去的东西，而不是它碰过的每个路径。每个路径都经组合后的文件系统解析，所以声明不可能指向一个不存在的文件。 |
 | `@deepseek-ai/dsh-tool-workflow` | `workflow` | `ctx.tools`、`ctx.workflowEngine`、`ctx.systemPrompt`、`a calling Agent (exec.agent parents the script children)` | `tool/call`、`tool/result` | - | - |
 | `@deepseek-ai/dsh-tool-web` | `web_fetch`、`web_search` | `ctx.tools`、`ctx.web`、`ctx.systemPrompt` | `tool/call`、`tool/result` | - | web_search 和 web_fetch 将提供方选择置于 ctx.web 之后，使模型可见 schema 在更换后端时保持稳定。 |
-| `@deepseek-ai/dsh-tool-artifact` | `artifact_list`、`artifact_publish` | `ctx.tools`、`the authenticated (tenant, user) request scope at call time` | `tool/call`、`tool/result` | - | 两个工具都从已鉴权的请求作用域解析案件与主体，而不是从参数解析，因此在案件作用域之外的调用会失败，而不是回退到共享目录。artifact_publish 返回 Web 前端从回复中解析出的交付标签；前端匹配那几个确切字面量，所以该标签是固定协议，而不是部署配置。 |
+| `@deepseek-ai/dsh-object-store` | `object_publish` | `ctx.tools`、`the authenticated (tenant, user) request scope at call time` | `tool/call`、`tool/result` | - | object_publish 从已鉴权的请求作用域解析案件与主体，从该作用域允许的挂载点解析文件，因此任何参数都指不到别的主体的文件。端点、桶与公开基址是部署配置；用户下载用的地址由工具自己的结果给出。 |
 
 <a id="deepseek-aidsh-tool-ask-user"></a>
 
@@ -2105,6 +2106,50 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
 
 todo_write 是会话所有的状态；UI 将最新的 todo/write 事件渲染为检查清单。`allowParallelInProgress` 是没有默认值的必填项，因此本目录明确选择 `true`，对应描述允许同时存在多个 `in_progress` 项。选择 `false` 的部署会获得同一工具，但描述会要求只能有 1 个活动任务。
 
+<a id="deepseek-aidsh-tool-present"></a>
+
+## `@deepseek-ai/dsh-tool-present`
+
+### `present`
+
+声明本次任务交付给用户的文件。任务要交付的内容都写完之后调用一次。
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "files": {
+      "type": "array",
+      "description": "The finished files this turn hands to the user, in the order they should be shown.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "A file this task wrote; a relative path resolves against the working directory."
+          },
+          "description": {
+            "type": "string",
+            "description": "One line telling the user what this file is."
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    }
+  },
+  "required": [
+    "files"
+  ]
+}
+```
+
+来源：[`packages/deliverables/tool-present/src/index.ts`](../packages/deliverables/tool-present/src/index.ts)
+
+present 是模型对本轮交付哪些文件的声明；deliverables 投影按轮折叠这些声明，于是客户端渲染的是这一轮真正交出去的东西，而不是它碰过的每个路径。每个路径都经组合后的文件系统解析，所以声明不可能指向一个不存在的文件。
+
 <a id="deepseek-aidsh-tool-workflow"></a>
 
 ## `@deepseek-ai/dsh-tool-workflow`
@@ -2252,31 +2297,13 @@ todo_write 是会话所有的状态；UI 将最新的 todo/write 事件渲染为
 
 web_search 和 web_fetch 将提供方选择置于 ctx.web 之后，使模型可见 schema 在更换后端时保持稳定。
 
-<a id="deepseek-aidsh-tool-artifact"></a>
+<a id="deepseek-aidsh-object-store"></a>
 
-## `@deepseek-ai/dsh-tool-artifact`
+## `@deepseek-ai/dsh-object-store`
 
-### `artifact_list`
+### `object_publish`
 
-列出你已经交付给该用户的文件，最新在前。这里只列出你自己发布的产物；同一案件其他主体发布的产物不可见。
-
-```json
-{
-  "type": "object",
-  "properties": {
-    "limit": {
-      "type": "integer",
-      "description": "Largest number of entries to return; defaults to 50."
-    }
-  }
-}
-```
-
-来源：[`packages/tenant/tool-artifact/src/index.ts`](../packages/tenant/tool-artifact/src/index.ts)
-
-### `artifact_publish`
-
-把你生成的文件交付给用户，让他们能打开或下载。你沙箱里的文件用户够不到：本工具把文件复制进 Web 前端所服务的案件库，并返回路径以及你的回复必须携带的交付标签。用户应当收到的每一个产物都用它——报告、表格、HTML 摘要、图表、数据导出。已发布的副本不可变：再次发布会生成一个新文件，而源文件除非你传 move，否则留在你的工作区。
+把你生成的文件发布到对象存储，取回一个用户能下载的公开地址。你沙箱里的文件用户够不到：本工具把文件上传到部署的对象存储，返回一个不需要任何凭据的绝对地址。在回复里把这个地址给用户。报告、导出、表格、HTML 摘要和压缩包都用它。上传的对象不可变：再次发布会生成一个新对象，而源文件留在你的工作区。
 
 ```json
 {
@@ -2284,29 +2311,15 @@ web_search 和 web_fetch 将提供方选择置于 ctx.web 之后，使模型可�
   "properties": {
     "file_path": {
       "type": "string",
-      "description": "The file to deliver, as this sandbox sees it — absolute, or relative to the working directory."
+      "description": "The file to publish, as this sandbox sees it. Only the mounted paths (/workspace, /sessions, /case, /global) are readable here, so pass an absolute path such as /workspace/报告.md or a path relative to the working directory, which is this session's own directory under /sessions."
     },
     "title": {
       "type": "string",
-      "description": "Title recorded in the delivered file name; defaults to the source file name."
+      "description": "Stem recorded in the object key; the source extension is appended. Defaults to the source file name without its extension."
     },
-    "kind": {
+    "content_type": {
       "type": "string",
-      "description": "Delivery folder; inferred from the file extension when omitted.",
-      "enum": [
-        "html",
-        "docs",
-        "sheets",
-        "slides",
-        "images",
-        "data",
-        "packages",
-        "other"
-      ]
-    },
-    "move": {
-      "type": "boolean",
-      "description": "Move the file instead of copying it. Defaults to false, which leaves the source readable."
+      "description": "Content type to store; inferred from the file extension when omitted."
     }
   },
   "required": [
@@ -2315,6 +2328,6 @@ web_search 和 web_fetch 将提供方选择置于 ctx.web 之后，使模型可�
 }
 ```
 
-来源：[`packages/tenant/tool-artifact/src/index.ts`](../packages/tenant/tool-artifact/src/index.ts)
+来源：[`packages/tenant/object-store/src/index.ts`](../packages/tenant/object-store/src/index.ts)
 
-两个工具都从已鉴权的请求作用域解析案件与主体，而不是从参数解析，因此在案件作用域之外的调用会失败，而不是回退到共享目录。artifact_publish 还会返回 Web 前端从回复中解析出的交付标签；前端匹配那几个确切字面量，所以该标签是固定协议，而不是部署配置。
+object_publish 从已鉴权的请求作用域解析案件与主体，从该作用域允许的挂载点解析文件，因此任何参数都指不到别的主体的文件。端点、桶与公开基址是部署配置；用户下载用的地址由工具自己的结果给出。

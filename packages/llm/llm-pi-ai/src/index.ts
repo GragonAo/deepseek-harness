@@ -190,6 +190,10 @@ export function apply(ctx: Context, config: Config): void {
         if (model.contextWindow !== undefined) entry.contextWindow = model.contextWindow
         if (model.maxTokens !== undefined) entry.maxTokens = model.maxTokens
         if (model.reasoningEfforts !== undefined) entry.reasoningEfforts = { ...model.reasoningEfforts }
+        // A declared list is detached because pi-ai types `Model.input` mutably;
+        // an undeclared one stays absent so the catalog resolution in
+        // materializeModels keeps whatever the installed catalog records.
+        if (model.inputModalities !== undefined) entry.input = [...model.inputModalities]
         return entry
       })
       next[record.id] = {
