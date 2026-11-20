@@ -39,7 +39,6 @@ helm template deepseek-harness ./deploy/helm/deepseek-harness -n dsh
 helm upgrade --install deepseek-harness ./deploy/helm/deepseek-harness -n dsh \
   --create-namespace \
   --set image.tag=ai-icac-dsh-v1.0.23 \
-  --set config.tenantConfig.volumeKind=secret \
   --set middleware.database.password='<PG 密码>' \
   --set dependencies.dshPublicBaseUrl=http://<站点地址>:<端口> \
   --timeout 10m
@@ -61,19 +60,56 @@ helm upgrade --install deepseek-harness ./deploy/helm/deepseek-harness -n dsh \
 
 `mcpServers` 段要填真 token，而 token 只能来自配置文件（`applyEnvOverrides` 不覆盖它）。生产请置 `secrets.tenantConfig.create=false`，由部署机维护这份 Secret；否则每次 `helm upgrade` 都会把仓库里的占位内容盖上去。
 
+## 租户配置对象由部署机维护
+
+chart 建的那份正文是仓库占位内容，`helm upgrade` 每次都重新渲染。生产用三行 values 把正文对象换成部署机自己维护的一份：
+
+```yaml
+config:
+  tenantConfig:
+    volumeKind: secret
+secrets:
+  tenantConfig:
+    create: false
+    existingSecret: dsh-tenant-config-live     # 名字自定，示例值见 130 站点
+```
+
+`dsh-tenant-config-live` 手工建一次（唯一键 `tenant.config.yaml`），之后 helm 既不创建也不更新它。正文随版本新增必填段（例如 `plugins.tool-skill-publish.config.record`）时，要把**新结构合并进这份正文**，不能整份替换 —— 旧正文缺段会让装载直接失败并打印 `invalid config: $.xxx missing required value`：
+
+```sh
+# 1) 取本版本应然正文。create=true 只为渲染取值，不落库；数据库口令必须一起给，
+#    否则正文里的连接串是空密码（报 SASL: client password must be a string）。
+helm template dsh ./deploy/helm/deepseek-harness -n dsh -f <站点 values> \
+  --set secrets.tenantConfig.create=true \
+  --set middleware.database.password="$PG_PASSWORD" \
+  --show-only templates/secret-tenant-config.yaml > /tmp/new-secret.yaml
+
+# 2) 取正文：/tmp/new-secret.yaml 里 stringData["tenant.config.yaml"] 的内容
+# 3) 按键与上一版正文合并：结构以新为准，值为占位或空的沿用旧值（真 token 在旧值里）
+# 4) 写回并滚动（subPath 挂载不会自动更新）
+kubectl -n dsh create secret generic dsh-tenant-config-live \
+  --from-file=tenant.config.yaml=/tmp/merged.yaml \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n dsh rollout restart deploy/dsh-tenant-host
+```
+
+## 历史：租户配置卷的默认 kind
+
+2026-11-20 之前 `config.tenantConfig.volumeKind` 默认是 `configMap` —— 沿用老清单里那份 ConfigMap 的挂载方式，而 chart 自建的正文对象是 Secret（同名不同 kind），新环境不显式 `--set` 就把卷指向一份不存在的 ConfigMap，Pod 停在 `MountVolume.SetUp failed ... configmap "dsh-tenant-config" not found`。默认值已改为 `secret`；只有正文确实放在 ConfigMap 里的老站点才需要显式置回 `configMap`。
+
 ## Secret 清单
 
 | Secret | 键 | 谁创建 |
 | --- | --- | --- |
 | `dsh-tenant-secret` | `DSH_TENANT_OIDC_SECRET`、`NEWAPI_API_KEY`、`DSH_OBJECT_ACCESS_KEY`、`DSH_OBJECT_SECRET_KEY` | 集群或 `secrets.tenant.create=true` |
 | `dsh-llm-secret` | `DEEPSEEK_API_KEY` | 集群或 `secrets.llm.create=true` |
-| `dsh-tenant-config` | `tenant.config.yaml` | 本 chart（`secrets.tenantConfig.create=true`，默认开） |
+| `dsh-tenant-config` | `tenant.config.yaml` | 本 chart（`secrets.tenantConfig.create=true`，默认开；生产置 false 并指向部署机维护的同构 Secret） |
 
 `DSH_TENANT_OIDC_SECRET` 缺失表现为第一次管理面调用 `INVALID_TOKEN`；`NEWAPI_API_KEY` 是租户配置里 `apiKeyEnv` 指向的变量。
 
-## 已知缺陷：租户配置卷的默认 kind
+## 已知缺陷
 
-`config.tenantConfig.volumeKind` 默认是 `configMap`，而 chart 自建的租户配置对象是 Secret `dsh-tenant-config`：同名不同 kind，卷会指向一份不存在的 ConfigMap，Pod 卡在 `ContainerCreating`。默认值保留是为了不改动已有站点的挂载方式；**新环境必须 `--set config.tenantConfig.volumeKind=secret`**。
+无。租户配置卷默认 kind 的历史问题见上一节。
 
 ## 关键取值
 

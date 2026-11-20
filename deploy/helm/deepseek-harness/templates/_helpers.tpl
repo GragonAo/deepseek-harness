@@ -16,7 +16,7 @@ dsh-tenant-host 是 Service 的 selector 值，Deployment.spec.selector 不可�
 用法：{{ include "dsh.labels" (dict "root" . "component" .Values.names.tenantHost) }}
 
 `app: <component>` 是 selector 用的键，不可改；app.kubernetes.io/* 与 helm.sh/chart 是
-deploy-kit/docs/helm-standard.md §4 要求的标签。
+通用规范要求的标签。
 */}}
 {{- define "dsh.labels" -}}
 {{- $root := .root -}}

@@ -2,8 +2,8 @@
 # deepseek-harness —— 租户宿主 chart
 #
 # 默认值来源：130/171 两个站点的基线取值，已收进本文件。
-# 站点差异不由本文件承担：deploy-kit/scripts/helm-site-map.txt 会把
-# deploy-kit/machines/<站点>.env 里的 16 个键注入到下面这些路径（清单见 README「站点注入键」）。
+# 站点差异不由本文件承担：目标机的 values 文件会覆盖下面这些路径
+# （键名即 values 路径，清单见 README「站点注入键」）。
 #
 # 空值不等于失败：不带任何 -f / --set 也能 helm template 与 helm lint 通过
 # （helm-standard.md §三-1），缺项由 NOTES.txt 在装完后点名。
@@ -126,7 +126,7 @@ dependencies:
 # -----------------------------------------------------------------------------
 # 技能入库共享令牌（宿主 skill_publish -> 平台「我的技战法」）
 # 租户配置只写变量名 DSH_SKILL_INGEST_TOKEN，明文值只在这里的 Secret 里。
-# 两个命名空间各一份同名 Secret、同一个令牌，由 deploy-kit/scripts/skill-ingest-secret.sh 创建。
+# 两个命名空间各一份同名 Secret、同一个令牌，集群里手工建一次。
 skillIngest:
   # Secret 名（已存在则只读引用，不在这里创建）
   secretName: dsh-skill-ingest
@@ -138,7 +138,7 @@ skillIngest:
 # -----------------------------------------------------------------------------
 # Secret
 #
-# 默认都不由本 chart 创建：凭据由 deploy-kit/scripts/up.sh 在集群外建，跨仓共用一把，
+# 默认都不由本 chart 创建：凭据在集群外手工建一次，跨仓共用一把，
 # 多个 chart 各建一份同名 Secret 会互相覆盖。例外是 tenantConfig（见下）。
 # -----------------------------------------------------------------------------
 secrets:
@@ -156,10 +156,15 @@ secrets:
     data: {}
   tenantConfig:
     # 租户配置正文（tenant.config.yaml）挂在同名对象里。正文来自 files/tenant-config.yaml，
-    # 所以这一份默认由 chart 创建 —— 原清单也是这么做的。
+    # 所以这一份默认由 chart 创建。
     #
-    # ⚠ 生产环境请置 create: false：正文里的 mcpServers 段要填真实 token，
-    #   每次 helm upgrade 用仓库里的正文重渲染会把它按占位内容覆盖掉。
+    # ⚠ 生产置 create: false，并让 existingSecret 指向部署机维护的那份（名字自定，
+    #   本文档用 dsh-tenant-config-live）：
+    #     1) 正文里的 mcpServers 段要填真实 token，chart 每次 upgrade 都会用仓库里的
+    #        正文重渲染，把真 token 按占位内容覆盖回去；
+    #     2) 正文随版本演进新增必填段（如 plugins.tool-skill-publish.config.record），
+    #        老站点那份旧正文不会自己长出这些键，装载时会直接报 invalid config。
+    #   做法见 README「租户配置来源」。
     existingSecret: dsh-tenant-config
     create: true
 
@@ -169,7 +174,7 @@ secrets:
 service:
   tenant:
     # 两个站点的基线 Service 是 ClusterIP，没有 nodePort。
-    # 注意 deploy-kit/machines/*.env 里写的是 TENANT_SVC_TYPE，没有任何地方消费它，
+    # 注意站点 values 里若写 TENANT_SVC_TYPE，没有任何地方消费它，
     # 因此这里保持 ClusterIP 才是基线形态。
     # 要真开 NodePort：先把这个键在 helm-site-map.txt 里补上 SVC_TENANT_TYPE 那一行，
     # 或直接 --set service.tenant.type=NodePort。
@@ -210,13 +215,13 @@ config:
   # Ceph RGW（S3）端点，宿主集群内地址。
   cephRgwEndpoint: http://rook-ceph-rgw-dsh-objectstore.rook-ceph.svc:80
 
-  # mcp-client 补丁 ConfigMap。原清单只挂不建：它由 deploy-kit/scripts/up.sh
+  # mcp-client 补丁 ConfigMap。原清单只挂不建：它在集群里手工建
   # 在 MCP_CLIENT_PATCH_SRC 非空时创建（mount 成 mcp-client 的 lib/index.js）。
   # 这个对象不存在时 Pod 会卡在 ContainerCreating（报 references non-existent config key）。
   mcpClientPatchConfigMap: dsh-mcp-client-patch
   mcpClientPatch:
     # 默认 false：130 线上不建它。
-    # 单仓独立部署（没有 up.sh）时置 true 并给 indexJs 全文，见 README。
+    # 单仓独立部署（不经上层编排脚本）时置 true 并给 indexJs 全文，见 README。
     create: false
     indexJs: ""
     # 是否把补丁挂进容器顶掉镜像自带的 mcp-client/lib/index.js。
@@ -225,13 +230,13 @@ config:
     mount: false
 
   tenantConfig:
-    # 租户配置正文挂成 ConfigMap 还是 Secret。
+    # 租户配置正文挂成 Secret 还是 ConfigMap。默认 secret：chart 自建的正文对象是
+    # Secret，部署机自建的那份也是 Secret。
     #
-    # 默认 configMap 保留了集群里已有的那份 ConfigMap 的挂载方式，不是设计意图：
-    # chart 自建的租户配置对象是 Secret（同名 dsh-tenant-config），卷按 ConfigMap 挂时
-    # 两者对不上。单仓独立部署必须改成 secret，否则 Pod 起不来（找不到 ConfigMap）。
-    # 详见 README「已知缺陷」。
-    volumeKind: configMap
+    # 只有把正文放进 ConfigMap 的老站点才显式置 configMap。kind 与对象实际 kind 不一致时
+    # 卷指向一个不存在的对象，Pod 停在挂载阶段（MountVolume.SetUp failed ... not found），
+    # 不在运行期暴露。
+    volumeKind: secret
 
 # -----------------------------------------------------------------------------
 # 租户配置正文里的模型通道（files/tenant-config.yaml）
